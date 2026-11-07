@@ -1,0 +1,34 @@
+[package]
+name = "pocket-android-jni"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "JNI bridge that exposes the PocketHLE core to the Android frontend."
+
+[lib]
+name = "pockethle_jni"
+crate-type = ["cdylib", "rlib"]
+
+[features]
+# Default builds include the real ARM CPU (unicorn-engine). The Android
+# cross-compile from an x86_64 Linux host to aarch64-linux-android /
+# armv7-linux-androideabi works only when `cargo ndk` is invoked with
+# `ANDROID_NDK_HOME` set; the toolchain glue lives in
+# `.cargo/config.toml` (`CMAKE_TOOLCHAIN_FILE_<target>`) and points at
+# the per-ABI wrappers in `build-support/cmake/`. Pass
+# `--no-default-features` to fall back to the trace-only stub backend.
+default = ["unicorn"]
+unicorn = ["pocket-core/unicorn"]
+
+[dependencies]
+anyhow.workspace = true
+log.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+android_logger = "0.13"
+image = { version = "0.24", default-features = false, features = ["png"] }
+jni = "0.21"
+pocket-core = { path = "../../crates/pocket-core" }
+pocket-library = { path = "../../crates/pocket-library" }

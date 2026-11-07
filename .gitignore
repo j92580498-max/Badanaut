@@ -1,0 +1,48 @@
+# Rust
+/target
+**/*.rs.bk
+Cargo.lock.bak
+
+# Build artifacts
+*.so
+*.dylib
+*.dll
+*.a
+*.lib
+*.rlib
+*.pdb
+
+# IDEs / editors
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Android
+frontends/pocket-android/.gradle/
+frontends/pocket-android/build/
+frontends/pocket-android/app/build/
+frontends/pocket-android/local.properties
+frontends/pocket-android/app/.cxx/
+frontends/pocket-android/app/src/main/jniLibs/
+
+# Game / runtime artifacts (do NOT commit copyrighted game data)
+/game-data/
+/cab-extracted/
+*.cab
+*.exe
+*.dll.bin
+*.apk
+frontends/pocket-android/app/src/main/assets/bada/*.zip
+frontends/pocket-android/app/src/main/assets/bada/libstdc++.so*
+/dist/
+roms/
+
+# Logs
+*.log
+emulator-trace.json
+
+# Python venv (helper scripts)
+.venv/
+__pycache__/

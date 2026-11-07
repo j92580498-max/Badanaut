@@ -114,6 +114,12 @@ class MainActivity : AppCompatActivity() {
 
     override fun onOptionsItemSelected(item: MenuItem): Boolean = when (item.itemId) {
         R.id.action_bada_setup -> { if (!busy) showBadaSetup(); true }
+        R.id.action_bada_log -> {
+            if (!busy) runOperation(R.string.bada_log_preparing, { BadaDiagnostics.snapshot(this) }) {
+                BadaDiagnostics.share(this, it)
+            }
+            true
+        }
         R.id.action_settings -> { startActivity(Intent(this, SettingsActivity::class.java)); true }
         R.id.action_about -> {
             AlertDialog.Builder(this).setTitle(R.string.about_title).setMessage(R.string.bada_about)

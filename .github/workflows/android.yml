@@ -14,6 +14,23 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  graphics:
+    name: Test Bada OpenGL ES rendering
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+      - name: Install graphics test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build pkg-config libsdl2-dev libunicorn-dev libgles-dev libegl1-mesa-dev xvfb xauth
+      - name: Build graphics probe
+        run: |
+          cmake -S frontends/pocket-android/tests/native -B .build/bada-gles -G Ninja
+          cmake --build .build/bada-gles --parallel 2
+      - name: Check rendered pixels through the guest graphics calls
+        run: xvfb-run -a env SDL_VIDEODRIVER=x11 LIBGL_ALWAYS_SOFTWARE=1 ctest --test-dir .build/bada-gles --output-on-failure
+
   android:
     name: Build and test Android APK
     runs-on: ubuntu-22.04

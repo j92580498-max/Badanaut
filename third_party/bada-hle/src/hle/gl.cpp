@@ -1,10 +1,15 @@
 #include "cpu.h"
 #include "dispatch.h"
 #include <SDL2/SDL.h>
+#ifdef BADA_GLES_BACKEND
+#include <GLES/gl.h>
+#include <GLES2/gl2.h>
+#else
 // SDL_opengl.h pulls in <windows.h> in the right order on MSVC (so GL/gl.h's
 // WINGDIAPI/APIENTRY are defined) and bundles SDL_opengl_glext.h, which supplies
 // the GL 2.0+/glext typedefs and tokens we resolve via SDL_GL_GetProcAddress.
 #include <SDL2/SDL_opengl.h>
+#endif
 #include <algorithm>
 #include <functional>
 #include <cstdio>
@@ -12,7 +17,7 @@
 #include <map>
 #include <vector>
 
-// GL ES 2.0 -> host desktop GL (compatibility profile from SDL). The binary's GL
+// GL ES 2.0 -> host GL (desktop compatibility or native ES from SDL). The binary's GL
 // symbols are suffixed `_2` (e.g. glClear_2); we strip the suffix, resolve the
 // host fn via SDL_GL_GetProcAddress, and marshal args from guest regs.
 //
@@ -25,6 +30,12 @@
 namespace {
 
 SDL_Window* g_window = nullptr;
+#ifdef BADA_GLES_BACKEND
+// ES 1.1 only accepts STATIC_DRAW and DYNAMIC_DRAW buffer usage.
+constexpr GLenum client_buffer_usage = GL_DYNAMIC_DRAW;
+#else
+constexpr GLenum client_buffer_usage = GL_STREAM_DRAW;
+#endif
 GLuint g_canvas_texture = 0;
 bool g_canvas_window_sized = false;
 void fit_window(GLint x, GLint y, GLsizei w, GLsizei h); // defined in the ES1 section
@@ -38,6 +49,7 @@ F host(const char* name) {
         return (F)it->second;
     }
     void* p = SDL_GL_GetProcAddress(name);
+    if (!p) printf("[gl] host entry point unavailable: %s\n", name);
     cache[name] = p;
     return (F)p;
 }
@@ -74,10 +86,12 @@ typedef void (*genfn)(GLsizei, GLuint*);
 typedef void (*bindfn)(GLenum, GLuint);
 typedef void (*datafn)(GLenum, GLsizeiptr, const void*, GLenum);
 void ensure_vao() {
+#ifndef BADA_GLES_BACKEND
     if (!g_vao) {
         host<void (*)(GLsizei, GLuint*)>("glGenVertexArrays")(1, &g_vao);
     }
     host<void (*)(GLuint)>("glBindVertexArray")(g_vao);
+#endif
 }
 
 // ============================ GL handlers ============================
@@ -92,14 +106,15 @@ void gl_viewport(Cpu& c) {
 void gl_enable(Cpu& c) { glEnable(c.arg32(0)); }
 void gl_disable(Cpu& c) { glDisable(c.arg32(0)); }
 void gl_finish(Cpu&) { glFinish(); }
-void gl_geterror(Cpu& c) { c.set_ret32(glGetError()); }
 
 // Force the GLSL-source shader path (Mali binary shaders don't exist on desktop).
 void gl_getbooleanv(Cpu& c) {
     GLenum pn = c.arg32(0);
     uint32_t out = c.arg32(1);
-    uint8_t v = (pn == GL_SHADER_COMPILER) ? 1 : 0;
-    c.write_mem(out, &v, 1);
+    GLboolean values[4] = {};
+    if (pn == GL_SHADER_COMPILER) values[0] = GL_TRUE;
+    else glGetBooleanv(pn, values);
+    c.write_mem(out, values, pn == GL_COLOR_WRITEMASK ? 4 : 1);
 }
 // Number of values glGetIntegerv writes for a pname (most are 1; some are 2/4).
 int getiv_count(GLenum pn) {
@@ -174,6 +189,17 @@ void gl_linkprogram(Cpu& c) {
     }
 }
 void gl_useprogram(Cpu& c) { host<void (*)(GLuint)>("glUseProgram")(c.arg32(0)); }
+void gl_uniform1i(Cpu& c) { host<void (*)(GLint, GLint)>("glUniform1i")(c.arg32(0), c.arg32(1)); }
+void gl_deleteshader(Cpu& c) { host<void (*)(GLuint)>("glDeleteShader")(c.arg32(0)); }
+void gl_deleteprogram(Cpu& c) { host<void (*)(GLuint)>("glDeleteProgram")(c.arg32(0)); }
+void gl_getstring(Cpu& c) {
+    const auto* value = glGetString(c.arg32(0));
+    if (!value) { c.set_ret32(0); return; }
+    const size_t length = strlen((const char*)value) + 1;
+    uint32_t out = c.alloc(length);
+    c.write_mem(out, value, length);
+    c.set_ret32(out);
+}
 
 // glShaderSource(shader, count, const char** strings, const int* lengths)
 void gl_shadersource(Cpu& c) {
@@ -252,7 +278,11 @@ void gl_uniformmatrix4fv(Cpu& c) {
 // Upload each enabled attrib's guest array into its VBO and wire it up.
 void bind_client_arrays(Cpu& c, uint32_t vert_count) {
     for (auto& [idx, a] : g_attribs) {
-        if (!a.enabled || !a.guest_ptr) {
+        if (!a.enabled) {
+            host<void (*)(GLuint)>("glDisableVertexAttribArray")(idx);
+            continue;
+        }
+        if (!a.guest_ptr) {
             continue;
         }
         uint32_t stride = a.stride ? a.stride : a.size * type_size(a.type);
@@ -263,7 +293,7 @@ void bind_client_arrays(Cpu& c, uint32_t vert_count) {
             host<genfn>("glGenBuffers")(1, &vbo);
         }
         host<bindfn>("glBindBuffer")(GL_ARRAY_BUFFER, vbo);
-        host<datafn>("glBufferData")(GL_ARRAY_BUFFER, data.size(), data.data(), GL_STREAM_DRAW);
+        host<datafn>("glBufferData")(GL_ARRAY_BUFFER, data.size(), data.data(), client_buffer_usage);
         host<void (*)(GLuint, GLint, GLenum, GLboolean, GLsizei, const void*)>("glVertexAttribPointer")(idx, a.size, a.type, a.norm, a.stride, (const void*)0);
         host<void (*)(GLuint)>("glEnableVertexAttribArray")(idx);
     }
@@ -291,7 +321,7 @@ void gl_drawelements(Cpu& c) {
         host<genfn>("glGenBuffers")(1, &g_ebo);
     }
     host<bindfn>("glBindBuffer")(GL_ELEMENT_ARRAY_BUFFER, g_ebo);
-    host<datafn>("glBufferData")(GL_ELEMENT_ARRAY_BUFFER, idx.size(), idx.data(), GL_STREAM_DRAW);
+    host<datafn>("glBufferData")(GL_ELEMENT_ARRAY_BUFFER, idx.size(), idx.data(), client_buffer_usage);
     host<void (*)(GLenum, GLsizei, GLenum, const void*)>("glDrawElements")(mode, count, type, (const void*)0);
     static bool once = false;
     if (!once) {
@@ -325,7 +355,13 @@ GLuint g_ff_vbo[4] = {0, 0, 0, 0};
 // state forwards
 void g1_clear(Cpu& c) { glClear(c.arg32(0)); }
 void g1_clearcolor(Cpu& c) { glClearColor(c.argf32(0), c.argf32(1), c.argf32(2), c.argf32(3)); }
-void g1_cleardepthf(Cpu& c) { glClearDepth(c.argf32(0)); }
+void g1_cleardepthf(Cpu& c) {
+#ifdef BADA_GLES_BACKEND
+    glClearDepthf(c.argf32(0));
+#else
+    glClearDepth(c.argf32(0));
+#endif
+}
 void g1_enable(Cpu& c) { glEnable(c.arg32(0)); }
 void g1_disable(Cpu& c) { glDisable(c.arg32(0)); }
 void g1_depthfunc(Cpu& c) { glDepthFunc(c.arg32(0)); }
@@ -359,14 +395,33 @@ void g1_viewport(Cpu& c) {
 }
 void g1_finish(Cpu&) { glFinish(); }
 void g1_flush(Cpu&) { glFlush(); }
-void g1_color4ub(Cpu& c) { glColor4ub(c.arg32(0), c.arg32(1), c.arg32(2), c.arg32(3)); }
+void g1_color4ub(Cpu& c) {
+#ifdef BADA_GLES_BACKEND
+    glColor4f((uint8_t)c.arg32(0) / 255.0f, (uint8_t)c.arg32(1) / 255.0f,
+              (uint8_t)c.arg32(2) / 255.0f, (uint8_t)c.arg32(3) / 255.0f);
+#else
+    glColor4ub(c.arg32(0), c.arg32(1), c.arg32(2), c.arg32(3));
+#endif
+}
 // matrix
 void g1_matrixmode(Cpu& c) { glMatrixMode(c.arg32(0)); }
 void g1_loadidentity(Cpu&) { glLoadIdentity(); }
 void g1_pushmatrix(Cpu&) { glPushMatrix(); }
 void g1_popmatrix(Cpu&) { glPopMatrix(); }
-void g1_frustumf(Cpu& c) { glFrustum(c.argf32(0), c.argf32(1), c.argf32(2), c.argf32(3), c.argf32(4), c.argf32(5)); }
-void g1_orthof(Cpu& c) { glOrtho(c.argf32(0), c.argf32(1), c.argf32(2), c.argf32(3), c.argf32(4), c.argf32(5)); }
+void g1_frustumf(Cpu& c) {
+#ifdef BADA_GLES_BACKEND
+    glFrustumf(c.argf32(0), c.argf32(1), c.argf32(2), c.argf32(3), c.argf32(4), c.argf32(5));
+#else
+    glFrustum(c.argf32(0), c.argf32(1), c.argf32(2), c.argf32(3), c.argf32(4), c.argf32(5));
+#endif
+}
+void g1_orthof(Cpu& c) {
+#ifdef BADA_GLES_BACKEND
+    glOrthof(c.argf32(0), c.argf32(1), c.argf32(2), c.argf32(3), c.argf32(4), c.argf32(5));
+#else
+    glOrtho(c.argf32(0), c.argf32(1), c.argf32(2), c.argf32(3), c.argf32(4), c.argf32(5));
+#endif
+}
 void g1_translatef(Cpu& c) { glTranslatef(c.argf32(0), c.argf32(1), c.argf32(2)); }
 void g1_rotatef(Cpu& c) { glRotatef(c.argf32(0), c.argf32(1), c.argf32(2), c.argf32(3)); }
 void g1_scalef(Cpu& c) { glScalef(c.argf32(0), c.argf32(1), c.argf32(2)); }
@@ -464,6 +519,13 @@ void g1_geterror(Cpu& c) {
 // export the EXT names, so fall back to those.
 template <class F>
 F fbo(const char* core, const char* ext) {
+#ifdef BADA_GLES_BACKEND
+    int major = 0;
+    SDL_GL_GetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, &major);
+    if (major == 1) {
+        return host<F>((std::string(core) + "OES").c_str());
+    }
+#endif
     F f = host<F>(core);
     return f ? f : host<F>(ext);
 }
@@ -575,7 +637,7 @@ void ff_bind(Cpu& c, FFArray& a, int slot, void (*set)(FFArray&, GLuint), uint32
         host<genfn>("glGenBuffers")(1, &g_ff_vbo[slot]);
     }
     host<bindfn>("glBindBuffer")(GL_ARRAY_BUFFER, g_ff_vbo[slot]);
-    host<datafn>("glBufferData")(GL_ARRAY_BUFFER, d.size(), d.data(), GL_STREAM_DRAW);
+    host<datafn>("glBufferData")(GL_ARRAY_BUFFER, d.size(), d.data(), client_buffer_usage);
     set(a, 0);
 }
 void ff_bind_all(Cpu& c, uint32_t vcount) {
@@ -731,6 +793,14 @@ void egl_swapbuffers(Cpu& c) {
 namespace hle {
 void gl_set_window(void* w) { g_window = (SDL_Window*)w; }
 void gl_set_preswap(std::function<void(Cpu&)> fn) { g_preswap = std::move(fn); }
+#ifdef BADA_GLES_BACKEND
+// Implemented alongside the Android frontend, using ES arrays/shaders instead
+// of desktop immediate mode. Keep the game's GL dispatch shared with desktop.
+void gles_present_canvas(Cpu& cpu, void* window, uint32_t pixels, int width, int height);
+void gl_present_canvas(Cpu& cpu, uint32_t pixels, int width, int height) {
+    gles_present_canvas(cpu, g_window, pixels, width, height);
+}
+#else
 void gl_present_canvas(Cpu& cpu, uint32_t pixels, int width, int height) {
     if (!g_window || !pixels || width <= 0 || height <= 0) {
         return;
@@ -792,6 +862,7 @@ void gl_present_canvas(Cpu& cpu, uint32_t pixels, int width, int height) {
     glDisable(GL_TEXTURE_2D);
     SDL_GL_SwapWindow(g_window);
 }
+#endif
 
 void register_gl() {
     register_handler("glClearColor_2", gl_clearcolor);
@@ -800,7 +871,7 @@ void register_gl() {
     register_handler("glEnable_2", gl_enable);
     register_handler("glDisable_2", gl_disable);
     register_handler("glFinish_2", gl_finish);
-    register_handler("glGetError_2", gl_geterror);
+    register_handler("glGetError_2", g1_geterror);
     register_handler("glGetBooleanv_2", gl_getbooleanv);
     register_handler("glGetIntegerv_2", gl_getintegerv);
     register_handler("glCreateShader_2", gl_createshader);
@@ -809,6 +880,10 @@ void register_gl() {
     register_handler("glCompileShader_2", gl_compileshader);
     register_handler("glLinkProgram_2", gl_linkprogram);
     register_handler("glUseProgram_2", gl_useprogram);
+    register_handler("glUniform1i_2", gl_uniform1i);
+    register_handler("glDeleteShader_2", gl_deleteshader);
+    register_handler("glDeleteProgram_2", gl_deleteprogram);
+    register_handler("glGetString_2", gl_getstring);
     register_handler("glShaderSource_2", gl_shadersource);
     register_handler("glGetShaderiv_2", gl_getshaderiv);
     register_handler("glGetProgramiv_2", gl_getprogramiv);
@@ -821,6 +896,30 @@ void register_gl() {
     register_handler("glUniformMatrix4fv_2", gl_uniformmatrix4fv);
     register_handler("glDrawElements_2", gl_drawelements);
     register_handler("glDrawArrays_2", gl_drawarrays);
+
+    // These ES 2 entry points have the same argument layout as ES 1.
+    register_handler("glClearDepthf_2", g1_cleardepthf);
+    register_handler("glDepthFunc_2", g1_depthfunc);
+    register_handler("glDepthMask_2", g1_depthmask);
+    register_handler("glCullFace_2", g1_cullface);
+    register_handler("glBlendFunc_2", g1_blendfunc);
+    register_handler("glFlush_2", g1_flush);
+    register_handler("glActiveTexture_2", g1_activetexture);
+    register_handler("glBindTexture_2", g1_bindtexture);
+    register_handler("glTexParameteri_2", g1_texparameteri);
+    register_handler("glGenTextures_2", g1_gentextures);
+    register_handler("glDeleteTextures_2", g1_deletetextures);
+    register_handler("glTexImage2D_2", g1_teximage2d);
+    register_handler("glTexSubImage2D_2", g1_texsubimage2d);
+    register_handler("glPixelStorei_2", g1_pixelstorei);
+    register_handler("glBindBuffer_2", g1_bindbuffer);
+    register_handler("glGenBuffers_2", g1_genbuffers);
+    register_handler("glBufferData_2", g1_bufferdata);
+    register_handler("glBindFramebuffer_2", g1_bindframebuffer);
+    register_handler("glGenFramebuffers_2", g1_genframebuffers);
+    register_handler("glDeleteFramebuffers_2", g1_deleteframebuffers);
+    register_handler("glFramebufferTexture2D_2", g1_framebuffertexture2d);
+    register_handler("glCheckFramebufferStatus_2", g1_checkframebufferstatus);
 
     // ---- GL ES 1.x fixed-function (FruitNinja) ----
     register_handler("glClear_1", g1_clear);

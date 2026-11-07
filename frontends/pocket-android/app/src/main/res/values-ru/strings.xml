@@ -49,4 +49,8 @@
     <string name="remove_title">Удалить игру?</string>
     <string name="remove_message">Игра %1$s и её распакованные файлы будут удалены.</string>
     <string name="remove">Удалить</string>
+    <string name="bada_share_log">Отправить журнал Bada</string>
+    <string name="bada_log_preparing">Подготовка журнала запуска…</string>
+    <string name="bada_log_empty">Сначала запустите игру Bada, затем отправьте журнал.</string>
+    <string name="bada_log_failed">Не удалось подготовить журнал запуска: %1$s</string>
 </resources>

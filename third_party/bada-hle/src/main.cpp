@@ -7,6 +7,7 @@
 #include <SDL2/SDL_opengl.h>
 #else
 #include <GLES2/gl2.h>
+#include "diagnostic_log.h"
 #endif
 #include <cctype>
 #include <condition_variable>
@@ -18,6 +19,7 @@
 #include <iostream>
 #include <map>
 #include <mutex>
+#include <memory>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -29,6 +31,7 @@
 #include "elf_loader.h"
 #include "guest.h"
 #include "hle/dispatch.h"
+#include "hle/gl_api.h"
 #include "ui_overlay.h"
 namespace fs = std::filesystem;
 
@@ -749,6 +752,10 @@ int main(int argc, char** argv) {
         ("libstdcxx", "guest libstdc++.so to map (or env BADA_LIBSTDCXX); found automatically if omitted",
          cxxopts::value<std::string>()->default_value(""))   //
         ("h,help", "show this help");
+#ifdef __ANDROID__
+    opts.add_options()("log-file", "capture native diagnostics", cxxopts::value<std::string>()->default_value(""));
+    auto diagnostics = std::make_unique<DiagnosticLog>();
+#endif
     opts.parse_positional({"input", "app-id", "max-frames"});
     opts.positional_help("<app-dir-or-exe> [AppId] [maxFrames]");
 
@@ -756,6 +763,10 @@ int main(int argc, char** argv) {
     int max_frames = 0;
     try {
         auto res = opts.parse(argc, argv);
+#ifdef __ANDROID__
+        const auto log_path = res["log-file"].as<std::string>();
+        if (!log_path.empty()) diagnostics->start(log_path);
+#endif
         if (res.count("help") || !res.count("input")) {
             printf("%s\n", opts.help().c_str());
             return res.count("help") ? 0 : 2;
@@ -806,6 +817,15 @@ int main(int argc, char** argv) {
     printf("[boot] exe=%s\n[boot] package=%s AppId=%s frames=%s\n", exe.c_str(), root.c_str(),
            appid.c_str(), max_frames ? std::to_string(max_frames).c_str() : "infinite");
 
+    // Read imports before creating the host context: fixed-function games need
+    // ES 1 on Android, while shaders and the Canvas presenter need ES 2.
+    ElfImage img;
+    std::string err;
+    if (!img.load(exe, err)) {
+        printf("load failed: %s\n", err.c_str());
+        return 1;
+    }
+
     // ---- SDL window + GL context (compatibility profile for fixed-function) ----
     SDL_SetMainReady(); // we used SDL_MAIN_HANDLED; tell SDL the entry point ran
 #ifdef __ANDROID__
@@ -817,7 +837,9 @@ int main(int argc, char** argv) {
     }
 #ifdef __ANDROID__
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_ES);
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 2);
+    const int gles_version = hle::gles_context_version(img.imports);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, gles_version);
+    // EGL selects the ES 1.x API with client version 1.
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
 #else
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_COMPATIBILITY);
@@ -842,7 +864,11 @@ int main(int argc, char** argv) {
         return 1;
     }
     printf("[gl] vendor=%s renderer=%s\n", glGetString(GL_VENDOR), glGetString(GL_RENDERER));
-    printf("[gl] version=%s glsl=%s\n", glGetString(GL_VERSION), glGetString(GL_SHADING_LANGUAGE_VERSION));
+    printf("[gl] version=%s\n", glGetString(GL_VERSION));
+#ifdef __ANDROID__
+    if (gles_version >= 2)
+#endif
+    printf("[gl] glsl=%s\n", glGetString(GL_SHADING_LANGUAGE_VERSION));
     {
         int pf = 0;
         SDL_GL_GetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, &pf);
@@ -858,14 +884,6 @@ int main(int argc, char** argv) {
     glClearColor(0.1f, 0.1f, 0.12f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT);
     SDL_GL_SwapWindow(win);
-
-    // ---- Load the bada executable ----
-    ElfImage img;
-    std::string err;
-    if (!img.load(exe, err)) {
-        printf("load failed: %s\n", err.c_str());
-        return 1;
-    }
 
     // ---- The guest libstdc++, required (--libstdcxx / BADA_LIBSTDCXX, else found) ----
     // The bada SDK ships the ARM libstdc++.so.6.0.12 these apps were linked

@@ -46,15 +46,19 @@ add_library(bada-android SHARED
     "${BADA_ROOT}/cpu.cpp"
     "${BADA_ROOT}/hle/dispatch.cpp"
     "${BADA_ROOT}/hle/libc.cpp"
+    "${BADA_ROOT}/hle/gl.cpp"
     "${BADA_ROOT}/hle/osp.cpp"
     "${BADA_ROOT}/hle/io.cpp"
     "${BADA_ROOT}/hle/ui.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/gl_android.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/diagnostic_log.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/ui_overlay_android.cpp"
 )
 set_target_properties(bada-android PROPERTIES OUTPUT_NAME main)
+target_compile_definitions(bada-android PRIVATE BADA_GLES_BACKEND=1)
 target_include_directories(bada-android PRIVATE
     "${BADA_ROOT}"
+    "${CMAKE_CURRENT_LIST_DIR}"
     "${SDL_INCLUDE_COMPAT}"
     "${UNICORN_INCLUDE}"
 )
@@ -65,6 +69,7 @@ target_link_libraries(bada-android PRIVATE
     cxxopts
     android
     log
+    GLESv1_CM
     GLESv2
     EGL
 )

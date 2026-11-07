@@ -7,6 +7,10 @@
         android:title="@string/bada_setup_title"
         app:showAsAction="never" />
     <item
+        android:id="@+id/action_bada_log"
+        android:title="@string/bada_share_log"
+        app:showAsAction="never" />
+    <item
         android:id="@+id/action_settings"
         android:icon="@drawable/ic_settings"
         android:title="@string/pocket_settings_title"

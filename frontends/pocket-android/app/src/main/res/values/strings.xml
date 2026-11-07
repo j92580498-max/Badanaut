@@ -154,4 +154,8 @@
         <item>landscape</item>
     </string-array>
     <string name="toggle_fullscreen">Toggle controls and fullscreen</string>
+    <string name="bada_share_log">Share Bada log</string>
+    <string name="bada_log_preparing">Preparing launch log…</string>
+    <string name="bada_log_empty">Launch a Bada game first, then share its log.</string>
+    <string name="bada_log_failed">Could not prepare the launch log: %1$s</string>
 </resources>

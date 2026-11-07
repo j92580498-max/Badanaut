@@ -1,7 +1,11 @@
 #define SDL_MAIN_HANDLED
 #include <SDL2/SDL.h>
+#ifdef BADA_TEST_DESKTOP
+#include <SDL2/SDL_opengl.h>
+#else
 #include <GLES/gl.h>
 #include <GLES2/gl2.h>
+#endif
 #include "cpu.h"
 #include "hle/gl_api.h"
 #include <array>
@@ -9,6 +13,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <stdexcept>
+#include <vector>
 
 namespace {
 void require(bool value, const char* message) {
@@ -115,6 +120,15 @@ void render(Cpu& cpu, int api) {
         call(cpu, "glLoadIdentity_1");
         call(cpu, "glEnable_1", {GL_TEXTURE_2D});
         call(cpu, "glColor4ub_1", {255, 255, 255, 255});
+        const float replace = GL_REPLACE;
+        uint32_t replace_bits;
+        memcpy(&replace_bits, &replace, sizeof replace_bits);
+        if (cpu.hard_float) uc_reg_write(cpu.uc, UC_ARM_REG_S0, &replace);
+        call(cpu, "glTexEnvf_1", {GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, replace_bits});
+        GLint texture_mode = 0;
+        glGetTexEnviv(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, &texture_mode);
+        require(texture_mode == GL_REPLACE, "mixed integer/float glTexEnvf ABI failed");
+        call(cpu, "glTexEnvi_1", {GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE});
         call(cpu, "glEnableClientState_1", {GL_VERTEX_ARRAY});
         call(cpu, "glEnableClientState_1", {GL_TEXTURE_COORD_ARRAY});
         call(cpu, "glVertexPointer_1", {2, GL_FLOAT, 16, points});
@@ -167,13 +181,14 @@ void render(Cpu& cpu, int api) {
     require(glGetError() == GL_NO_ERROR, "guest draw generated a GL error");
 
     // The Canvas path must also work when the game uses either ES context.
-    const uint8_t canvas[] = {255,255,0,0}; // opaque bada cyan in 0x00RRGGBB
-    hle::gl_present_canvas(cpu, copy(cpu, canvas, sizeof canvas), 1, 1);
+    std::vector<uint32_t> canvas(64 * 64, 0x0000ffff); // opaque bada cyan in 0x00RRGGBB
+    hle::gl_present_canvas(cpu, copy(cpu, canvas.data(), canvas.size() * 4), 64, 64);
     pixel(32, 32, {0, 255, 255});
-    const uint8_t red[] = {0,0,255,0}, blue[] = {255,0,0,0};
-    hle::gl_present_canvas(cpu, copy(cpu, red, sizeof red), 1, 1);
+    std::fill(canvas.begin(), canvas.end(), 0x00ff0000);
+    hle::gl_present_canvas(cpu, copy(cpu, canvas.data(), canvas.size() * 4), 64, 64);
     pixel(32, 32, {255, 0, 0});
-    hle::gl_present_canvas(cpu, copy(cpu, blue, sizeof blue), 1, 1);
+    std::fill(canvas.begin(), canvas.end(), 0x000000ff);
+    hle::gl_present_canvas(cpu, copy(cpu, canvas.data(), canvas.size() * 4), 64, 64);
     pixel(32, 32, {0, 0, 255}); // also exercises reuse of the Canvas texture
     require(glGetError() == GL_NO_ERROR, "Canvas generated a GL error");
     call(cpu, "glClear" + suffix, {GL_COLOR_BUFFER_BIT});
@@ -182,6 +197,44 @@ void render(Cpu& cpu, int api) {
     pixel(20, 20, {0, 255, 0});
     pixel(44, 44, {255, 0, 255});
     require(glGetError() == GL_NO_ERROR, "guest rendering after Canvas generated a GL error");
+
+    // Dynamic sprites interleave positions, UVs and byte colors. Their next
+    // draw must see guest updates even when upload staging/storage is reused.
+    const uint32_t interleaved = cpu.alloc(80);
+    for (int vertex = 0; vertex < 4; ++vertex) {
+        cpu.write_mem(interleaved + vertex * 20, vertices + vertex * 4, 16);
+        cpu.write_u32(interleaved + vertex * 20 + 16, 0xffffffff);
+    }
+    if (api == 1) {
+        call(cpu, "glVertexPointer_1", {2, GL_FLOAT, 20, interleaved});
+        call(cpu, "glTexCoordPointer_1", {2, GL_FLOAT, 20, interleaved + 8});
+        call(cpu, "glColorPointer_1", {4, GL_UNSIGNED_BYTE, 20, interleaved + 16});
+        call(cpu, "glEnableClientState_1", {GL_COLOR_ARRAY});
+    } else {
+        call(cpu, "glVertexAttribPointer_2", {0, 2, GL_FLOAT, GL_FALSE, 20, interleaved});
+        call(cpu, "glVertexAttribPointer_2", {1, 2, GL_FLOAT, GL_FALSE, 20, interleaved + 8});
+    }
+    call(cpu, "glClear" + suffix, {GL_COLOR_BUFFER_BIT});
+    call(cpu, "glDrawArrays" + suffix, {GL_TRIANGLE_STRIP, 0, 4});
+    pixel(20, 20, {0, 255, 0});
+    pixel(44, 44, {255, 0, 255});
+    for (int vertex = 0; vertex < 4; ++vertex) {
+        const float uv[] = {1 - vertices[vertex * 4 + 2], 1 - vertices[vertex * 4 + 3]};
+        cpu.write_mem(interleaved + vertex * 20 + 8, uv, sizeof uv);
+    }
+    call(cpu, "glClear" + suffix, {GL_COLOR_BUFFER_BIT});
+    call(cpu, "glDrawArrays" + suffix, {GL_TRIANGLE_STRIP, 0, 4});
+    pixel(20, 20, {255, 0, 255});
+    pixel(44, 44, {0, 255, 0});
+    if (api == 1) {
+        call(cpu, "glDisableClientState_1", {GL_COLOR_ARRAY});
+        call(cpu, "glVertexPointer_1", {2, GL_FLOAT, 16, points});
+        call(cpu, "glTexCoordPointer_1", {2, GL_FLOAT, 16, points + 8});
+    } else {
+        call(cpu, "glVertexAttribPointer_2", {0, 2, GL_FLOAT, GL_FALSE, 16, points});
+        call(cpu, "glVertexAttribPointer_2", {1, 2, GL_FLOAT, GL_FALSE, 16, points + 8});
+    }
+    require(glGetError() == GL_NO_ERROR, "dynamic interleaved uploads generated a GL error");
 }
 
 void resize_test(Cpu& cpu, int api, SDL_Window* window) {
@@ -269,9 +322,15 @@ int main(int argc, char** argv) {
         require(hle::gles_context_version({}) == 2, "Canvas context selection failed");
         SDL_SetMainReady();
         require(SDL_Init(SDL_INIT_VIDEO) == 0, SDL_GetError());
+#ifdef BADA_TEST_DESKTOP
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_COMPATIBILITY);
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 2);
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 1);
+#else
         SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_ES);
         SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, api);
         SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
+#endif
         SDL_GL_SetAttribute(SDL_GL_RED_SIZE, 8);
         SDL_GL_SetAttribute(SDL_GL_GREEN_SIZE, 8);
         SDL_GL_SetAttribute(SDL_GL_BLUE_SIZE, 8);
@@ -279,6 +338,7 @@ int main(int argc, char** argv) {
         SDL_Window* window = SDL_CreateWindow("Bada GL test", 0, 0, 64, 64, SDL_WINDOW_OPENGL | SDL_WINDOW_HIDDEN);
         require(window != nullptr, SDL_GetError());
         auto context = SDL_GL_CreateContext(window);
+#ifndef BADA_TEST_DESKTOP
         if (!context && api == 1 && std::strstr(SDL_GetError(), "EGL_BAD_ALLOC")) {
             // Some Mesa software drivers advertise ES 1 configs but cannot
             // create an ES 1 context, including on the Linux CI runner. This
@@ -288,6 +348,7 @@ int main(int argc, char** argv) {
             SDL_Quit();
             return 77;
         }
+#endif
         require(context != nullptr, SDL_GetError());
         printf("Host GL: %s, %s\n", glGetString(GL_VERSION), glGetString(GL_RENDERER));
         hle::gl_set_window(window);
@@ -307,7 +368,11 @@ int main(int argc, char** argv) {
         SDL_GL_DeleteContext(context);
         SDL_DestroyWindow(window);
         SDL_Quit();
-        printf("ES %d %s: guest textures, arrays, indices, swap and Canvas passed\n", api, argv[2]);
+#ifdef BADA_TEST_DESKTOP
+        printf("Desktop compatibility GL: ES %d %s guest textures, arrays, indices, swap and Canvas passed\n", api, argv[2]);
+#else
+        printf("Native ES %d %s: guest textures, arrays, indices, swap and Canvas passed\n", api, argv[2]);
+#endif
         return 0;
     } catch (const std::exception& error) {
         fprintf(stderr, "FAIL: %s\n", error.what());

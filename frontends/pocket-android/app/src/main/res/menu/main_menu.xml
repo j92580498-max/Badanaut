@@ -2,14 +2,14 @@
 <menu xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto">
     <item
-        android:id="@+id/action_bada_sky_force"
+        android:id="@+id/action_bada_setup"
         android:icon="@drawable/ic_game"
-        android:title="@string/menu_bada_sky_force"
+        android:title="@string/bada_setup_title"
         app:showAsAction="never" />
     <item
         android:id="@+id/action_settings"
         android:icon="@drawable/ic_settings"
-        android:title="@string/menu_settings"
+        android:title="@string/pocket_settings_title"
         app:showAsAction="never" />
     <item
         android:id="@+id/action_about"

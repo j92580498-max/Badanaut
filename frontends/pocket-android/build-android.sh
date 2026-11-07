@@ -40,12 +40,12 @@ cargo ndk \
     --target armeabi-v7a \
     --platform 24 \
     --output-dir "$JNI_LIBS" \
-    build --release --package pocket-android-jni
+    build --locked --release --package pocket-android-jni
 
 for item in "arm64-v8a:aarch64-linux-android" "armeabi-v7a:armv7-linux-androideabi"; do
     abi="${item%%:*}"
     triple="${item#*:}"
-    unicorn="$(find "$CARGO_TARGET_DIR/$triple/release/build" -type f -path '*/unicorn-engine-sys-*/out/lib/libunicorn.so' -print -quit)"
+    unicorn="$(find -L "$CARGO_TARGET_DIR/$triple/release/build" -type f -path '*/unicorn-engine-sys-*/out/lib/libunicorn.so' -print -quit)"
     if [[ -z "$unicorn" ]]; then
         echo "Could not find libunicorn.so for $abi under $CARGO_TARGET_DIR" >&2
         exit 1
@@ -58,7 +58,7 @@ cd "$FRONTEND_DIR"
 ./gradlew --no-daemon --max-workers=2 :app:assembleDebug
 
 APK="$FRONTEND_DIR/app/build/outputs/apk/debug/app-debug.apk"
-OUTPUT="$REPO_ROOT/dist/PocketHLE-Bada-Android.apk"
+OUTPUT="$REPO_ROOT/dist/Badanaut-Android.apk"
 if [[ ! -s "$APK" ]]; then
     echo "Gradle did not produce $APK" >&2
     exit 1

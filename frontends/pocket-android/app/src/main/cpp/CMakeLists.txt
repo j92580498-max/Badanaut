@@ -12,7 +12,7 @@ set(UNICORN_INCLUDE "${REPO_ROOT}/third_party/unicorn/include")
 set(UNICORN_LIBRARY "${CMAKE_CURRENT_LIST_DIR}/../jniLibs/${ANDROID_ABI}/libunicorn.so")
 
 if(NOT EXISTS "${UNICORN_LIBRARY}")
-    message(FATAL_ERROR "Missing ${UNICORN_LIBRARY}. Run scripts/build-android.sh first.")
+    message(FATAL_ERROR "Missing ${UNICORN_LIBRARY}. Run frontends/pocket-android/build-android.sh first.")
 endif()
 
 set(SDL_SHARED ON CACHE BOOL "" FORCE)

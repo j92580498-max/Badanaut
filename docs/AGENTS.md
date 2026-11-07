@@ -915,6 +915,14 @@ which has a console and takes the same code path.
 
 ## 13. Frontend input and launcher settings
 
+**Android Bada games have a separate library and runner.** `MainActivity`
+opens the Bada tab by default; Pocket PC imports still use `NativeBridge`.
+`BadaAssets` installs Bada ZIP packages and their selected ARM32 runtime in
+`filesDir/bada`, and `BadaActivity` launches the selected package/AppId through
+SDL in the isolated `:bada` process. Kotlin `GameEntry.platform` and `directory`
+are launcher-only fields with Pocket PC defaults; they are not part of the
+Rust JSON contract. See `BADA_ANDROID.md` for import and launch details.
+
 The guest side of input is §5's path: frontend → `KernelState::pending_input`
 → `take_pending_input` → `controls_take_input` → `input_to_message`. What
 each frontend puts *into* that path is a user preference, and both
@@ -1003,6 +1011,12 @@ settings change must not wipe the host-key map a user set up on the PC.
 Add a field to one side and add it to the other in the same change.
 
 ## 14. Working on this repo
+
+The Android workflow in `.github/workflows/android.yml` runs
+`frontends/pocket-android/build-android.sh` on x86-64 Ubuntu, then runs the
+Android unit tests and validates the APK's signature and native libraries.
+Download `Badanaut-Android.apk` from the run's Artifacts section. Game and
+guest runtime inputs remain outside Git and are imported on the phone.
 
 ```bash
 cargo build --release -p pocket-cli --features unicorn   # → target/release/pockethle

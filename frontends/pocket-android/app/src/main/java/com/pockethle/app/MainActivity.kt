@@ -15,59 +15,91 @@ import androidx.appcompat.widget.Toolbar
 import androidx.lifecycle.lifecycleScope
 import androidx.recyclerview.widget.GridLayoutManager
 import androidx.recyclerview.widget.RecyclerView
-import com.google.android.material.floatingactionbutton.FloatingActionButton
+import com.google.android.material.button.MaterialButton
+import com.google.android.material.button.MaterialButtonToggleGroup
+import com.google.android.material.floatingactionbutton.ExtendedFloatingActionButton
 import com.google.android.material.snackbar.Snackbar
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import org.json.JSONArray
 import org.json.JSONObject
+import java.io.File
 
-/**
- * Library screen — heavily inspired by
- * [j2me-loader](https://github.com/nikita36078/j2me-loader): a
- * RecyclerView of game cards, a "+" floating action button to import a
- * new `.CAB`, and per-card overflow menu (Run / Settings / Remove).
- */
+/** Bada is the default library; Pocket PC games keep their own import and runner. */
 class MainActivity : AppCompatActivity() {
-
     private lateinit var adapter: GameAdapter
     private lateinit var recycler: RecyclerView
     private lateinit var emptyState: TextView
     private lateinit var rootDir: String
+    private lateinit var platforms: MaterialButtonToggleGroup
+    private lateinit var importButton: ExtendedFloatingActionButton
+    private lateinit var runtimeButton: MaterialButton
+    private var selectedPlatform = GamePlatform.BADA
+    private var importPlatform = GamePlatform.BADA
+    private var busy = false
+    private var bundledChecked = false
+    private var runtimeReady = false
 
-    private val importGame = registerForActivityResult(
-        ActivityResultContracts.OpenDocument(),
-    ) { uri ->
+    private val importGame = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) handleImport(uri)
+    }
+    private val importRuntime = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) {
+            runOperation(R.string.bada_runtime_importing, { BadaAssets.importRuntime(this, uri) }) {
+                Snackbar.make(recycler, R.string.bada_runtime_imported, Snackbar.LENGTH_LONG).show()
+                refreshLibrary()
+            }
+        }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
         setSupportActionBar(findViewById<Toolbar>(R.id.toolbar))
-
+        selectedPlatform = savedInstanceState?.getString("platform")?.let { GamePlatform.valueOf(it) } ?: GamePlatform.BADA
+        importPlatform = savedInstanceState?.getString("import_platform")?.let { GamePlatform.valueOf(it) } ?: selectedPlatform
         rootDir = LibraryPaths.root(this)
         emptyState = findViewById(R.id.empty_state)
         recycler = findViewById(R.id.recycler)
+        platforms = findViewById(R.id.platforms)
+        importButton = findViewById(R.id.fab_import)
+        runtimeButton = findViewById(R.id.btn_runtime)
         adapter = GameAdapter(
-            onRun = { entry -> launchGame(entry) },
+            onRun = { entry -> if (!busy) launchGame(entry) },
             onSettings = { entry ->
-                startActivity(
-                    Intent(this, GameSettingsActivity::class.java)
+                if (!busy) {
+                    if (entry.platform == GamePlatform.BADA) showBadaSetup(entry)
+                    else startActivity(Intent(this, GameSettingsActivity::class.java)
                         .putExtra(GameSettingsActivity.EXTRA_GAME_ID, entry.id)
-                        .putExtra(GameSettingsActivity.EXTRA_GAME_NAME, entry.displayName),
-                )
+                        .putExtra(GameSettingsActivity.EXTRA_GAME_NAME, entry.displayName))
+                }
             },
-            onRemove = { entry -> confirmRemove(entry) },
+            onRemove = { entry -> if (!busy) confirmRemove(entry) },
             libraryRoot = rootDir,
         )
-        recycler.layoutManager = GridLayoutManager(this, gridSpanCount())
+        recycler.layoutManager = GridLayoutManager(this, (resources.configuration.screenWidthDp / 170).coerceAtLeast(2))
         recycler.adapter = adapter
-
-        findViewById<FloatingActionButton>(R.id.fab_import).setOnClickListener {
-            importGame.launch(arrayOf("application/vnd.ms-cab-compressed", "application/x-rar-compressed", "application/zip", "application/octet-stream", "*/*"))
+        platforms.check(if (selectedPlatform == GamePlatform.BADA) R.id.tab_bada else R.id.tab_pocket_pc)
+        platforms.addOnButtonCheckedListener { _, checkedId, checked ->
+            if (checked) {
+                selectedPlatform = if (checkedId == R.id.tab_bada) GamePlatform.BADA else GamePlatform.POCKET_PC
+                updatePlatformUi()
+                refreshLibrary()
+            }
         }
+        importButton.setOnClickListener {
+            importPlatform = selectedPlatform
+            importGame.launch(arrayOf("*/*"))
+        }
+        runtimeButton.setOnClickListener { showBadaSetup() }
+        updatePlatformUi()
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        outState.putString("platform", selectedPlatform.name)
+        outState.putString("import_platform", importPlatform.name)
+        super.onSaveInstanceState(outState)
     }
 
     override fun onResume() {
@@ -80,99 +112,97 @@ class MainActivity : AppCompatActivity() {
         return true
     }
 
-    override fun onOptionsItemSelected(item: MenuItem): Boolean {
-        return when (item.itemId) {
-            R.id.action_bada_sky_force -> {
-                startActivity(Intent(this, BadaActivity::class.java))
-                true
-            }
-            R.id.action_settings -> {
-                startActivity(Intent(this, SettingsActivity::class.java))
-                true
-            }
-            R.id.action_about -> {
-                AlertDialog.Builder(this)
-                    .setTitle(R.string.about_title)
-                    .setMessage(NativeBridge.banner())
-                    .setPositiveButton(android.R.string.ok, null)
-                    .show()
-                true
-            }
-            else -> super.onOptionsItemSelected(item)
+    override fun onOptionsItemSelected(item: MenuItem): Boolean = when (item.itemId) {
+        R.id.action_bada_setup -> { if (!busy) showBadaSetup(); true }
+        R.id.action_settings -> { startActivity(Intent(this, SettingsActivity::class.java)); true }
+        R.id.action_about -> {
+            AlertDialog.Builder(this).setTitle(R.string.about_title).setMessage(R.string.bada_about)
+                .setPositiveButton(android.R.string.ok, null).show()
+            true
         }
+        else -> super.onOptionsItemSelected(item)
     }
 
-    /** Roughly 110dp-wide tiles, like a game launcher grid; at least 2 columns. */
-    private fun gridSpanCount(): Int {
-        val widthDp = resources.configuration.screenWidthDp
-        return (widthDp / 110).coerceAtLeast(2)
+    private fun updatePlatformUi() {
+        val bada = selectedPlatform == GamePlatform.BADA
+        findViewById<View>(R.id.runtime_card).visibility = if (bada) View.VISIBLE else View.GONE
+        findViewById<TextView>(R.id.library_hint).setText(if (bada) R.string.bada_library_hint else R.string.pocket_library_hint)
+        emptyState.setText(if (bada) R.string.bada_empty_library else R.string.empty_library)
+        importButton.setText(if (bada) R.string.bada_import_game else R.string.import_cab)
+        importButton.contentDescription = importButton.text
     }
 
     private fun refreshLibrary() {
-        val raw = NativeBridge.listGames(rootDir)
-        val parsed = parseGamesOrToast(raw)
-        adapter.submit(parsed)
-        if (parsed.isEmpty()) {
-            recycler.visibility = View.GONE
-            emptyState.visibility = View.VISIBLE
-        } else {
-            recycler.visibility = View.VISIBLE
-            emptyState.visibility = View.GONE
+        if (busy) return
+        val platform = selectedPlatform
+        runOperation(R.string.library_loading, {
+            if (!bundledChecked) {
+                BadaAssets.importBundledIfAvailable(this)
+                bundledChecked = true
+            }
+            val entries = if (platform == GamePlatform.BADA) BadaAssets.listGames(this)
+            else parsePocketGames(NativeBridge.listGames(rootDir))
+            entries to BadaAssets.hasRuntime(this)
+        }) { (entries, installed) ->
+            runtimeReady = installed
+            findViewById<TextView>(R.id.runtime_status).setText(
+                if (installed) R.string.bada_runtime_ready else R.string.bada_runtime_missing,
+            )
+            runtimeButton.setText(if (installed) R.string.bada_change_runtime else R.string.bada_select_runtime)
+            adapter.submit(entries)
+            recycler.visibility = if (entries.isEmpty()) View.GONE else View.VISIBLE
+            emptyState.visibility = if (entries.isEmpty()) View.VISIBLE else View.GONE
+            findViewById<TextView>(R.id.library_title).text = getString(R.string.library_games, entries.size)
         }
     }
 
-    private fun parseGamesOrToast(raw: String): List<GameEntry> {
-        return try {
-            // Library returns [] when empty, JSON object {ok:false,error:...} on error.
-            if (raw.startsWith("{")) {
-                val obj = JSONObject(raw)
-                if (!obj.optBoolean("ok", true)) {
-                    Snackbar.make(
-                        recycler,
-                        getString(R.string.error_listing_games, obj.optString("error")),
-                        Snackbar.LENGTH_LONG,
-                    ).show()
-                }
-                emptyList()
-            } else {
-                JSONArray(raw)
-                GameEntry.listFromJson(raw)
-            }
-        } catch (e: Exception) {
-            Snackbar.make(recycler, "Library parse failed: ${e.message}", Snackbar.LENGTH_LONG).show()
-            emptyList()
+    private fun parsePocketGames(raw: String): List<GameEntry> {
+        if (raw.trimStart().startsWith("{")) {
+            val obj = JSONObject(raw)
+            if (!obj.optBoolean("ok", true)) error(obj.optString("error"))
+            return emptyList()
         }
+        return GameEntry.listFromJson(raw)
+    }
+
+    private fun showBadaSetup(entry: GameEntry? = null) {
+        val message = if (entry == null) getString(R.string.bada_runtime_help)
+        else getString(R.string.bada_game_details, entry.displayName, entry.executable, entry.sourceCab) +
+            "\n\n" + getString(R.string.bada_runtime_help)
+        AlertDialog.Builder(this)
+            .setTitle(if (entry == null) getString(R.string.bada_setup_title) else entry.displayName)
+            .setMessage(message)
+            .setPositiveButton(if (runtimeReady) R.string.bada_change_runtime else R.string.bada_select_runtime) { _, _ ->
+                importRuntime.launch(arrayOf("*/*"))
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
     }
 
     private fun handleImport(uri: Uri) {
-        val name = queryDisplayName(uri) ?: "import.cab"
-        val snack = Snackbar.make(recycler, R.string.import_in_progress, Snackbar.LENGTH_INDEFINITE)
-        snack.show()
-        lifecycleScope.launch {
-            val result = withContext(Dispatchers.IO) {
-                runCatching {
-                    val cabFile = LibraryPaths.copyUriToCache(this@MainActivity, uri, name)
-                    importArchiveOrExe(cabFile)
-                }
+        val platform = importPlatform
+        val name = runCatching {
+            contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
+                val index = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                if (index >= 0 && cursor.moveToFirst()) cursor.getString(index) else null
             }
-            snack.dismiss()
-            result.fold(
-                onSuccess = { raw ->
-                    handleImportResult(raw)
-                    refreshLibrary()
-                },
-                onFailure = { err ->
-                    Snackbar.make(
-                        recycler,
-                        getString(R.string.import_failed, err.message ?: "unknown"),
-                        Snackbar.LENGTH_LONG,
-                    ).show()
-                },
-            )
+        }.getOrNull() ?: "game.zip"
+        runOperation(R.string.import_in_progress, {
+            if (platform == GamePlatform.BADA) BadaAssets.importGame(this, uri, name).displayName
+            else {
+                val file = LibraryPaths.copyUriToCache(this, uri, name)
+                val raw = try { importArchiveOrExe(file) } finally { file.delete() }
+                val obj = JSONObject(raw)
+                if (!obj.optBoolean("ok", true)) error(obj.optString("error"))
+                obj.optString("display_name", obj.optString("id", name))
+            }
+        }) { importedName ->
+            Snackbar.make(recycler, getString(R.string.import_success, importedName), Snackbar.LENGTH_LONG).show()
+            refreshLibrary()
         }
     }
 
-    private fun importArchiveOrExe(file: java.io.File): String {
+    private fun importArchiveOrExe(file: File): String {
         val signature = file.inputStream().use { input ->
             ByteArray(4).also { buffer ->
                 var offset = 0
@@ -183,85 +213,80 @@ class MainActivity : AppCompatActivity() {
                 }
             }
         }
-        val isZip = signature[0] == 'P'.code.toByte() &&
-            signature[1] == 'K'.code.toByte() &&
-            (signature[2] == 3.toByte() || signature[2] == 5.toByte() || signature[2] == 7.toByte())
-        val isCab = signature.contentEquals(byteArrayOf(
-            'M'.code.toByte(),
-            'S'.code.toByte(),
-            'C'.code.toByte(),
-            'F'.code.toByte(),
-        ))
+        val isZip = signature[0] == 'P'.code.toByte() && signature[1] == 'K'.code.toByte() &&
+            signature[2] in byteArrayOf(3, 5, 7)
+        val isCab = signature.contentEquals(byteArrayOf('M'.code.toByte(), 'S'.code.toByte(), 'C'.code.toByte(), 'F'.code.toByte()))
         val isExe = signature[0] == 'M'.code.toByte() && signature[1] == 'Z'.code.toByte()
-
         return when {
             isZip -> NativeBridge.importZip(rootDir, file.absolutePath)
             isCab -> NativeBridge.importCab(rootDir, file.absolutePath)
             isExe -> NativeBridge.importExe(rootDir, file.absolutePath)
-            file.extension.equals("rar", ignoreCase = true) ->
-                NativeBridge.importRar(rootDir, file.absolutePath)
-            file.extension.equals("zip", ignoreCase = true) -> NativeBridge.importZip(rootDir, file.absolutePath)
-            file.extension.equals("cab", ignoreCase = true) -> NativeBridge.importCab(rootDir, file.absolutePath)
-            file.extension.equals("exe", ignoreCase = true) -> NativeBridge.importExe(rootDir, file.absolutePath)
-            else -> error("Unsupported file: choose a RAR, ZIP, CAB, or ARM EXE, or a Windows installer")
-        }
-    }
-
-    private fun handleImportResult(raw: String) {
-        try {
-            val obj = JSONObject(raw)
-            if (!obj.optBoolean("ok", true)) {
-                Snackbar.make(
-                    recycler,
-                    getString(R.string.import_failed, obj.optString("error")),
-                    Snackbar.LENGTH_LONG,
-                ).show()
-                return
-            }
-            val name = obj.optString("display_name", obj.optString("id", "?"))
-            Snackbar.make(
-                recycler,
-                getString(R.string.import_success, name),
-                Snackbar.LENGTH_SHORT,
-            ).show()
-        } catch (e: Exception) {
-            Snackbar.make(recycler, raw, Snackbar.LENGTH_LONG).show()
-        }
-    }
-
-    private fun queryDisplayName(uri: Uri): String? {
-        return contentResolver.query(uri, null, null, null, null)?.use { c ->
-            val ix = c.getColumnIndex(OpenableColumns.DISPLAY_NAME)
-            if (ix >= 0 && c.moveToFirst()) c.getString(ix) else null
+            file.extension.equals("rar", true) -> NativeBridge.importRar(rootDir, file.absolutePath)
+            file.extension.equals("zip", true) -> NativeBridge.importZip(rootDir, file.absolutePath)
+            file.extension.equals("cab", true) -> NativeBridge.importCab(rootDir, file.absolutePath)
+            file.extension.equals("exe", true) -> NativeBridge.importExe(rootDir, file.absolutePath)
+            else -> error(getString(R.string.pocket_unsupported_file))
         }
     }
 
     private fun confirmRemove(entry: GameEntry) {
-        AlertDialog.Builder(this)
-            .setTitle(R.string.remove_title)
+        AlertDialog.Builder(this).setTitle(R.string.remove_title)
             .setMessage(getString(R.string.remove_message, entry.displayName))
             .setPositiveButton(R.string.remove) { _, _ ->
-                val raw = NativeBridge.removeGame(rootDir, entry.id)
-                val obj = runCatching { JSONObject(raw) }.getOrNull()
-                if (obj?.optBoolean("ok") == true) {
-                    refreshLibrary()
-                } else {
-                    Snackbar.make(
-                        recycler,
-                        obj?.optString("error") ?: raw,
-                        Snackbar.LENGTH_LONG,
-                    ).show()
-                }
-            }
-            .setNegativeButton(android.R.string.cancel, null)
-            .show()
+                runOperation(R.string.removing_game, {
+                    if (entry.platform == GamePlatform.BADA) BadaAssets.removeGame(this, entry.id)
+                    else {
+                        val obj = JSONObject(NativeBridge.removeGame(rootDir, entry.id))
+                        if (!obj.optBoolean("ok", false)) error(obj.optString("error"))
+                    }
+                }) { refreshLibrary() }
+            }.setNegativeButton(android.R.string.cancel, null).show()
     }
 
     private fun launchGame(entry: GameEntry) {
-        startActivity(
-            Intent(this, GameActivity::class.java)
+        if (entry.platform == GamePlatform.BADA) {
+            if (!runtimeReady) { showBadaSetup(entry); return }
+            runOperation(R.string.bada_preparing_game, { BadaAssets.prepare(this, entry.id) }) {
+                startActivity(Intent(this, BadaActivity::class.java)
+                    .putExtra(BadaActivity.EXTRA_GAME_ID, entry.id)
+                    .putExtra(BadaActivity.EXTRA_GAME_NAME, entry.displayName))
+            }
+        } else {
+            startActivity(Intent(this, GameActivity::class.java)
                 .putExtra(GameActivity.EXTRA_GAME_ID, entry.id)
-                .putExtra(GameActivity.EXTRA_GAME_NAME, entry.displayName),
-        )
+                .putExtra(GameActivity.EXTRA_GAME_NAME, entry.displayName))
+        }
+    }
+
+    private fun <T> runOperation(message: Int, work: () -> T, success: (T) -> Unit) {
+        if (busy) return
+        setBusy(true, message)
+        lifecycleScope.launch {
+            try {
+                val value = withContext(Dispatchers.IO) { work() }
+                setBusy(false, message)
+                success(value)
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                setBusy(false, message)
+                AlertDialog.Builder(this@MainActivity).setTitle(R.string.operation_failed)
+                    .setMessage(error.message ?: getString(R.string.unknown_error))
+                    .setPositiveButton(android.R.string.ok, null).show()
+            }
+        }
+    }
+
+    private fun setBusy(value: Boolean, message: Int) {
+        busy = value
+        importButton.isEnabled = !value
+        runtimeButton.isEnabled = !value
+        findViewById<View>(R.id.tab_bada).isEnabled = !value
+        findViewById<View>(R.id.tab_pocket_pc).isEnabled = !value
+        findViewById<View>(R.id.library_progress).visibility = if (value) View.VISIBLE else View.GONE
+        findViewById<TextView>(R.id.progress_label).apply {
+            setText(message)
+            visibility = if (value) View.VISIBLE else View.GONE
+        }
     }
 }

@@ -12,8 +12,8 @@ android {
         applicationId = "com.pockethle.app"
         minSdk = 24
         targetSdk = 34
-        versionCode = 4
-        versionName = "0.4.0"
+        versionCode = 5
+        versionName = "0.5.0"
 
         ndk {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a")
@@ -48,6 +48,12 @@ android {
         jvmTarget = "17"
     }
 
+    packaging {
+        jniLibs {
+            // CMake imports the same Unicorn file that cargo-ndk places in jniLibs.
+            pickFirsts += "**/libunicorn.so"
+        }
+    }
 }
 
 dependencies {
@@ -61,4 +67,5 @@ dependencies {
     implementation("com.google.android.material:material:1.12.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.0")
     implementation("org.json:json:20240303")
+    testImplementation("junit:junit:4.13.2")
 }

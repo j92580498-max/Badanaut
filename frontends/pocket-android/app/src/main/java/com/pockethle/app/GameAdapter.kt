@@ -50,16 +50,18 @@ class GameAdapter(
 
         fun bind(entry: GameEntry) {
             title.text = entry.displayName
-            val iconFile = entry.icon?.let { File(libraryRoot, "games/${entry.id}/$it") }
+            val iconFile = entry.icon?.let { File(entry.directory ?: "$libraryRoot/games/${entry.id}", it) }
             val bitmap = iconFile?.takeIf { it.isFile }?.let { BitmapFactory.decodeFile(it.absolutePath) }
             if (bitmap != null) {
                 icon.setImageBitmap(bitmap)
                 icon.imageTintList = null
             } else {
                 icon.setImageResource(R.drawable.ic_game)
-                icon.imageTintList = itemView.context.getColorStateList(com.google.android.material.R.color.material_dynamic_primary40)
+                icon.imageTintList = itemView.context.getColorStateList(R.color.primary)
             }
-            publisherLabel.text = itemView.context.getString(
+            publisherLabel.text = if (entry.platform == GamePlatform.BADA) {
+                itemView.context.getString(R.string.bada_card_caption)
+            } else itemView.context.getString(
                 R.string.publisher_label,
                 entry.provider?.takeIf { it.isNotBlank() }
                     ?: itemView.context.getString(R.string.publisher_unknown),
@@ -70,12 +72,14 @@ class GameAdapter(
 
         private fun showOverflowMenu(anchor: View, entry: GameEntry) {
             val popup = PopupMenu(anchor.context, anchor)
-            popup.menu.add(0, 0, 0, R.string.action_settings)
+            popup.menu.add(0, 2, 0, R.string.action_run)
+            popup.menu.add(0, 0, 1, if (entry.platform == GamePlatform.BADA) R.string.bada_game_info else R.string.action_settings)
             popup.menu.add(0, 1, 1, R.string.action_remove)
             popup.setOnMenuItemClickListener { item ->
                 when (item.itemId) {
                     0 -> onSettings(entry)
                     1 -> onRemove(entry)
+                    2 -> onRun(entry)
                 }
                 true
             }

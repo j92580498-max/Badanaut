@@ -1,0 +1,16 @@
+[package]
+name = "pocket-pe"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Windows CE / Windows Mobile PE32 loader for PocketHLE."
+
+[dependencies]
+anyhow.workspace = true
+thiserror.workspace = true
+log.workspace = true
+goblin.workspace = true
+byteorder.workspace = true
+indexmap.workspace = true

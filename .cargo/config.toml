@@ -1,0 +1,22 @@
+# Cross-compile glue for `cargo ndk` builds of `pocket-android-jni`.
+#
+# `unicorn-engine-sys` 2.1.5's `build.rs` invokes CMake via the `cmake` Rust
+# crate. Without help, cmake-rs picks the bare `clang` from the NDK toolchain
+# directory as `CMAKE_C_COMPILER`, never sets `ANDROID_ABI`, and unicorn's
+# `CMakeLists.txt` falls into its host-detect branch — which detects x86_64
+# and tries to compile the i386 TCG JIT for the cross target. NDK clang
+# rejects the x86 cpuid intrinsics and the build dies.
+#
+# Per-target `CMAKE_TOOLCHAIN_FILE_<target>` env vars are honoured by
+# cmake-rs (`getenv_target_os` in `cmake-0.1.x/src/lib.rs`). We point each
+# Android target at a tiny wrapper toolchain file that hard-codes the right
+# `ANDROID_ABI` and forwards to the official NDK `android.toolchain.cmake`.
+# That makes unicorn pick its `elseif(ANDROID_ABI)` branch and the right
+# `qemu/tcg/<arch>/` include path.
+#
+# `ANDROID_NDK_HOME` (or `ANDROID_NDK_ROOT`) must be set in the shell when
+# running `cargo ndk`. The wrapper toolchain files read it.
+
+[env]
+CMAKE_TOOLCHAIN_FILE_aarch64-linux-android = { value = "build-support/cmake/android-arm64-v8a.toolchain.cmake", relative = true, force = false }
+CMAKE_TOOLCHAIN_FILE_armv7-linux-androideabi = { value = "build-support/cmake/android-armeabi-v7a.toolchain.cmake", relative = true, force = false }

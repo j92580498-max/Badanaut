@@ -11,8 +11,7 @@ pkg_check_modules(GLES2 REQUIRED IMPORTED_TARGET glesv2)
 
 get_filename_component(REPO_ROOT "${CMAKE_CURRENT_LIST_DIR}/../../../.." ABSOLUTE)
 set(BADA_ROOT "${REPO_ROOT}/third_party/bada-hle/src")
-add_executable(bada-gles-test
-    gl_render_test.cpp
+add_library(bada-test-engine STATIC
     "${BADA_ROOT}/cpu.cpp"
     "${BADA_ROOT}/elf_loader.cpp"
     "${BADA_ROOT}/hle/dispatch.cpp"
@@ -20,16 +19,23 @@ add_executable(bada-gles-test
     "${BADA_ROOT}/hle/gl.cpp"
     "${BADA_ROOT}/hle/osp.cpp"
     "${BADA_ROOT}/hle/io.cpp"
+    "${BADA_ROOT}/hle/audio.cpp"
     "${BADA_ROOT}/hle/ui.cpp"
     "${REPO_ROOT}/frontends/pocket-android/app/src/main/cpp/gl_android.cpp"
 )
-target_compile_definitions(bada-gles-test PRIVATE BADA_GLES_BACKEND=1)
-target_include_directories(bada-gles-test PRIVATE "${BADA_ROOT}")
-target_link_libraries(bada-gles-test PRIVATE
+target_compile_definitions(bada-test-engine PRIVATE BADA_GLES_BACKEND=1)
+target_include_directories(bada-test-engine PUBLIC "${BADA_ROOT}")
+target_link_libraries(bada-test-engine PUBLIC
     PkgConfig::SDL2 PkgConfig::UNICORN PkgConfig::GLES1 PkgConfig::GLES2
 )
 
 enable_testing()
+add_executable(bada-gles-test gl_render_test.cpp)
+target_link_libraries(bada-gles-test PRIVATE bada-test-engine)
+add_executable(bada-runtime-test runtime_test.cpp)
+target_link_libraries(bada-runtime-test PRIVATE bada-test-engine)
+add_test(NAME runtime-audio COMMAND bada-runtime-test)
+set_tests_properties(runtime-audio PROPERTIES TIMEOUT 30)
 add_executable(bada-log-test
     diagnostic_log_test.cpp
     "${REPO_ROOT}/frontends/pocket-android/app/src/main/cpp/diagnostic_log.cpp"
@@ -41,5 +47,8 @@ foreach(api RANGE 1 2)
     foreach(abi hard soft)
         add_test(NAME "gles${api}-${abi}" COMMAND bada-gles-test "${api}" "${abi}")
         set_tests_properties("gles${api}-${abi}" PROPERTIES TIMEOUT 60)
+        if(api EQUAL 1)
+            set_tests_properties("gles${api}-${abi}" PROPERTIES SKIP_RETURN_CODE 77)
+        endif()
     endforeach()
 endforeach()

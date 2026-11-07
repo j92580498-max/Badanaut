@@ -167,9 +167,14 @@ void render(Cpu& cpu, int api) {
     require(glGetError() == GL_NO_ERROR, "guest draw generated a GL error");
 
     // The Canvas path must also work when the game uses either ES context.
-    const uint8_t canvas[] = {0,255,255,255};
+    const uint8_t canvas[] = {255,255,0,0}; // opaque bada cyan in 0x00RRGGBB
     hle::gl_present_canvas(cpu, copy(cpu, canvas, sizeof canvas), 1, 1);
     pixel(32, 32, {0, 255, 255});
+    const uint8_t red[] = {0,0,255,0}, blue[] = {255,0,0,0};
+    hle::gl_present_canvas(cpu, copy(cpu, red, sizeof red), 1, 1);
+    pixel(32, 32, {255, 0, 0});
+    hle::gl_present_canvas(cpu, copy(cpu, blue, sizeof blue), 1, 1);
+    pixel(32, 32, {0, 0, 255}); // also exercises reuse of the Canvas texture
     require(glGetError() == GL_NO_ERROR, "Canvas generated a GL error");
     call(cpu, "glClear" + suffix, {GL_COLOR_BUFFER_BIT});
     call(cpu, "glDrawArrays" + suffix, {GL_TRIANGLE_STRIP, 0, 4});
@@ -177,6 +182,81 @@ void render(Cpu& cpu, int api) {
     pixel(20, 20, {0, 255, 0});
     pixel(44, 44, {255, 0, 255});
     require(glGetError() == GL_NO_ERROR, "guest rendering after Canvas generated a GL error");
+}
+
+void resize_test(Cpu& cpu, int api, SDL_Window* window) {
+    const std::string suffix = "_" + std::to_string(api);
+    // Rebind the same context to a larger drawable. This also works with SDL's
+    // offscreen driver, whose pbuffer cannot be resized in place.
+    const auto context = SDL_GL_GetCurrentContext();
+    auto* resized = SDL_CreateWindow("Resized Bada surface", 0, 0, 160, 96, SDL_WINDOW_OPENGL | SDL_WINDOW_HIDDEN);
+    require(resized != nullptr, SDL_GetError());
+    require(SDL_GL_MakeCurrent(resized, context) == 0, SDL_GetError());
+    hle::gl_set_window(resized);
+    hle::gl_resize();
+    call(cpu, "glViewport" + suffix, {0, 0, 64, 64});
+    floats(cpu, "glClearColor" + suffix, {0, 0, 0, 1});
+    call(cpu, "glClear" + suffix, {GL_COLOR_BUFFER_BIT});
+    call(cpu, "glDrawArrays" + suffix, {GL_TRIANGLE_STRIP, 0, 4});
+    pixel(10, 48, {0, 0, 0}); // letterbox
+    pixel(62, 30, {0, 255, 0});
+    pixel(102, 66, {255, 0, 255});
+    const uint32_t state = cpu.alloc(16);
+    call(cpu, "glGetIntegerv" + suffix, {GL_VIEWPORT, state});
+    require(cpu.read_u32(state + 8) == 64 && cpu.read_u32(state + 12) == 64,
+            "guest viewport query leaked native display dimensions");
+    int x = -1, y = -1;
+    hle::gl_map_touch(80, 48, 160, 96, x, y);
+    require(x == 32 && y == 32, "fullscreen input missed the center");
+    hle::gl_map_touch(10, 48, 160, 96, x, y);
+    require(x == 0 && y == 32, "letterbox input was not clamped to the guest");
+    call(cpu, "glScissor" + suffix, {0, 0, 32, 64});
+    call(cpu, "glEnable" + suffix, {GL_SCISSOR_TEST});
+    floats(cpu, "glClearColor" + suffix, {0, 0, 1, 1});
+    call(cpu, "glClear" + suffix, {GL_COLOR_BUFFER_BIT});
+    pixel(48, 48, {0, 0, 255});
+    pixel(120, 48, {0, 0, 0});
+    call(cpu, "glGetIntegerv" + suffix, {GL_SCISSOR_BOX, state});
+    require(cpu.read_u32(state + 8) == 32 && cpu.read_u32(state + 12) == 64,
+            "guest scissor query leaked native display dimensions");
+    call(cpu, "glDisable" + suffix, {GL_SCISSOR_TEST});
+
+    // Offscreen textures keep guest pixels even when the Android surface is
+    // larger; scaling these viewports/scissors breaks Fruit Ninja's FBOs.
+    const std::string fbo_suffix = (api == 1 ? "OES" : "") + suffix;
+    call(cpu, "glGenTextures" + suffix, {1, state});
+    call(cpu, "glBindTexture" + suffix, {GL_TEXTURE_2D, cpu.read_u32(state)});
+    call(cpu, "glTexImage2D" + suffix, {GL_TEXTURE_2D, 0, GL_RGBA, 2, 2, 0, GL_RGBA, GL_UNSIGNED_BYTE, 0});
+    const uint32_t texture_id = cpu.read_u32(state);
+    call(cpu, "glGenFramebuffers" + fbo_suffix, {1, state});
+    call(cpu, "glBindFramebuffer" + fbo_suffix, {GL_FRAMEBUFFER, cpu.read_u32(state)});
+    call(cpu, "glFramebufferTexture2D" + fbo_suffix, {GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, texture_id, 0});
+    call(cpu, "glViewport" + suffix, {0, 0, 2, 2});
+    GLint viewport[4] = {};
+    glGetIntegerv(GL_VIEWPORT, viewport);
+    require(viewport[0] == 0 && viewport[1] == 0 && viewport[2] == 2 && viewport[3] == 2,
+            "offscreen viewport was scaled to the native surface");
+    floats(cpu, "glClearColor" + suffix, {0, 0, 0, 1});
+    call(cpu, "glClear" + suffix, {GL_COLOR_BUFFER_BIT});
+    call(cpu, "glScissor" + suffix, {0, 0, 1, 2});
+    call(cpu, "glEnable" + suffix, {GL_SCISSOR_TEST});
+    floats(cpu, "glClearColor" + suffix, {1, 0, 0, 1});
+    call(cpu, "glClear" + suffix, {GL_COLOR_BUFFER_BIT});
+    pixel(0, 0, {255, 0, 0});
+    pixel(1, 0, {0, 0, 0});
+    call(cpu, "glDisable" + suffix, {GL_SCISSOR_TEST});
+    call(cpu, "glDeleteFramebuffers" + fbo_suffix, {1, state});
+    GLint binding = -1;
+    glGetIntegerv(GL_FRAMEBUFFER_BINDING, &binding);
+    glGetIntegerv(GL_VIEWPORT, viewport);
+    require(binding == 0 && viewport[0] == 32 && viewport[1] == 0 &&
+            viewport[2] == 3 && viewport[3] == 3,
+            "deleting the bound framebuffer did not restore surface scaling");
+    require(glGetError() == GL_NO_ERROR, "fullscreen/FBO rendering generated a GL error");
+    require(SDL_GL_MakeCurrent(window, context) == 0, SDL_GetError());
+    hle::gl_set_window(window);
+    hle::gl_resize();
+    SDL_DestroyWindow(resized);
 }
 } // namespace
 
@@ -199,6 +279,15 @@ int main(int argc, char** argv) {
         SDL_Window* window = SDL_CreateWindow("Bada GL test", 0, 0, 64, 64, SDL_WINDOW_OPENGL | SDL_WINDOW_HIDDEN);
         require(window != nullptr, SDL_GetError());
         auto context = SDL_GL_CreateContext(window);
+        if (!context && api == 1 && std::strstr(SDL_GetError(), "EGL_BAD_ALLOC")) {
+            // Some Mesa software drivers advertise ES 1 configs but cannot
+            // create an ES 1 context, including on the Linux CI runner. This
+            // happens before any guest handler runs; ES 2 remains mandatory.
+            fprintf(stderr, "SKIP: host cannot create an ES 1 context: %s\n", SDL_GetError());
+            SDL_DestroyWindow(window);
+            SDL_Quit();
+            return 77;
+        }
         require(context != nullptr, SDL_GetError());
         printf("Host GL: %s, %s\n", glGetString(GL_VERSION), glGetString(GL_RENDERER));
         hle::gl_set_window(window);
@@ -213,6 +302,7 @@ int main(int argc, char** argv) {
         cpu.set_reg(UC_ARM_REG_SP, cpu.reg(UC_ARM_REG_SP) - 256);
         cpu.hard_float = std::string(argv[2]) == "hard";
         render(cpu, api);
+        resize_test(cpu, api, window);
         uc_close(cpu.uc);
         SDL_GL_DeleteContext(context);
         SDL_DestroyWindow(window);

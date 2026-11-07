@@ -49,6 +49,7 @@ add_library(bada-android SHARED
     "${BADA_ROOT}/hle/gl.cpp"
     "${BADA_ROOT}/hle/osp.cpp"
     "${BADA_ROOT}/hle/io.cpp"
+    "${BADA_ROOT}/hle/audio.cpp"
     "${BADA_ROOT}/hle/ui.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/gl_android.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/diagnostic_log.cpp"
@@ -56,6 +57,9 @@ add_library(bada-android SHARED
 )
 set_target_properties(bada-android PROPERTIES OUTPUT_NAME main)
 target_compile_definitions(bada-android PRIVATE BADA_GLES_BACKEND=1)
+# The distributable APK uses assembleDebug; its emulator still needs optimized
+# native handlers, especially for audio mixing and software framebuffers.
+target_compile_options(bada-android PRIVATE -O2)
 target_include_directories(bada-android PRIVATE
     "${BADA_ROOT}"
     "${CMAKE_CURRENT_LIST_DIR}"

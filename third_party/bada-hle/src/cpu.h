@@ -63,6 +63,7 @@ class Cpu {
     uint32_t timer_obj = 0;    // the guest Timer object
     bool timer_active = false;
     uint32_t timer_interval_ms = 0; // last Timer::Start(msec); 0 = never armed
+    uint32_t timer_deadline_ms = 0; // SDL monotonic clock at Start(), not after Draw()
 
     uint32_t reg(int ucreg);
     void set_reg(int ucreg, uint32_t v);

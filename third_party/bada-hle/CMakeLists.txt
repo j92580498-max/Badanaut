@@ -52,6 +52,7 @@ add_executable(bada-hle
     src/hle/gl.cpp
     src/hle/osp.cpp
     src/hle/io.cpp
+    src/hle/audio.cpp
     src/hle/ui.cpp
     src/ui_overlay.cpp
 )

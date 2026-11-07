@@ -1,5 +1,6 @@
 #include "cpu.h"
 #include "hle/dispatch.h"
+#include "hle/gl_api.h"
 #include <GLES/gl.h>
 #include <GLES2/gl2.h>
 #include <SDL2/SDL.h>
@@ -13,6 +14,8 @@ GLuint texture_id = 0;
 GLint position_location = -1;
 GLint uv_location = -1;
 GLint sampler_location = -1;
+int texture_width = 0, texture_height = 0;
+std::vector<uint8_t> canvas_image;
 
 GLuint compile_shader(GLenum type, const char* source) {
     GLuint shader = glCreateShader(type);
@@ -38,7 +41,9 @@ bool ensure_program() {
         "precision mediump float;"
         "varying vec2 v_uv;"
         "uniform sampler2D u_texture;"
-        "void main(){gl_FragColor=texture2D(u_texture,v_uv);}";
+        // bada Canvas is 0xAARRGGBB (BGRA bytes on the little-endian guest).
+        // Sky Force leaves alpha zero on its opaque software framebuffer.
+        "void main(){gl_FragColor=vec4(texture2D(u_texture,v_uv).bgr,1.0);}";
     GLuint vertex = compile_shader(GL_VERTEX_SHADER, vertex_source);
     GLuint fragment = compile_shader(GL_FRAGMENT_SHADER, fragment_source);
     if (!vertex || !fragment) {
@@ -73,8 +78,8 @@ void gles_present_canvas(Cpu& cpu, void* sdl_window, uint32_t pixels, int width,
     if (!window || !pixels || width <= 0 || height <= 0) return;
     const size_t byte_count = static_cast<size_t>(width) * static_cast<size_t>(height) * 4;
     if (byte_count > 64 * 1024 * 1024) return;
-    std::vector<uint8_t> image(byte_count);
-    cpu.read_mem(pixels, image.data(), static_cast<uint32_t>(image.size()));
+    canvas_image.resize(byte_count);
+    cpu.read_mem(pixels, canvas_image.data(), static_cast<uint32_t>(canvas_image.size()));
 
     int drawable_width = 0;
     int drawable_height = 0;
@@ -87,12 +92,20 @@ void gles_present_canvas(Cpu& cpu, void* sdl_window, uint32_t pixels, int width,
     int major = 0;
     SDL_GL_GetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, &major);
     if (major >= 2 && !ensure_program()) return;
+    if (major == 1) {
+        // BGRA textures are optional in ES 1. Convert on the host instead.
+        for (size_t pixel = 0; pixel < byte_count; pixel += 4) {
+            std::swap(canvas_image[pixel], canvas_image[pixel + 2]);
+            canvas_image[pixel + 3] = 255;
+        }
+    }
 
-    GLint old_viewport[4], old_buffer = 0, old_active_texture = 0, old_texture = 0, old_program = 0;
+    GLint old_viewport[4], old_buffer = 0, old_active_texture = 0, old_texture = 0, old_program = 0, old_unpack = 4;
     GLfloat old_clear_color[4];
     glGetFloatv(GL_COLOR_CLEAR_VALUE, old_clear_color);
     glGetIntegerv(GL_VIEWPORT, old_viewport);
     glGetIntegerv(GL_ARRAY_BUFFER_BINDING, &old_buffer);
+    glGetIntegerv(GL_UNPACK_ALIGNMENT, &old_unpack);
     glGetIntegerv(GL_ACTIVE_TEXTURE, &old_active_texture);
     glActiveTexture(GL_TEXTURE0);
     glGetIntegerv(GL_TEXTURE_BINDING_2D, &old_texture);
@@ -100,20 +113,16 @@ void gles_present_canvas(Cpu& cpu, void* sdl_window, uint32_t pixels, int width,
     const GLboolean depth = glIsEnabled(GL_DEPTH_TEST), blend = glIsEnabled(GL_BLEND);
     const GLboolean cull = glIsEnabled(GL_CULL_FACE), scissor = glIsEnabled(GL_SCISSOR_TEST);
 
-    if (!texture_id || !glIsTexture(texture_id)) glGenTextures(1, &texture_id);
+    if (!texture_id || !glIsTexture(texture_id)) {
+        glGenTextures(1, &texture_id);
+        texture_width = texture_height = 0;
+    }
     glDisable(GL_SCISSOR_TEST);
     glViewport(0, 0, drawable_width, drawable_height);
     glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT);
-    const float scale = std::min(
-        static_cast<float>(drawable_width) / static_cast<float>(width),
-        static_cast<float>(drawable_height) / static_cast<float>(height));
-    const int output_width = static_cast<int>(static_cast<float>(width) * scale);
-    const int output_height = static_cast<int>(static_cast<float>(height) * scale);
-    glViewport((drawable_width - output_width) / 2,
-               (drawable_height - output_height) / 2,
-               output_width,
-               output_height);
+    const auto area = fit_surface(width, height, drawable_width, drawable_height);
+    glViewport(area.x, area.y, area.width, area.height);
     glDisable(GL_DEPTH_TEST);
     glDisable(GL_BLEND);
     glDisable(GL_CULL_FACE);
@@ -125,7 +134,13 @@ void gles_present_canvas(Cpu& cpu, void* sdl_window, uint32_t pixels, int width,
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, image.data());
+    if (texture_width != width || texture_height != height) {
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, canvas_image.data());
+        texture_width = width;
+        texture_height = height;
+    } else {
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, canvas_image.data());
+    }
 
     const GLfloat vertices[] = {
         -1.0f,  1.0f, 0.0f, 0.0f,
@@ -187,6 +202,7 @@ void gles_present_canvas(Cpu& cpu, void* sdl_window, uint32_t pixels, int width,
     glBindBuffer(GL_ARRAY_BUFFER, old_buffer);
     glBindTexture(GL_TEXTURE_2D, old_texture);
     glActiveTexture(old_active_texture);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, old_unpack);
     glClearColor(old_clear_color[0], old_clear_color[1], old_clear_color[2], old_clear_color[3]);
     if (depth) glEnable(GL_DEPTH_TEST);
     if (blend) glEnable(GL_BLEND);

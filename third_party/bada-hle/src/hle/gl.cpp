@@ -1,5 +1,6 @@
 #include "cpu.h"
 #include "dispatch.h"
+#include "gl_api.h"
 #include <SDL2/SDL.h>
 #ifdef BADA_GLES_BACKEND
 #include <GLES/gl.h>
@@ -11,6 +12,7 @@
 #include <SDL2/SDL_opengl.h>
 #endif
 #include <algorithm>
+#include <cmath>
 #include <functional>
 #include <cstdio>
 #include <cstring>
@@ -30,6 +32,11 @@
 namespace {
 
 SDL_Window* g_window = nullptr;
+int g_surface_width = 480, g_surface_height = 800;
+GLuint g_framebuffer = 0;
+GLint g_viewport[4] = {0, 0, 480, 800};
+GLint g_scissor[4] = {};
+bool g_scissor_set = false;
 #ifdef BADA_GLES_BACKEND
 // ES 1.1 only accepts STATIC_DRAW and DYNAMIC_DRAW buffer usage.
 constexpr GLenum client_buffer_usage = GL_DYNAMIC_DRAW;
@@ -39,6 +46,32 @@ constexpr GLenum client_buffer_usage = GL_STREAM_DRAW;
 GLuint g_canvas_texture = 0;
 bool g_canvas_window_sized = false;
 void fit_window(GLint x, GLint y, GLsizei w, GLsizei h); // defined in the ES1 section
+
+hle::SurfaceRect host_rect(const GLint* rectangle) {
+    if (g_framebuffer || !g_window) return {rectangle[0], rectangle[1], rectangle[2], rectangle[3]};
+    int width = 0, height = 0;
+    SDL_GL_GetDrawableSize(g_window, &width, &height);
+    const auto area = hle::fit_surface(g_surface_width, g_surface_height, width, height);
+    if (!area.width || !area.height) return {rectangle[0], rectangle[1], rectangle[2], rectangle[3]};
+    const double sx = static_cast<double>(area.width) / g_surface_width;
+    const double sy = static_cast<double>(area.height) / g_surface_height;
+    const int left = static_cast<int>(std::lround(rectangle[0] * sx));
+    const int bottom = static_cast<int>(std::lround(rectangle[1] * sy));
+    return {area.x + left, area.y + bottom,
+        static_cast<int>(std::lround((static_cast<double>(rectangle[0]) + rectangle[2]) * sx)) - left,
+        static_cast<int>(std::lround((static_cast<double>(rectangle[1]) + rectangle[3]) * sy)) - bottom};
+}
+
+void apply_viewport() {
+    const auto rectangle = host_rect(g_viewport);
+    glViewport(rectangle.x, rectangle.y, rectangle.width, rectangle.height);
+}
+
+void apply_scissor() {
+    if (!g_scissor_set) return;
+    const auto rectangle = host_rect(g_scissor);
+    glScissor(rectangle.x, rectangle.y, rectangle.width, rectangle.height);
+}
 
 // ---- host GL entry points (resolved lazily) ----
 template <class F>
@@ -100,8 +133,14 @@ void gl_clear(Cpu& c) { glClear(c.arg32(0)); }
 void gl_viewport(Cpu& c) {
     GLint x = c.arg32(0), y = c.arg32(1);
     GLsizei w = c.arg32(2), h = c.arg32(3);
-    fit_window(x, y, w, h);
-    glViewport(x, y, w, h);
+    if (!g_framebuffer) fit_window(x, y, w, h);
+    g_viewport[0] = x; g_viewport[1] = y; g_viewport[2] = w; g_viewport[3] = h;
+    apply_viewport();
+}
+void gl_scissor(Cpu& c) {
+    for (int i = 0; i < 4; ++i) g_scissor[i] = static_cast<GLint>(c.arg32(i));
+    g_scissor_set = true;
+    apply_scissor();
 }
 void gl_enable(Cpu& c) { glEnable(c.arg32(0)); }
 void gl_disable(Cpu& c) { glDisable(c.arg32(0)); }
@@ -129,6 +168,10 @@ int getiv_count(GLenum pn) {
     }
 }
 void getiv_into_guest(Cpu& c, GLenum pn, uint32_t out) {
+    if (pn == GL_VIEWPORT || (pn == GL_SCISSOR_BOX && g_scissor_set)) {
+        c.write_mem(out, pn == GL_VIEWPORT ? g_viewport : g_scissor, 4 * sizeof(GLint));
+        return;
+    }
     // glGetIntegerv writes a pname-dependent number of GLints into the caller's
     // buffer. getiv_count() is only how many we forward to the *guest*; the host
     // driver writes as many as the pname implies regardless. Most pnames write
@@ -380,6 +423,8 @@ void fit_window(GLint x, GLint y, GLsizei w, GLsizei h) {
         return;
     }
     g_window_fit = true;
+    g_surface_width = w;
+    g_surface_height = h;
     int cw, ch;
     SDL_GetWindowSize(g_window, &cw, &ch);
     if (w != cw || h != ch) {
@@ -388,10 +433,7 @@ void fit_window(GLint x, GLint y, GLsizei w, GLsizei h) {
     }
 }
 void g1_viewport(Cpu& c) {
-    GLint x = c.arg32(0), y = c.arg32(1);
-    GLsizei w = c.arg32(2), h = c.arg32(3);
-    fit_window(x, y, w, h);
-    glViewport(x, y, w, h);
+    gl_viewport(c);
 }
 void g1_finish(Cpu&) { glFinish(); }
 void g1_flush(Cpu&) { glFlush(); }
@@ -441,6 +483,7 @@ void g1_clientactivetexture(Cpu& c) { host<void (*)(GLenum)>("glClientActiveText
 void g1_bindtexture(Cpu& c) { glBindTexture(c.arg32(0), c.arg32(1)); }
 void g1_texparameteri(Cpu& c) { glTexParameteri(c.arg32(0), c.arg32(1), c.arg32(2)); }
 void g1_texenvi(Cpu& c) { glTexEnvi(c.arg32(0), c.arg32(1), c.arg32(2)); }
+void g1_texenvf(Cpu& c) { glTexEnvf(c.arg32(0), c.arg32(1), c.argf32(c.hard_float ? 0 : 2)); }
 void g1_gentextures(Cpu& c) {
     GLsizei n = c.arg32(0);
     std::vector<GLuint> ids(n);
@@ -531,6 +574,9 @@ F fbo(const char* core, const char* ext) {
 }
 void g1_bindframebuffer(Cpu& c) {
     fbo<bindfn>("glBindFramebuffer", "glBindFramebufferEXT")(c.arg32(0), c.arg32(1));
+    g_framebuffer = c.arg32(1);
+    apply_viewport();
+    apply_scissor();
 }
 void g1_genframebuffers(Cpu& c) {
     GLsizei n = c.arg32(0);
@@ -547,6 +593,11 @@ void g1_deleteframebuffers(Cpu& c) {
         ids[i] = c.read_u32(c.arg32(1) + i * 4);
     }
     fbo<void (*)(GLsizei, const GLuint*)>("glDeleteFramebuffers", "glDeleteFramebuffersEXT")(n, ids.data());
+    if (g_framebuffer && std::find(ids.begin(), ids.end(), g_framebuffer) != ids.end()) {
+        g_framebuffer = 0; // GL resets the binding when the bound FBO is deleted.
+        apply_viewport();
+        apply_scissor();
+    }
 }
 void g1_framebuffertexture2d(Cpu& c) {
     fbo<void (*)(GLenum, GLenum, GLenum, GLuint, GLint)>("glFramebufferTexture2D",
@@ -792,12 +843,25 @@ void egl_swapbuffers(Cpu& c) {
 
 namespace hle {
 void gl_set_window(void* w) { g_window = (SDL_Window*)w; }
+SurfaceRect gl_content_rect(int width, int height) {
+    return fit_surface(g_surface_width, g_surface_height, width, height);
+}
+void gl_map_touch(int x, int y, int width, int height, int& guest_x, int& guest_y) {
+    const auto area = gl_content_rect(width, height);
+    const int top = height - area.y - area.height; // SDL input starts at the top
+    guest_x = area.width ? std::clamp(static_cast<int>(
+        static_cast<int64_t>(x - area.x) * g_surface_width / area.width), 0, g_surface_width - 1) : 0;
+    guest_y = area.height ? std::clamp(static_cast<int>(
+        static_cast<int64_t>(y - top) * g_surface_height / area.height), 0, g_surface_height - 1) : 0;
+}
+void gl_resize() { apply_viewport(); apply_scissor(); }
 void gl_set_preswap(std::function<void(Cpu&)> fn) { g_preswap = std::move(fn); }
 #ifdef BADA_GLES_BACKEND
 // Implemented alongside the Android frontend, using ES arrays/shaders instead
 // of desktop immediate mode. Keep the game's GL dispatch shared with desktop.
 void gles_present_canvas(Cpu& cpu, void* window, uint32_t pixels, int width, int height);
 void gl_present_canvas(Cpu& cpu, uint32_t pixels, int width, int height) {
+    fit_window(0, 0, width, height);
     gles_present_canvas(cpu, g_window, pixels, width, height);
 }
 #else
@@ -806,6 +870,7 @@ void gl_present_canvas(Cpu& cpu, uint32_t pixels, int width, int height) {
         return;
     }
     if (!g_canvas_window_sized) {
+        fit_window(0, 0, width, height);
         SDL_SetWindowSize(g_window, width, height);
         g_canvas_window_sized = true;
     }
@@ -847,7 +912,7 @@ void gl_present_canvas(Cpu& cpu, uint32_t pixels, int width, int height) {
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP);
     glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, image.data());
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, width, height, 0, GL_BGRA, GL_UNSIGNED_BYTE, image.data());
     float scale = std::min((float)ww / (float)width, (float)wh / (float)height);
     float dw = width * scale, dh = height * scale;
     float left = (ww - dw) * 0.5f, top = (wh - dh) * 0.5f;
@@ -868,6 +933,7 @@ void register_gl() {
     register_handler("glClearColor_2", gl_clearcolor);
     register_handler("glClear_2", gl_clear);
     register_handler("glViewport_2", gl_viewport);
+    register_handler("glScissor_2", gl_scissor);
     register_handler("glEnable_2", gl_enable);
     register_handler("glDisable_2", gl_disable);
     register_handler("glFinish_2", gl_finish);
@@ -933,6 +999,7 @@ void register_gl() {
     register_handler("glBlendFunc_1", g1_blendfunc);
     register_handler("glShadeModel_1", g1_shademodel);
     register_handler("glViewport_1", g1_viewport);
+    register_handler("glScissor_1", gl_scissor);
     register_handler("glFinish_1", g1_finish);
     register_handler("glFlush_1", g1_flush);
     register_handler("glColor4ub_1", g1_color4ub);
@@ -952,6 +1019,7 @@ void register_gl() {
     register_handler("glBindTexture_1", g1_bindtexture);
     register_handler("glTexParameteri_1", g1_texparameteri);
     register_handler("glTexEnvi_1", g1_texenvi);
+    register_handler("glTexEnvf_1", g1_texenvf);
     register_handler("glGenTextures_1", g1_gentextures);
     register_handler("glDeleteTextures_1", g1_deletetextures);
     register_handler("glTexImage2D_1", g1_teximage2d);

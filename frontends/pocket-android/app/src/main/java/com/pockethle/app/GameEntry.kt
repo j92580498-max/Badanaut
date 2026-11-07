@@ -3,6 +3,8 @@ package com.pockethle.app
 import org.json.JSONArray
 import org.json.JSONObject
 
+enum class GamePlatform { BADA, POCKET_PC }
+
 /**
  * Mirror of `pocket_library::GameEntry` on the Kotlin side. Built by
  * parsing the JSON blob returned from [NativeBridge.listGames].
@@ -16,6 +18,8 @@ data class GameEntry(
     val importedAt: Long,
     val icon: String?,
     val settings: GameSettings,
+    val platform: GamePlatform = GamePlatform.POCKET_PC,
+    val directory: String? = null,
 ) {
     companion object {
         fun fromJson(obj: JSONObject): GameEntry {

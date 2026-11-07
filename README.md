@@ -17,11 +17,26 @@ Set `ANDROID_SDK_ROOT` to the SDK directory. If the NDK is installed somewhere e
 ./frontends/pocket-android/build-android.sh
 ```
 
-The script builds the Unicorn-backed native library for `arm64-v8a` and `armeabi-v7a`, then creates `dist/PocketHLE-Bada-Android.apk`.
+The script builds the Unicorn-backed native library for `arm64-v8a` and `armeabi-v7a`, then creates `dist/Badanaut-Android.apk`.
 
-## Bada game files
+## Download an APK from GitHub Actions
 
-The game and the Bada firmware C++ runtime are intentionally not included. To build an APK with the Sky Force shortcut enabled, place a legally obtained package and compatible Bada runtime at:
+Open the repository's **Actions** tab, select **Android APK**, and open a successful run. Under **Artifacts**, download **Badanaut-Android-…**, extract the ZIP, and install `Badanaut-Android.apk` on your phone.
+
+CI builds both native engines for ARM64 and ARMv7, runs the Android unit tests, and checks the APK's native libraries and signature before uploading it. It runs on `main`, `codex/**` branches and pull requests. Once the workflow is on the default branch, use **Run workflow** to start a new build manually. APK artifacts are retained for 30 days.
+
+## Launch a Bada game on Android
+
+1. Open **Bada**, the default library tab.
+2. Tap **Add Bada game** and select the game's ZIP package. It must contain `Bin/*.exe` (a 32-bit ARM ELF) and `Info/Appinfo.sys` or `Info/manifest.xml`, together with its resources. A containing folder inside the ZIP is supported.
+3. Tap **Select runtime** and select a compatible Bada `libstdc++.so.6` or `libstdc++.so.6.0.12` from your SDK/firmware. Match its hard-float or soft-float ABI to the game.
+4. Tap the installed game's card to launch it. The card menu also provides game information, runtime setup and removal.
+
+The **Pocket PC** tab retains CAB/ZIP/RAR/Windows EXE imports and the PocketHLE runner. Bada packages use the separate bada engine. Importing a package does not guarantee game compatibility with the current HLE implementation.
+
+## Optional bundled game files
+
+Games and the Bada firmware C++ runtime are intentionally not included. Users can import them on the phone without rebuilding the APK. To preinstall Sky Force in a local APK, place a legally obtained package and compatible Bada runtime at:
 
 ```text
 frontends/pocket-android/app/src/main/assets/bada/sky-force-spaces.im.zip

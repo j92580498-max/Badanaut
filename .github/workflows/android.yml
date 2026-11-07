@@ -1,0 +1,111 @@
+name: Android APK
+
+on:
+  push:
+    branches: [main, 'codex/**']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  android:
+    name: Build and test Android APK
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/.build/cargo-target
+      CARGO_BUILD_JOBS: 2
+      CMAKE_BUILD_PARALLEL_LEVEL: 2
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+          log-accepted-android-sdk-licenses: false
+
+      - name: Install Android build tools
+        run: |
+          sdkmanager "platforms;android-34" "build-tools;34.0.0" "ndk;26.1.10909125" "cmake;3.22.1"
+          printf 'ANDROID_NDK_HOME=%s\n' "$ANDROID_SDK_ROOT/ndk/26.1.10909125" >> "$GITHUB_ENV"
+
+      - name: Set up Rust and Android targets
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android, armv7-linux-androideabi
+
+      - name: Cache Rust builds
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: '. -> .build/cargo-target'
+          shared-key: android-ndk-26.1.10909125
+
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }}-gradle-${{ hashFiles('frontends/pocket-android/**/*.gradle.kts', 'frontends/pocket-android/gradle/wrapper/gradle-wrapper.properties') }}
+          restore-keys: ${{ runner.os }}-gradle-
+
+      - name: Keep the debug signing key for subsequent builds
+        uses: actions/cache@v4
+        with:
+          path: ~/.android/debug.keystore
+          key: ${{ runner.os }}-badanaut-debug-signing-v1
+
+      - name: Install cargo-ndk
+        run: cargo install --locked --version 4.1.2 cargo-ndk
+
+      - name: Build native engines and APK
+        run: bash frontends/pocket-android/build-android.sh
+
+      - name: Run Android unit tests
+        working-directory: frontends/pocket-android
+        run: ./gradlew --no-daemon --max-workers=2 :app:testDebugUnitTest
+
+      - name: Verify packaged native libraries and APK signature
+        run: |
+          python3 tools/verify-android-apk.py dist/Badanaut-Android.apk
+          "$ANDROID_SDK_ROOT/build-tools/34.0.0/apksigner" verify dist/Badanaut-Android.apk
+
+      - name: Upload Android APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Badanaut-Android-${{ github.run_number }}
+          path: dist/Badanaut-Android.apk
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload unit test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Android-test-reports-${{ github.run_number }}
+          path: frontends/pocket-android/app/build/test-results/testDebugUnitTest/
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Show download instructions
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" <<'SUMMARY'
+          ## Android APK
+          Download **Badanaut-Android** from the **Artifacts** section of this run, unzip it and install **Badanaut-Android.apk** on your phone.
+
+          The APK contains both native engines for **arm64-v8a** and **armeabi-v7a**. In the Bada tab, import your game ZIP and select a compatible Bada **libstdc++.so.6** runtime.
+          SUMMARY

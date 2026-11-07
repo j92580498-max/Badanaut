@@ -11,48 +11,168 @@
         android:layout_height="wrap_content"
         android:fitsSystemWindows="true"
         android:theme="@style/ThemeOverlay.PocketHLE.AppBar">
-
         <androidx.appcompat.widget.Toolbar
             android:id="@+id/toolbar"
             android:layout_width="match_parent"
             android:layout_height="?attr/actionBarSize"
             android:background="?attr/colorPrimary"
-            app:popupTheme="@style/ThemeOverlay.AppCompat.Light"
+            app:subtitle="@string/launcher_subtitle"
             app:title="@string/app_name" />
     </com.google.android.material.appbar.AppBarLayout>
 
-    <FrameLayout
+    <androidx.core.widget.NestedScrollView
         android:layout_width="match_parent"
         android:layout_height="match_parent"
+        android:fillViewport="true"
+        android:clipToPadding="false"
+        android:paddingBottom="88dp"
         app:layout_behavior="@string/appbar_scrolling_view_behavior">
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical">
 
-        <androidx.recyclerview.widget.RecyclerView
-            android:id="@+id/recycler"
+        <com.google.android.material.button.MaterialButtonToggleGroup
+            android:id="@+id/platforms"
             android:layout_width="match_parent"
-            android:layout_height="match_parent"
-            android:clipToPadding="false"
-            android:padding="8dp"
-            tools:listitem="@layout/item_game" />
+            android:layout_height="wrap_content"
+            android:layout_marginHorizontal="16dp"
+            android:layout_marginTop="12dp"
+            app:selectionRequired="true"
+            app:singleSelection="true">
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/tab_bada"
+                style="?attr/materialButtonOutlinedStyle"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:minHeight="48dp"
+                android:text="@string/platform_bada" />
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/tab_pocket_pc"
+                style="?attr/materialButtonOutlinedStyle"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:minHeight="48dp"
+                android:text="@string/platform_pocket_pc" />
+        </com.google.android.material.button.MaterialButtonToggleGroup>
 
         <TextView
-            android:id="@+id/empty_state"
+            android:id="@+id/library_hint"
             android:layout_width="match_parent"
-            android:layout_height="match_parent"
-            android:gravity="center"
-            android:padding="32dp"
-            android:text="@string/empty_library"
+            android:layout_height="wrap_content"
+            android:layout_marginHorizontal="20dp"
+            android:layout_marginTop="8dp"
+            android:text="@string/bada_library_hint"
             android:textColor="?android:attr/textColorSecondary"
-            android:textSize="18sp"
-            android:visibility="gone" />
-    </FrameLayout>
+            android:textSize="14sp" />
 
-    <com.google.android.material.floatingactionbutton.FloatingActionButton
+        <com.google.android.material.card.MaterialCardView
+            android:id="@+id/runtime_card"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginHorizontal="16dp"
+            android:layout_marginTop="12dp"
+            app:cardCornerRadius="16dp"
+            app:cardElevation="0dp"
+            app:strokeColor="@color/card_stroke"
+            app:strokeWidth="1dp">
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:padding="16dp">
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="@string/bada_setup_title"
+                    android:textSize="16sp"
+                    android:textStyle="bold" />
+                <TextView
+                    android:id="@+id/runtime_status"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:accessibilityLiveRegion="polite"
+                    android:text="@string/library_loading"
+                    android:textColor="?android:attr/textColorSecondary"
+                    android:textSize="14sp" />
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/btn_runtime"
+                    style="?attr/materialButtonOutlinedStyle"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:minHeight="48dp"
+                    android:text="@string/bada_select_runtime"
+                    android:textAllCaps="false" />
+            </LinearLayout>
+        </com.google.android.material.card.MaterialCardView>
+
+        <TextView
+            android:id="@+id/library_title"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginHorizontal="20dp"
+            android:layout_marginTop="16dp"
+            android:layout_marginBottom="4dp"
+            android:text="@string/library_title"
+            android:textSize="18sp"
+            android:textStyle="bold" />
+        <com.google.android.material.progressindicator.LinearProgressIndicator
+            android:id="@+id/library_progress"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginHorizontal="20dp"
+            android:indeterminate="true"
+            android:visibility="gone" />
+        <TextView
+            android:id="@+id/progress_label"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginHorizontal="20dp"
+            android:layout_marginTop="4dp"
+            android:accessibilityLiveRegion="polite"
+            android:textColor="?android:attr/textColorSecondary"
+            android:textSize="13sp"
+            android:visibility="gone" />
+
+        <FrameLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:minHeight="200dp">
+            <androidx.recyclerview.widget.RecyclerView
+                android:id="@+id/recycler"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:clipToPadding="false"
+                android:paddingHorizontal="10dp"
+                android:nestedScrollingEnabled="false"
+                tools:listitem="@layout/item_game_grid" />
+            <TextView
+                android:id="@+id/empty_state"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:minHeight="200dp"
+                android:gravity="center"
+                android:paddingHorizontal="32dp"
+                android:paddingVertical="24dp"
+                android:text="@string/bada_empty_library"
+                android:textColor="?android:attr/textColorSecondary"
+                android:textSize="17sp"
+                android:visibility="gone" />
+        </FrameLayout>
+    </LinearLayout>
+    </androidx.core.widget.NestedScrollView>
+
+    <com.google.android.material.floatingactionbutton.ExtendedFloatingActionButton
         android:id="@+id/fab_import"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
         android:layout_gravity="bottom|end"
         android:layout_margin="16dp"
-        android:contentDescription="@string/import_cab"
-        app:srcCompat="@drawable/ic_add" />
-
+        android:contentDescription="@string/bada_import_game"
+        android:text="@string/bada_import_game"
+        app:icon="@drawable/ic_add" />
 </androidx.coordinatorlayout.widget.CoordinatorLayout>

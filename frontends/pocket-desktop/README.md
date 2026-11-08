@@ -1,9 +1,14 @@
 # Badanaut desktop
 
-The Windows and Linux frontend uses the same offline HTML/CSS/JavaScript app
-picker as Android. PySide6 hosts the picker, handles local file selection, and
-starts the native Bada SDL/OpenGL engine in a separate process. Both the library
-and games start windowed. Game windows can be resized; F11 toggles fullscreen.
+The Windows and Linux frontend paints the compact native game picker with
+Qt/QPainter. Android paints the same layout with Canvas. The layout, strings,
+and Liberation Sans fonts come from `../shared-ui/`; no browser is required.
+The library opens in a decorated, resizable 320×480 window. Enlarging it scales
+and centers the reference layout, keeping four columns and 15 games per page.
+The arrow wraps through library pages.
+
+PySide6 handles local file selection and starts the Bada SDL/OpenGL engine in a
+separate windowed process. Game windows can be resized; F11 toggles fullscreen.
 
 ## Build and run
 
@@ -11,7 +16,7 @@ Use Python 3.12, CMake 3.22+, a C/C++17 compiler, SDL2, SDL2_image and OpenGL.
 On Ubuntu 22.04 or later:
 
 ```sh
-sudo apt-get install cmake ninja-build libsdl2-dev libsdl2-image-dev libgl-dev libegl1 libopengl0 libxcb-cursor0 libxkbcommon-x11-0
+sudo apt-get install cmake ninja-build libsdl2-dev libsdl2-image-dev libgl-dev libegl1 libopengl0 libxcb-cursor0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-render-util0 libxcb-xinerama0 libxkbcommon-x11-0
 python3 -m venv .venv
 . .venv/bin/activate
 python -m pip install -r frontends/pocket-desktop/requirements.txt
@@ -30,7 +35,7 @@ Unicorn 2.1.4 is downloaded at configure time using a pinned commit and verified
 SHA-256. Rust is not required to build the new Bada frontends.
 
 Run `python frontends/pocket-desktop/package.py` to bundle the application, shared
-UI, engine, CPU library, Qt WebEngine and native dependencies into `dist/Badanaut/`.
+layout/fonts, engine, CPU library, Qt Essentials and native dependencies into `dist/Badanaut/`.
 The script also creates a Windows ZIP or Linux tar.gz. Extract the complete
 archive and run `Badanaut.exe` or `./Badanaut/Badanaut`; keep its `_internal`
 directory. Neither Python nor an Android SDK is needed to run a packaged build.
@@ -45,12 +50,16 @@ Import Bada ZIP packages with `Bin/*.exe` and `Info/Appinfo.sys` or
 must match the game. Packages and firmware are never included in distribution.
 
 Artwork comes from the metadata's `Icon` path, or `icon`, `appicon`, or
-`mainmenuicon` images in Res, Info, or the package root. Unsupported/missing
-artwork gets a colored initials icon. The game details menu can replace it with
-a local PNG/JPEG/WebP. Icons share rounded corners, a gloss option, shadows,
-consistent spacing and labels. The design is an original implementation inspired
-by [touchHLE / HyperHLE-Reborn](https://github.com/KlugKlugTG/HyperHLE-Reborn);
-no source or assets from that project are bundled.
+`mainmenuicon` images, or an executable-named image such as `Res/SkyForce.png`. Unsupported/missing
+artwork gets a charcoal tile with white initials. Right-click or hold an icon
+for details and select a local PNG/JPEG/WebP as artwork. Icons are center-cropped
+and rounded without a gloss overlay. Use the arrow, a horizontal swipe or
+Page Up/Down to change pages. Arrow keys/Tab select a control; Enter opens it,
+Menu opens game details, and Escape goes back.
+
+The layout follows the reference from
+[touchHLE / HyperHLE-Reborn](https://github.com/KlugKlugTG/HyperHLE-Reborn).
+No source or game artwork from that project is bundled.
 
 Settings apply on the next launch. Resolution controls the presentation window,
 with orientation following the game and large windows constrained to the monitor.
@@ -68,8 +77,9 @@ Launch logs are bounded to 2 MB and can be exported in Settings.
 
 ```sh
 python -m unittest discover -s frontends/pocket-desktop/tests -v
+xvfb-run -a python tools/check-shared-ui.py --screenshots .build/ui-preview
 xvfb-run -a python frontends/pocket-desktop/main.py --library .build/smoke-library --smoke-test
 ```
 
-The smoke check uses the real Qt bridge and shared UI. GitHub Actions also runs
+The smoke check uses the native renderer and real library host. GitHub Actions also runs
 it against the packaged Windows and Linux applications.

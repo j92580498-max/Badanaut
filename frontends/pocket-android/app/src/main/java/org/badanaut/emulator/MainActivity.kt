@@ -1,16 +1,11 @@
-package com.pockethle.app
+package org.badanaut.emulator
 
-import android.annotation.SuppressLint
 import android.content.Intent
 import android.graphics.Color
 import android.net.Uri
 import android.os.Bundle
 import android.provider.OpenableColumns
-import android.webkit.JavascriptInterface
-import android.webkit.WebResourceRequest
-import android.webkit.WebResourceResponse
-import android.webkit.WebView
-import android.webkit.WebViewClient
+import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.lifecycleScope
@@ -19,11 +14,10 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
-import java.io.ByteArrayInputStream
 
 /** The same offline app picker is packaged on Android, Linux and Windows. */
 class MainActivity : AppCompatActivity() {
-    private lateinit var web: WebView
+    private lateinit var launcher: LauncherView
     private var pickerCall: JSONObject? = null
     private var bundledChecked = false
     private val picker = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
@@ -34,58 +28,41 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         pickerCall = savedInstanceState?.getString("picker_call")?.let(::JSONObject)
-        window.statusBarColor = Color.rgb(17, 29, 48)
-        window.navigationBarColor = Color.rgb(12, 20, 36)
-        web = WebView(this)
-        web.setBackgroundColor(Color.rgb(12, 20, 36))
-        web.settings.apply {
-            javaScriptEnabled = true
-            allowFileAccess = false
-            allowContentAccess = false
-            javaScriptCanOpenWindowsAutomatically = false
-        }
-        web.addJavascriptInterface(Bridge(), "BadanautHost")
-        web.webViewClient = object : WebViewClient() {
-            override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest) =
-                request.url.toString() != "https://badanaut.local/index.html"
-
-            override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse {
-                val url = request.url
-                val name = url.path?.removePrefix("/").orEmpty()
-                if (url.scheme == "https" && url.host == "badanaut.local" && name in listOf("index.html", "style.css", "app.js")) {
-                    val mime = when (name) { "style.css" -> "text/css"; "app.js" -> "application/javascript"; else -> "text/html" }
-                    return WebResourceResponse(mime, "UTF-8", assets.open(name))
-                }
-                return WebResourceResponse("text/plain", "UTF-8", 403, "Forbidden", emptyMap(), ByteArrayInputStream(ByteArray(0)))
+        window.statusBarColor = Color.BLACK
+        window.navigationBarColor = Color.BLACK
+        launcher = LauncherView(this, ::request)
+        launcher.restoreState(savedInstanceState?.getString("launcher_state"), pickerCall)
+        setContentView(launcher)
+        onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
+            override fun handleOnBackPressed() {
+                if (!launcher.back()) { isEnabled = false; onBackPressedDispatcher.onBackPressed(); isEnabled = true }
             }
-        }
-        setContentView(web)
-        web.loadUrl("https://badanaut.local/index.html")
+        })
+        if (pickerCall == null) launcher.send("bootstrap")
     }
 
     override fun onSaveInstanceState(outState: Bundle) {
         pickerCall?.let { outState.putString("picker_call", it.toString()) }
+        outState.putString("launcher_state", launcher.saveState())
         super.onSaveInstanceState(outState)
     }
 
-    private inner class Bridge {
-        @JavascriptInterface
-        fun request(raw: String) {
-            val call = runCatching { JSONObject(raw) }.getOrNull() ?: return
-            runOnUiThread {
-                when (call.optString("action")) {
-                    "importGame", "importRuntime", "setIcon" -> {
-                        if (pickerCall != null) { reply(call.optInt("id"), error = "Finish selecting the current file first"); return@runOnUiThread }
-                        pickerCall = call
-                        picker.launch(if (call.getString("action") == "setIcon") arrayOf("image/png", "image/jpeg", "image/webp") else arrayOf("*/*"))
-                    }
-                    else -> perform(call)
+    private fun request(call: JSONObject) {
+        when (call.optString("action")) {
+            "importGame", "importRuntime", "setIcon" -> {
+                if (pickerCall != null) { reply(call.optInt("id"), error = "Finish selecting the current file first"); return }
+                pickerCall = call
+                try {
+                    picker.launch(if (call.getString("action") == "setIcon") arrayOf("image/png", "image/jpeg", "image/webp") else arrayOf("*/*"))
+                } catch (error: Exception) {
+                    pickerCall = null
+                    reply(call.optInt("id"), error = error.message ?: "Could not open file manager")
                 }
             }
+            else -> perform(call)
         }
     }
 
@@ -139,12 +116,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun reply(id: Int, value: Any = true, error: String? = null) {
         val response = JSONObject().apply { put("id", id); put("ok", error == null); put("result", value); put("error", error ?: JSONObject.NULL) }
-        if (!isDestroyed) web.evaluateJavascript("window.Badanaut.receive(${JSONObject.quote(response.toString())})", null)
+        if (!isDestroyed) launcher.receive(response)
     }
 
-    override fun onDestroy() {
-        web.removeJavascriptInterface("BadanautHost")
-        web.destroy()
-        super.onDestroy()
-    }
 }

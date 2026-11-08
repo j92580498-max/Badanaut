@@ -1,4 +1,4 @@
-package com.pockethle.app
+package org.badanaut.emulator
 
 import java.io.File
 import java.io.IOException
@@ -103,14 +103,15 @@ object BadaPackage {
         return Details(root, executables.single(), appId, name.ifBlank { executables.single().nameWithoutExtension }, icon)
     }
 
-    fun iconFile(root: File, hint: String = ""): File? {
+    fun iconFile(root: File, hint: String = "", executable: String = ""): File? {
         val candidates = mutableListOf(File(root, "_badanaut-icon.png"))
         if (hint.isNotBlank()) for (base in listOf(root, File(root, "Res"), File(root, "Info"))) {
             val file = File(base, hint.replace('\\', '/'))
             if (file.canonicalPath.startsWith(root.canonicalPath + File.separator)) candidates.add(file)
         }
+        val stems = listOf("icon", "appicon", "mainmenuicon", File(executable.replace('\\', '/')).nameWithoutExtension.lowercase(Locale.ROOT))
         for (directory in listOf(File(root, "Res"), File(root, "Info"), root)) candidates.addAll(
-            directory.listFiles().orEmpty().filter { it.nameWithoutExtension.lowercase(Locale.ROOT) in listOf("icon", "appicon", "mainmenuicon") }
+            directory.listFiles().orEmpty().filter { it.nameWithoutExtension.lowercase(Locale.ROOT) in stems }
                 .sortedBy { it.name },
         )
         return candidates.firstOrNull { it.isFile && it.length() <= 2L * 1024 * 1024 && it.extension.lowercase(Locale.ROOT) in listOf("png", "jpg", "jpeg", "webp") }

@@ -1,4 +1,4 @@
-package com.pockethle.app
+package org.badanaut.emulator
 
 import android.content.Context
 import android.net.Uri
@@ -42,7 +42,7 @@ object BadaAssets {
                 executable = metadata.getString("executable"),
                 sourcePackage = metadata.getString("source"),
                 importedAt = metadata.getLong("imported_at"),
-                icon = BadaPackage.iconFile(directory, metadata.optString("icon"))?.let {
+                icon = BadaPackage.iconFile(directory, metadata.optString("icon"), metadata.getString("executable"))?.let {
                     val bytes = it.readBytes()
                     val mime = when {
                         bytes.size >= 8 && bytes.copyOfRange(0, 8).contentEquals(byteArrayOf(137.toByte(), 80, 78, 71, 13, 10, 26, 10)) -> "png"

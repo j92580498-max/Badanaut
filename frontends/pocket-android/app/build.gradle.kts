@@ -4,16 +4,16 @@ plugins {
 }
 
 android {
-    namespace = "com.pockethle.app"
+    namespace = "org.badanaut.emulator"
     compileSdk = 34
     ndkVersion = "26.1.10909125"
 
     defaultConfig {
-        applicationId = "com.pockethle.app"
+        applicationId = "org.badanaut.emulator"
         minSdk = 24
         targetSdk = 34
-        versionCode = 10
-        versionName = "0.7.0"
+        versionCode = 11
+        versionName = "0.8.0"
 
         ndk {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a")

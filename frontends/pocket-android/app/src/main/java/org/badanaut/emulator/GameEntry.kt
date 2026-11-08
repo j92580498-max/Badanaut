@@ -1,4 +1,4 @@
-package com.pockethle.app
+package org.badanaut.emulator
 
 /** Installed Samsung bada package metadata for the launcher. */
 data class GameEntry(

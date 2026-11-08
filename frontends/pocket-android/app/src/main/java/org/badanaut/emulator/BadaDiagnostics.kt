@@ -1,4 +1,4 @@
-package com.pockethle.app
+package org.badanaut.emulator
 
 import android.content.ClipData
 import android.content.Context

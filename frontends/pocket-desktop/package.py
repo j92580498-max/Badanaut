@@ -14,7 +14,7 @@ if not engine.is_file():
 command = [sys.executable, "-m", "PyInstaller", "--noconfirm", "--clean", "--onedir", "--windowed",
            "--name", "Badanaut", "--distpath", str(root / "dist"), "--workpath", str(root / ".build/pyinstaller"),
            "--specpath", str(root / ".build"), "--add-data", f"{root / 'frontends/shared-ui'}{os.pathsep}shared-ui"]
-for package in ("PySide6", "PySide6_Addons", "PySide6_Essentials", "shiboken6"):
+for package in ("PySide6_Essentials", "shiboken6"):
     command += ["--copy-metadata", package]
 for notice in ("THIRD_PARTY_NOTICES.md", "LICENSE-MIT", "LICENSE-APACHE", "third_party/bada-hle/UPSTREAM.md"):
     command += ["--add-data", f"{root / notice}{os.pathsep}notices"]

@@ -39,7 +39,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake ninja-build libsdl2-dev libsdl2-image-dev libgl-dev libegl1 libopengl0 libxcb-cursor0 libxkbcommon-x11-0 xvfb xauth
+          sudo apt-get install -y cmake ninja-build libsdl2-dev libsdl2-image-dev libgl-dev libegl1 libopengl0 libxcb-cursor0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-render-util0 libxcb-xinerama0 libxkbcommon-x11-0 xvfb xauth
       - name: Set up Windows compiler
         if: runner.os == 'Windows'
         uses: ilammy/msvc-dev-cmd@v1
@@ -53,9 +53,16 @@ jobs:
         run: python -m pip install -r frontends/pocket-desktop/requirements.txt
       - name: Test Bada library imports and display settings
         run: python -m unittest discover -s frontends/pocket-desktop/tests -v
-      - name: Test shared picker at desktop and phone sizes
+      - name: Test native picker at reference, desktop and phone sizes
         if: runner.os == 'Linux'
-        run: xvfb-run -a env QTWEBENGINE_CHROMIUM_FLAGS=--disable-gpu python tools/check-shared-ui.py
+        run: xvfb-run -a python tools/check-shared-ui.py --screenshots .build/ui-preview
+      - name: Upload native interface previews
+        if: runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: Badanaut-UI-previews-${{ github.run_number }}
+          path: .build/ui-preview/*.png
+          if-no-files-found: error
       - name: Configure Linux engine
         if: runner.os == 'Linux'
         run: cmake -S . -B .build/desktop -G Ninja -DCMAKE_BUILD_TYPE=Release
@@ -72,7 +79,7 @@ jobs:
         run: python frontends/pocket-desktop/package.py
       - name: Check packaged Linux interface
         if: runner.os == 'Linux'
-        run: xvfb-run -a env QTWEBENGINE_CHROMIUM_FLAGS=--disable-gpu dist/Badanaut/Badanaut --library .build/smoke-library --smoke-test
+        run: xvfb-run -a dist/Badanaut/Badanaut --library .build/smoke-library --smoke-test
       - name: Check packaged Windows interface
         if: runner.os == 'Windows'
         shell: pwsh

@@ -2,7 +2,7 @@
 
 Badanaut contains two emulation paths:
 
-- Shared picker: `frontends/shared-ui/`, packaged unchanged on all platforms.
+- Native picker layout/fonts: `frontends/shared-ui/`, packaged unchanged on all platforms.
 - Desktop Bada host: `frontends/pocket-desktop/`; native engine builds from root CMake; packaging uses Python/PySide6.
 - Android bada launcher: `frontends/pocket-android/`; build with `build-android.sh`.
 - Samsung bada HLE engine: `third_party/bada-hle/`; read its `README.md` and `UPSTREAM.md` before changing it.

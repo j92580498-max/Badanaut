@@ -1,3 +1,4 @@
+import base64
 from pathlib import Path
 import sys
 import tempfile
@@ -40,6 +41,15 @@ class LibraryTests(unittest.TestCase):
         self.assertTrue(game["icon"].startswith("data:image/png;base64,"))
         self.assertEqual((self.library.directory(game_id) / "Res/save.dat").read_bytes(), b"saved progress")
         self.assertEqual(len(list(self.library.games.iterdir())), 1)
+
+    def test_empty_icon_metadata_uses_executable_named_artwork(self):
+        game_id = self.library.import_game(self.archive({"info/appinfo.sys": b'<Application AppId="demo" Name="Demo"><Icon/></Application>',
+                                                         "Res/DEMO.PNG": b"\x89PNG\r\n\x1a\n" + b"game artwork"}))
+        root = self.library.directory(game_id)
+        (root / "Res/icon.png").unlink()
+        self.assertEqual(base64.b64decode(self.library.list_games()[0]["icon"].split(",")[1]), b"\x89PNG\r\n\x1a\n" + b"game artwork")
+        (root / "_badanaut-icon.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"custom artwork")
+        self.assertEqual(base64.b64decode(self.library.list_games()[0]["icon"].split(",")[1]), b"\x89PNG\r\n\x1a\n" + b"custom artwork")
 
     def test_failed_import_does_not_leave_partial_installation(self):
         for name in ("../escape", "C:/escape", "Res/CON.txt", "Res/trailing.", "Res/save.dat ", "RES/SAVE.DAT"):

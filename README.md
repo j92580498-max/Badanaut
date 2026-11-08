@@ -3,12 +3,13 @@
 Badanaut runs original 32-bit ARM Samsung bada applications through high-level
 emulation. The Bada engine is based on [mariotaku/bada-hle](https://github.com/mariotaku/bada-hle).
 
-The new library uses a shared interface on **Windows, Linux, and Android**,
-inspired by the [touchHLE / HyperHLE-Reborn app picker](https://github.com/KlugKlugTG/HyperHLE-Reborn).
-Games appear as rounded, optionally glossy icons with labels, an evenly spaced
-paged grid, search, sorting and a bottom dock. Package artwork is detected
-where available; game details let you select your own icon. The old Android
-launcher screens and Rust desktop UI have been replaced.
+The native launcher on **Windows, Linux, and Android** follows the compact
+[touchHLE / HyperHLE-Reborn app picker](https://github.com/KlugKlugTG/HyperHLE-Reborn):
+a black background, four columns of rounded game icons, gray labels, an arrow
+for paging, and plain white buttons. Qt draws the desktop interface; Android
+uses Canvas. Both use the same layout and bundled fonts. The browser UI has
+been removed. Package artwork is detected where available; game details let
+you select your own icon.
 
 ## Download builds
 
@@ -28,17 +29,18 @@ on Ubuntu 22.04 and require a compatible glibc and OpenGL driver.
 
 ## Add and play games
 
-1. Choose **Add game** and select a Bada ZIP containing one `Bin/*.exe` ARM32
+1. Choose **Open file manager** and select a Bada ZIP containing one `Bin/*.exe` ARM32
    ELF and `Info/Appinfo.sys` or `Info/manifest.xml`, along with its resources.
    A containing directory inside the ZIP is supported.
-2. Choose **Bada runtime** and select an original ARM32 Bada `libstdc++.so.6`
+2. Open **Settings → Select Bada runtime** and select an original ARM32 Bada `libstdc++.so.6`
    or `libstdc++.so.6.0.12` from your SDK/firmware. Its hard/soft-float ABI must
    match the game. Host Windows, Linux and Android libraries are incompatible.
-3. Click or tap the game's icon. Its **•••** button opens details, artwork
-   selection and removal. **Play again** opens the most recently launched game.
+3. Click or tap the game's icon. Right-click or hold an icon to open
+   details, choose artwork or remove the installed package and its saves.
 
-Packages, runtime and saves stay in local application storage. Existing Android
-Bada installations keep their application ID and library metadata. Importing a
+Packages, runtime and saves stay in local application storage. Android uses the package name
+`org.badanaut.emulator`, which installs separately from the former
+`com.pockethle.app` app. Import games and the runtime into the new app. Importing a
 package does not guarantee compatibility with the current HLE implementation.
 Game files and firmware are not included in builds and must not be committed.
 
@@ -50,7 +52,7 @@ are resizable; **F11** toggles fullscreen. **Settings** offers:
 - Original automatic output, 240×400, 480×800, 540×960, 720×1280 and 1080×1920.
 - Fit or whole-pixel scaling, preserving aspect ratio.
 - Sharp or smooth Canvas filtering and vertical sync.
-- Optional fullscreen games and classic-gloss or flat library icons.
+- Optional fullscreen games.
 
 Resolution follows each game's orientation. On desktop it sets the window size,
 constrained to the monitor; on Android it limits the presentation area in physical
@@ -78,7 +80,7 @@ for either Bada frontend.
 
 ## Source map and attribution
 
-- `frontends/shared-ui/` — shared library and settings interface.
+- `frontends/shared-ui/` — shared native layout, text and fonts.
 - `frontends/pocket-desktop/` — Python/Qt desktop host and packaging.
 - `frontends/pocket-android/` — Android host, package management and SDL activity.
 - `third_party/bada-hle/` — Bada HLE engine and upstream notice.

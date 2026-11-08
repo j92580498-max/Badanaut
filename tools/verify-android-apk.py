@@ -15,9 +15,11 @@ def verify_apk(path):
             raise ValueError("APK contains duplicate entries")
         if any(name.startswith("lib/") and name.endswith("/libpockethle_jni.so") for name in names):
             raise ValueError("APK still contains the Pocket PC native engine")
-        for name in ("AndroidManifest.xml", "classes.dex", "resources.arsc", "assets/index.html", "assets/style.css", "assets/app.js"):
+        for name in ("AndroidManifest.xml", "classes.dex", "resources.arsc", "assets/launcher.json", "assets/fonts/LiberationSans-Regular.ttf", "assets/fonts/LiberationSans-Bold.ttf", "assets/fonts/LICENSE.txt"):
             if name not in names or not apk.getinfo(name).file_size:
                 raise ValueError(f"APK is missing {name}")
+        if any(name in names for name in ("assets/index.html", "assets/style.css", "assets/app.js")):
+            raise ValueError("APK still contains the browser interface")
         for abi, (elf_class, machine) in architectures.items():
             for library in libraries:
                 name = f"lib/{abi}/{library}"

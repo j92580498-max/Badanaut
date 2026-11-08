@@ -16,7 +16,7 @@ spec.loader.exec_module(verifier)
 
 class ApkVerificationTest(unittest.TestCase):
     def entries(self):
-        entries = {name: b"fixture" for name in ("AndroidManifest.xml", "classes.dex", "resources.arsc", "assets/index.html", "assets/style.css", "assets/app.js")}
+        entries = {name: b"fixture" for name in ("AndroidManifest.xml", "classes.dex", "resources.arsc", "assets/launcher.json", "assets/fonts/LiberationSans-Regular.ttf", "assets/fonts/LiberationSans-Bold.ttf", "assets/fonts/LICENSE.txt")}
         for abi, elf_class, machine in (("arm64-v8a", 2, 183), ("armeabi-v7a", 1, 40)):
             header = bytearray(64)
             header[:6] = b"\x7fELF" + bytes((elf_class, 1))
@@ -39,8 +39,14 @@ class ApkVerificationTest(unittest.TestCase):
 
     def test_requires_the_shared_interface_in_the_apk(self):
         entries = self.entries()
-        del entries["assets/app.js"]
-        with self.assertRaisesRegex(ValueError, "assets/app.js"):
+        del entries["assets/launcher.json"]
+        with self.assertRaisesRegex(ValueError, "assets/launcher.json"):
+            self.verify(entries)
+
+    def test_rejects_retained_browser_interface(self):
+        entries = self.entries()
+        entries["assets/index.html"] = b"old interface"
+        with self.assertRaisesRegex(ValueError, "browser interface"):
             self.verify(entries)
 
     def test_rejects_retained_pocket_pc_engine(self):

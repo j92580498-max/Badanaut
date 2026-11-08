@@ -1,24 +1,28 @@
-# Shared app picker
+# Shared native picker assets
 
-`index.html`, `style.css`, and `app.js` are the entire Badanaut library and settings
-interface. Android packages this directory through its Gradle assets source set;
-desktop packages exactly the same files with PyInstaller. No CDN or network is
-used. Android loads a fixed intercepted HTTPS origin; Qt loads the local entry
-point and connects through QWebChannel. Images arrive as bounded data URLs.
+`launcher.json` defines the 320×480 reference canvas, four-column grid, 58-pixel
+rounded icons, gray labels, arrow tile and plain white buttons. It also contains
+display choices, text and colors. `fonts/` contains unmodified Liberation Sans
+2.1.5 regular/bold fonts and their SIL OFL 1.1 license. These assets are packaged
+unchanged in Windows, Linux and Android builds.
 
-The host receives `{id, action, args}` and replies with
+Desktop draws with `pocket-desktop/launcher.py` (Qt/QPainter); Android draws with
+`LauncherView.kt` (Canvas). The reference canvas scales uniformly and centers in
+the available client area; it always has four columns, 15 games plus a next-page
+arrow. Icons are center-cropped into rounded rectangles without added gloss.
+Long labels are centered and clipped to their cell, following the reference.
+Missing artwork uses a restrained charcoal tile with white initials.
+
+The native host receives `{id, action, args}` and replies with
 `{id, ok, result, error}`. Actions: `bootstrap`, `importGame`, `importRuntime`,
-`setIcon`, `launch`, `remove`, `saveSettings`, and `diagnostics`. Native file
-selection returns `false` when canceled. `bootstrap` supplies installed games,
-runtime status, display settings and platform. Rendering never treats package
-names or metadata as HTML.
-
-The picker draws an evenly spaced, paged grid with classic glossy rounded icons,
-name labels, search, sorting, details and a bottom dock. Touch swipes, mouse and
-keyboard navigation work on the same controls. Settings have the same schema in
-Python and Kotlin. On Android a selected resolution limits physical presentation
-pixels inside the device surface; on desktop it sets the game window size.
+`setIcon`, `launch`, `remove`, `saveSettings`, and `diagnostics`. File selection
+returns `false` when canceled. `bootstrap` supplies installed games, runtime
+status, display settings and platform. Package names are drawn as plain text.
 
 Visual reference: [HyperHLE-Reborn app picker](https://github.com/KlugKlugTG/HyperHLE-Reborn/blob/trunk/src/environment/app_picker.rs),
-derived from touchHLE. This is newly written UI code; no upstream artwork or
-Objective-C/Rust picker implementation is copied.
+derived from touchHLE, and the user's supplied screenshot. The bottom-right
+button opens Badanaut settings. No upstream code or game artwork is bundled.
+
+Run `xvfb-run -a python tools/check-shared-ui.py --screenshots .build/ui-preview`
+with desktop requirements installed to check reference geometry, artwork,
+paging, scaled click targets, long press, details, persisted settings and errors.

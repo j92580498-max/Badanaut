@@ -8,12 +8,10 @@ import os
 from pathlib import Path
 import sys
 
-from PySide6.QtCore import QObject, Signal, Slot, QProcess, QStandardPaths, QUrl, QBuffer, QByteArray, QIODevice, Qt
+from PySide6.QtCore import QObject, Signal, Slot, QProcess, QStandardPaths, QTimer, QBuffer, QByteArray, QIODevice, Qt
 from PySide6.QtGui import QImageReader, QIcon
 from PySide6.QtWidgets import QApplication, QFileDialog, QMainWindow
-from PySide6.QtWebChannel import QWebChannel
-from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineSettings, QWebEngineUrlRequestInterceptor
-from PySide6.QtWebEngineWidgets import QWebEngineView
+from launcher import Launcher
 
 from library import Library, MAX_ICON
 
@@ -29,25 +27,6 @@ def engine_path():
     if getattr(sys, "frozen", False):
         return Path(sys._MEIPASS) / "native" / name
     return Path(__file__).resolve().parents[2] / ".build" / "desktop" / "native" / name
-
-
-class LocalPage(QWebEnginePage):
-    def acceptNavigationRequest(self, url, navigation_type, is_main_frame):
-        return url.isLocalFile() and Path(url.toLocalFile()).resolve() == (assets() / "index.html").resolve()
-
-    def javaScriptConsoleMessage(self, level, text, line, source):
-        print(f"UI: {text}", file=sys.stderr)
-
-
-class LocalRequests(QWebEngineUrlRequestInterceptor):
-    def interceptRequest(self, info):
-        url = info.requestUrl()
-        allowed = url.scheme() == "data" or url.toString() == "qrc:///qtwebchannel/qwebchannel.js"
-        if url.isLocalFile():
-            path = Path(url.toLocalFile()).resolve()
-            allowed = path.parent == assets().resolve() and path.name in ("index.html", "style.css", "app.js")
-        if not allowed:
-            info.block(True)
 
 
 class Host(QObject):
@@ -210,43 +189,38 @@ def main():
     parser = argparse.ArgumentParser(description="Badanaut Bada game library")
     parser.add_argument("--library", type=Path, help="Override the library directory")
     parser.add_argument("--engine", type=Path, help="Override the native emulator path")
-    parser.add_argument("--smoke-test", action="store_true", help="Check packaged UI and bridge, then exit")
+    parser.add_argument("--smoke-test", action="store_true", help="Check packaged native UI and library, then exit")
     args = parser.parse_args()
     app = QApplication(sys.argv[:1])
     app.setApplicationName("Badanaut")
     app.setOrganizationName("Badanaut")
     root = args.library or Path(QStandardPaths.writableLocation(QStandardPaths.AppDataLocation)) / "bada"
     window = QMainWindow()
-    window.setWindowTitle("Badanaut")
+    view = Launcher(assets(), window)
+    window.setWindowTitle(view.layout["version"])
     app.setWindowIcon(QIcon(str(assets() / "mark.svg")))
     available = app.primaryScreen().availableGeometry()
-    window.resize(min(1060, available.width()), min(820, available.height()))
+    window.resize(320, 480)
     window.move(available.center() - window.rect().center())
-    view = QWebEngineView(window)
-    page = LocalPage(view)
-    view.setPage(page)
-    page.settings().setAttribute(QWebEngineSettings.LocalContentCanAccessRemoteUrls, False)
-    page.settings().setAttribute(QWebEngineSettings.JavascriptCanOpenWindows, False)
-    interceptor = LocalRequests(page.profile())
-    page.profile().setUrlRequestInterceptor(interceptor)
-    channel = QWebChannel(page)
     host = Host(window, Library(root), args.engine or engine_path())
-    channel.registerObject("host", host)
-    page.setWebChannel(channel)
+    view.request.connect(host.request)
+    host.reply.connect(view.receive)
+    host.event.connect(view.engine_event)
     window.setCentralWidget(view)
-    view.load(QUrl.fromLocalFile(str(assets() / "index.html")))
     app.aboutToQuit.connect(host.shutdown)
     window.show()
     if args.smoke_test:
-        from PySide6.QtCore import QTimer
-        def check():
-            page.runJavaScript("document.getElementById('runtime-badge').textContent", lambda result: app.exit(0 if result == "Runtime needed" else 1))
         def received(raw):
             response = json.loads(raw)
             if response.get("ok") and isinstance(response.get("result"), dict) and "games" in response["result"]:
-                QTimer.singleShot(700, check)
+                def check():
+                    image = view.grab().toImage()
+                    valid = view.pending is None and view.layout["grid"]["gamesPerPage"] == 15 and not image.isNull()
+                    app.exit(0 if valid else 1)
+                QTimer.singleShot(100, check)
         host.reply.connect(received)
         QTimer.singleShot(30000, lambda: app.exit(1))
+    QTimer.singleShot(0, lambda: view.send("bootstrap"))
     return app.exec()
 
 

@@ -114,17 +114,18 @@ def inspect(extracted):
                       executable=executables[0].relative_to(root).as_posix(), icon=icon)
 
 
-def icon_data(root, hint):
+def icon_data(root, hint, executable=""):
     candidates = [root / "_badanaut-icon.png"]
     if hint:
         for base in (root, root / "Res", root / "Info"):
             candidate = (base / hint.replace("\\", "/")).resolve()
             if candidate.is_relative_to(root.resolve()):
                 candidates.append(candidate)
+    stems = ("icon", "appicon", "mainmenuicon", Path(executable.replace("\\", "/")).stem.lower())
     for directory in (root / "Res", root / "Info", root):
         if directory.is_dir():
             candidates.extend(sorted((p for p in directory.iterdir() if p.is_file() and
-                                      p.stem.lower() in ("icon", "appicon", "mainmenuicon")), key=lambda p: p.name))
+                                      p.stem.lower() in stems), key=lambda p: p.name))
     for path in candidates:
         if not path.is_file() or path.stat().st_size > MAX_ICON:
             continue
@@ -164,7 +165,7 @@ class Library:
                 data = json.loads((path / ENTRY).read_text(encoding="utf-8"))
                 entries.append(dict(id=path.name, name=data["display_name"], appId=data["app_id"],
                                     source=data["source"], importedAt=data["imported_at"],
-                                    lastPlayed=data.get("last_played", 0), icon=icon_data(path, data.get("icon", ""))))
+                                    lastPlayed=data.get("last_played", 0), icon=icon_data(path, data.get("icon", ""), data.get("executable", ""))))
             except (OSError, ValueError, KeyError):
                 continue  # A damaged installation must not hide the rest of the library.
         return entries

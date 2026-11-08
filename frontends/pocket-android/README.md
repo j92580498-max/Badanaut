@@ -1,10 +1,16 @@
 # Badanaut Android
 
-Android uses the same offline app picker as Windows and Linux, packaged from
-`../shared-ui/` by Gradle. The former native library/settings screens have been
-removed. Kotlin keeps package imports, runtime installation, artwork selection,
-diagnostics and a separate `:bada` SDL activity. The application ID and installed
-Bada library paths are preserved.
+Android paints the native game picker with Canvas using the same reference
+layout and bundled fonts as Qt on Windows and Linux. `../shared-ui/` is packaged
+by Gradle. The four-column, 15-game grid is scaled and centered within the
+available screen; the arrow or a horizontal swipe changes pages. Tap an icon to
+launch; hold it for details, custom artwork or removal. TalkBack exposes each
+control, including the long-click details action.
+
+Kotlin handles package imports, runtime installation, artwork selection,
+diagnostics and a separate `:bada` SDL activity. The Android application ID and namespace are `org.badanaut.emulator`. It
+installs separately from the old `com.pockethle.app` application; import games
+and the runtime into the new app. The Bada library directory format is unchanged. No WebView or JavaScript is used.
 
 Build with JDK 17, SDK Platform and Build Tools 34, NDK `26.1.10909125` and
 CMake `3.22.1`:
@@ -22,8 +28,7 @@ native contents. Generated JNI files from older builds are ignored.
 
 Import a Bada ZIP and select the ARM32 firmware C++ runtime separately. The
 package/runtime formats and hard/soft-float requirements are documented in the
-[root README](../../README.md). Existing `filesDir/bada/games/<id>` installations
-remain valid. New optional metadata fields are `icon` and `last_played`.
+[root README](../../README.md). Packages use `filesDir/bada/games/<id>` inside the new application storage. New optional metadata fields are `icon` and `last_played`.
 
 Resolution limits the presentation area in physical pixels without changing
 native device resolution or guest screen dimensions. Larger choices fit the

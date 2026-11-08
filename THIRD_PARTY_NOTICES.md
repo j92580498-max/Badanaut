@@ -24,9 +24,9 @@ The Bada game archive and firmware libraries are not included in this repository
 ## New desktop UI dependencies
 
 The desktop application uses dynamically linked Qt/PySide6 through
-[PySide6 6.8.3](https://doc.qt.io/qtforpython-6/licenses.html), including Qt
-WebEngine. Qt/PySide6 carry LGPL/GPL/commercial licensing options and third-party
-notices, including Chromium notices; retain the notices and license files from
+[PySide6 Essentials 6.8.3](https://doc.qt.io/qtforpython-6/licenses.html).
+Qt/PySide6 carry LGPL/GPL/commercial licensing options and third-party
+notices; retain the notices and license files from
 the redistributed wheels. The bundled Python host is frozen with
 [PyInstaller](https://pyinstaller.org/en/stable/license.html), whose license
 includes the bootloader exception permitting application distribution.
@@ -35,3 +35,7 @@ The shared Badanaut app picker is newly written code inspired visually by
 [HyperHLE-Reborn](https://github.com/KlugKlugTG/HyperHLE-Reborn), a fork of
 HyperHLE/touchHLE. No source, logo, wallpaper, or app artwork from those projects
 is copied into Badanaut. Game icons are read from user-supplied packages or images.
+
+The native launcher bundles unmodified Liberation Sans Regular and Bold 2.1.5,
+licensed under the SIL Open Font License 1.1. Copyright 2010 Google Corporation,
+2012 Red Hat, Inc. See `frontends/shared-ui/fonts/LICENSE.txt`.

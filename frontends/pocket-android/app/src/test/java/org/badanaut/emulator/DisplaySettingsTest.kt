@@ -1,4 +1,4 @@
-package com.pockethle.app
+package org.badanaut.emulator
 
 import org.json.JSONObject
 import org.junit.Assert.*

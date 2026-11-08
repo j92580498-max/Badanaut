@@ -84,6 +84,8 @@ jobs:
         run: |
           python3 -m unittest discover -s tools -p 'test_*.py'
           python3 tools/verify-android-apk.py dist/Badanaut-Android.apk
+          "$ANDROID_SDK_ROOT/build-tools/34.0.0/aapt" dump badging dist/Badanaut-Android.apk > .build/android-apk-badging.txt
+          python3 -c "from pathlib import Path; assert Path('.build/android-apk-badging.txt').read_text().startswith(\"package: name='org.badanaut.emulator'\"), 'Wrong Android package name'"
           "$ANDROID_SDK_ROOT/build-tools/34.0.0/apksigner" verify dist/Badanaut-Android.apk
 
       - name: Upload Android APK

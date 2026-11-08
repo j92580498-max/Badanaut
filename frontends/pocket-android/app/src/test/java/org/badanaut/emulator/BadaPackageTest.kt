@@ -1,4 +1,4 @@
-package com.pockethle.app
+package org.badanaut.emulator
 
 import org.junit.Assert.*
 import org.junit.Rule
@@ -145,6 +145,19 @@ class BadaPackageTest {
             library.writeBytes(header)
             assertFalse(BadaPackage.isArmElf(library))
         }
+    }
+
+    @Test fun emptyIconMetadataUsesExecutableNamedArtworkAndCustomOverride() {
+        val directory = extract(
+            "Bin/SkyForce.exe" to elf(),
+            "Info/Appinfo.sys" to "<Application AppId=\"sky\" Name=\"SkyForce\"><Icon/></Application>".toByteArray(),
+            "Res/SKYFORCE.PNG" to byteArrayOf(1, 2, 3),
+            "Res/Splash.png" to byteArrayOf(4, 5, 6),
+        )
+        val details = BadaPackage.inspect(directory)
+        assertEquals(File(directory, "Res/SKYFORCE.PNG"), BadaPackage.iconFile(directory, details.icon, details.executable.path))
+        val custom = File(directory, "_badanaut-icon.png").apply { writeBytes(byteArrayOf(7)) }
+        assertEquals(custom, BadaPackage.iconFile(directory, details.icon, details.executable.path))
     }
 
     @Test fun boundsRuntimeCopy() {

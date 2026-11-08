@@ -1,16 +1,7 @@
 # Badanaut — Samsung bada emulator
 
 Badanaut runs original 32-bit ARM Samsung bada applications through high-level
-emulation. The Bada engine is based on [mariotaku/bada-hle](https://github.com/mariotaku/bada-hle).
-
-The native launcher on **Windows, Linux, and Android** follows the compact
-[touchHLE / HyperHLE-Reborn app picker](https://github.com/KlugKlugTG/HyperHLE-Reborn):
-a black background, four columns of rounded game icons and gray labels. A
-top-right ⋮ menu contains Open file manager, Copyright info and Settings.
-Swipe left/right through pages of 16 games; small dots indicate the current page. Qt draws the desktop interface; Android
-uses Canvas. Both use the same layout and bundled fonts. The browser UI has
-been removed. Package artwork is detected where available; game details let
-you select your own icon.
+emulation. 
 
 ## Download builds
 

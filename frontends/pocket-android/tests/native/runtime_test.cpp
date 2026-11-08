@@ -42,6 +42,52 @@ void timer_test(Cpu& cpu) {
     require(!cpu.timer_active, "Timer::Cancel was overridden by a success stub");
 }
 
+void watchdog_test(Cpu& cpu) {
+    const uint32_t loop = 0xeafffffe; // ARM b .
+    cpu.write_u32(0x100180, loop);
+    uint32_t result = 0;
+    require(!cpu.run_guest(0x100180, {}, result, 1000), "runaway guest bypassed the deadline");
+    require(cpu.run_guest(0x100000, {}, result), "expired watchdog stopped the following callback");
+    for (unsigned i = 0; i < 20; ++i)
+        require(cpu.run_guest(0x100000, {}, result, 10000), "cancelled deadline stopped a later callback");
+    puts("Guest watchdog expiry, recovery and cancellation passed");
+}
+
+void heap_test(Cpu& cpu) {
+    // More than the entire mapped heap over the lifetime of this loop. A bump
+    // allocator with a no-op free exhausts it; a reusable pool stays bounded.
+    for (unsigned i = 0; i < 600; ++i) {
+        const uint32_t block = call(cpu, i & 1 ? "malloc" : "_Z11Osp_allocExjPKci", {1024 * 1024});
+        require(block != 0, "freed guest allocations were not reclaimed");
+        cpu.write_u32(block, i);
+        require(cpu.read_u32(block) == i, "host pool and Unicorn memory disagree");
+        call(cpu, i & 1 ? "free" : "_Z8Osp_freePv", {block});
+    }
+    const uint32_t dirty = call(cpu, "malloc", {64});
+    call(cpu, "memset", {dirty, 0x5a, 64});
+    call(cpu, "free", {dirty});
+    const uint32_t zero = call(cpu, "calloc", {16, 4});
+    require(zero != 0, "calloc failed after recycling");
+    for (uint32_t offset = 0; offset < 64; offset += 4)
+        require(cpu.read_u32(zero + offset) == 0, "calloc retained recycled bytes");
+    call(cpu, "free", {zero});
+    require(call(cpu, "calloc", {0x80000000u, 2}) == 0, "calloc size multiplication overflowed");
+    const uint32_t aligned = cpu.alloc(64, 16);
+    require(aligned && (aligned & 15) == 0, "guest aligned allocation lost its alignment");
+    call(cpu, "free", {aligned});
+    uint32_t data = call(cpu, "malloc", {16});
+    cpu.write_u32(data, 0x12345678);
+    data = call(cpu, "realloc", {data, 128});
+    require(data && cpu.read_u32(data) == 0x12345678, "realloc did not preserve the old prefix");
+    require(call(cpu, "realloc", {data, 0xffffffffu}) == 0, "oversized realloc succeeded");
+    require(cpu.read_u32(data) == 0x12345678, "failed realloc released the original allocation");
+    data = call(cpu, "realloc", {data, 4});
+    require(data && cpu.read_u32(data) == 0x12345678, "shrinking realloc corrupted its prefix");
+    call(cpu, "realloc", {data, 0});
+    call(cpu, "free", {0});
+    puts("Guest heap recycling, alignment, calloc and realloc passed");
+}
+
 void buffer_test(Cpu& cpu) {
     const uint32_t buffer = cpu.alloc(36);
     call(cpu, "_ZN3Osp4Base10ByteBufferC1Ev", {buffer});
@@ -63,6 +109,57 @@ void buffer_test(Cpu& cpu) {
     call(cpu, "_ZN3Osp4Base10ByteBufferD1Ev", {buffer});
     uint32_t pointer = 0, length = 0;
     require(!hle::byte_buffer_view(buffer, pointer, length), "destroyed buffer still has a descriptor");
+}
+
+void memory_transfer_test(Cpu& cpu) {
+    const uint32_t source = cpu.alloc(96), destination = cpu.alloc(96);
+    std::vector<uint8_t> pattern(96), result(96);
+    for (size_t i = 0; i < pattern.size(); ++i) pattern[i] = static_cast<uint8_t>(i * 37);
+    cpu.write_mem(source, pattern.data(), pattern.size());
+    for (uint32_t count : {0u, 1u, 3u, 4u, 31u, 64u}) {
+        call(cpu, "memset", {destination, 0xa5, 96});
+        require(call(cpu, "memcpy", {destination + 1, source + 3, count}) == destination + 1,
+                "memcpy did not return its destination");
+        cpu.read_mem(destination, result.data(), result.size());
+        for (size_t i = 0; i < result.size(); ++i)
+            require(result[i] == (i > 0 && i <= count ? pattern[i + 2] : 0xa5),
+                    "mapped memcpy changed bytes outside its unaligned range");
+    }
+    for (bool forward : {false, true}) {
+        cpu.write_mem(source, pattern.data(), pattern.size());
+        const uint32_t from = source + (forward ? 0 : 7), to = source + (forward ? 7 : 0);
+        require(call(cpu, "memmove", {to, from, 64}) == to, "memmove return changed");
+        cpu.read_mem(source, result.data(), result.size());
+        auto expected = pattern;
+        std::memmove(expected.data() + (to - source), expected.data() + (from - source), 64);
+        require(result == expected, "memmove corrupted an overlapping guest buffer");
+    }
+    // Executable-image memory is owned by Unicorn, outside the shared heap.
+    const uint32_t value = 0x87654321;
+    cpu.write_u32(0x1001c0, value);
+    call(cpu, "memcpy", {destination, 0x1001c0, 4});
+    require(cpu.read_u32(destination) == value, "memcpy lost its non-heap fallback");
+    call(cpu, "free", {source});
+    call(cpu, "free", {destination});
+    puts("Mapped memory transfers, unaligned ranges and overlapping memmove passed");
+}
+
+void wide_string_test(Cpu& cpu) {
+    // Nova's XML type tags are UTF-16; its ELF explicitly selects 2-byte wchar_t.
+    const char16_t vector[] = u"vector3d", quaternion[] = u"quaternion";
+    const char16_t high[] = u"\u0200", low[] = u"\u0100";
+    const uint32_t a = cpu.alloc(sizeof vector), b = cpu.alloc(sizeof quaternion);
+    cpu.write_mem(a, vector, sizeof vector);
+    cpu.write_mem(b, quaternion, sizeof quaternion);
+    require(call(cpu, "wcscmp", {a, a}) == 0, "equal XML type tags compare differently");
+    require(static_cast<int32_t>(call(cpu, "wcscmp", {a, b})) > 0,
+            "different XML type tags were accepted as equal");
+    require(static_cast<int32_t>(call(cpu, "wcscmp", {b, a})) < 0,
+            "wide string ordering is reversed");
+    cpu.write_mem(a, high, sizeof high);
+    cpu.write_mem(b, low, sizeof low);
+    require(static_cast<int32_t>(call(cpu, "wcscmp", {a, b})) > 0,
+            "wide comparison treated a zero low byte as the terminator");
 }
 
 uint32_t queue(Cpu& cpu, uint32_t output, int frames, int channels, int16_t left, int16_t right) {
@@ -95,6 +192,8 @@ void await_completion(Cpu& cpu, uint32_t owner, uint32_t count) {
 
 void audio_test(Cpu& cpu, const std::filesystem::path& recording) {
     const uint32_t owner = cpu.alloc(32), listener = owner + 12;
+    cpu.write_u32(owner + 4, 0);
+    cpu.write_u32(owner + 8, 0);
     const uint32_t output = cpu.alloc(20);
     const uint32_t vtable = cpu.make_vtable(3);
     // A real Thumb multiple-inheritance thunk: adjust listener this to its
@@ -152,6 +251,8 @@ void audio_test(Cpu& cpu, const std::filesystem::path& recording) {
     // SDL's Android backend permits only one playback device. Two AudioOut
     // objects must mix through it, with independent completion callbacks.
     const uint32_t owner2 = cpu.alloc(32), listener2 = owner2 + 12;
+    cpu.write_u32(owner2 + 4, 0);
+    cpu.write_u32(owner2 + 8, 0);
     const uint32_t output2 = cpu.alloc(20);
     cpu.write_u32(listener2, vtable);
     call(cpu, "_ZN3Osp5Media8AudioOutC1Ev", {output2});
@@ -205,10 +306,13 @@ int main() {
         Cpu cpu;
         std::string error;
         require(cpu.init(image, error), error.c_str());
+        heap_test(cpu);
+        watchdog_test(cpu);
         timer_test(cpu);
         buffer_test(cpu);
+        memory_transfer_test(cpu);
+        wide_string_test(cpu);
         audio_test(cpu, recording);
-        uc_close(cpu.uc);
         SDL_Quit();
         std::filesystem::remove(recording);
         puts("Timer deadlines, PCM buffers, audio output and Thumb completion callbacks passed");

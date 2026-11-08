@@ -2,11 +2,17 @@
 #include "guest.h"
 #include "hle/dispatch.h"
 #include "pixel_accel.h"
+#include "tlsf.h"
+#include <algorithm>
 #include <array>
+#include <chrono>
+#include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <iterator>
+#include <mutex>
+#include <thread>
 #include "compat/elf.h"
 
 #ifndef R_ARM_ABS32
@@ -42,6 +48,79 @@ constexpr AbiHelper abi_helpers[] = {
 };
 } // namespace
 
+// Unicorn's built-in timeout creates a thread for every uc_emu_start and
+// polls with usleep(2). Follow SDL's timer-worker model instead: wait until
+// the deadline or a cancellation, and join before releasing the core.
+// uc_emu_stop is the same cross-thread stop used by Unicorn's own timer.
+struct Cpu::Watchdog {
+    uc_engine* engine;
+    std::mutex mutex;
+    std::condition_variable changed;
+    bool stopping = false, expired = false;
+    unsigned depth = 0;
+    uint64_t generation = 0;
+    std::chrono::steady_clock::time_point deadline;
+    std::thread worker;
+
+    explicit Watchdog(uc_engine* uc) : engine(uc), worker([this] { run(); }) {}
+    ~Watchdog() {
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            stopping = true;
+        }
+        changed.notify_one();
+        worker.join();
+    }
+    void arm(uint64_t timeout_us) {
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            if (!depth++) {
+                expired = false;
+                ++generation;
+                deadline = std::chrono::steady_clock::now() + std::chrono::microseconds(timeout_us);
+            }
+        }
+        changed.notify_one();
+    }
+    bool disarm() {
+        std::lock_guard<std::mutex> lock(mutex);
+        --depth;
+        changed.notify_one();
+        return expired;
+    }
+    void run() {
+        std::unique_lock<std::mutex> lock(mutex);
+        while (!stopping) {
+            changed.wait(lock, [this] { return stopping || depth; });
+            if (stopping) break;
+            const uint64_t current = generation;
+            if (changed.wait_until(lock, deadline, [this, current] {
+                    return stopping || !depth || generation != current;
+                })) continue;
+            expired = true;
+            // A very short deadline can expire before uc_emu_start has entered
+            // the JIT. Retry only after expiry so its startup cannot lose the
+            // stop request. Normal frames never poll or create timer threads.
+            while (!stopping && depth && generation == current) {
+                uc_emu_stop(engine);
+                changed.wait_for(lock, std::chrono::milliseconds(1), [this, current] {
+                    return stopping || !depth || generation != current;
+                });
+            }
+        }
+    }
+};
+
+Cpu::Cpu() = default;
+
+Cpu::~Cpu() {
+    watchdog_.reset();
+    // uc_mem_map_ptr borrows the pool: close the core before releasing it.
+    if (uc) uc_close(uc);
+    if (heap_pool_) tlsf_destroy(heap_pool_);
+    std::free(heap_storage_);
+}
+
 bool Cpu::init(ElfImage& image, std::string& err, ElfImage* lib) {
     img = &image;
     // The library goes first: its constructors must run before the app's, and
@@ -53,6 +132,12 @@ bool Cpu::init(ElfImage& image, std::string& err, ElfImage* lib) {
     uc_err e = uc_open(UC_ARCH_ARM, UC_MODE_ARM, &uc);
     if (e) {
         err = std::string("uc_open: ") + uc_strerror(e);
+        return false;
+    }
+    try {
+        watchdog_ = std::make_unique<Watchdog>(uc);
+    } catch (const std::exception& ex) {
+        err = std::string("guest watchdog: ") + ex.what();
         return false;
     }
 
@@ -78,8 +163,24 @@ bool Cpu::init(ElfImage& image, std::string& err, ElfImage* lib) {
 
     // Stack + heap.
     uc_mem_map(uc, guest::STACK_TOP - guest::STACK_SIZE, guest::STACK_SIZE, UC_PROT_ALL);
-    uc_mem_map(uc, guest::HEAP_BASE, guest::HEAP_SIZE, UC_PROT_ALL);
-    heap_next_ = guest::HEAP_BASE;
+    // Use the upstream TLSF allocator in host-owned, zero-initialized memory.
+    // Unicorn and HLE see the same bytes, and free() can reclaim them instead
+    // of retaining every temporary mesh/string allocation for the whole run.
+    heap_storage_ = std::calloc(1, guest::HEAP_SIZE);
+    if (!heap_storage_) {
+        err = "guest heap allocation failed";
+        return false;
+    }
+    heap_pool_ = tlsf_create_with_pool(heap_storage_, guest::HEAP_SIZE);
+    if (!heap_pool_) {
+        err = "guest TLSF pool creation failed";
+        return false;
+    }
+    e = uc_mem_map_ptr(uc, guest::HEAP_BASE, guest::HEAP_SIZE, UC_PROT_ALL, heap_storage_);
+    if (e) {
+        err = std::string("guest heap mapping: ") + uc_strerror(e);
+        return false;
+    }
     uint32_t sp = guest::STACK_TOP - 16;
     uc_reg_write(uc, UC_ARM_REG_SP, &sp);
 
@@ -285,6 +386,11 @@ uint32_t Cpu::bind_trampoline(hle::Handler h) {
 }
 
 uint32_t Cpu::make_vtable(int n, std::initializer_list<std::pair<int, hle::Handler>> ov) {
+    // A class shares one virtual table. Recreating it for every resource file
+    // otherwise leaks table storage and consumes synthetic trampoline slots.
+    const std::vector<std::pair<int, hle::Handler>> overrides(ov);
+    for (const auto& table : vtables_)
+        if (table.slots == n && table.overrides == overrides) return table.address;
     if (!noop_tramp_) {
         noop_tramp_ = bind_trampoline(synth_noop);
     }
@@ -298,6 +404,7 @@ uint32_t Cpu::make_vtable(int n, std::initializer_list<std::pair<int, hle::Handl
     for (auto& p : ov) {
         write_u32(vt + p.first * 4, bind_trampoline(p.second));
     }
+    vtables_.push_back({n, overrides, vt});
     return vt;
 }
 
@@ -331,7 +438,8 @@ void Cpu::run_init_array() {
     }
 }
 
-bool Cpu::run_guest(uint32_t addr, const std::vector<uint32_t>& args, uint32_t& ret) {
+bool Cpu::run_guest(uint32_t addr, const std::vector<uint32_t>& args, uint32_t& ret,
+                    uint64_t timeout_us) {
     for (size_t i = 0; i < args.size() && i < 4; i++) {
         set_reg(UC_ARM_REG_R0 + i, args[i]);
     }
@@ -347,12 +455,13 @@ bool Cpu::run_guest(uint32_t addr, const std::vector<uint32_t>& args, uint32_t& 
         cpsr &= ~(1 << 5);
     }
     uc_reg_write(uc, UC_ARM_REG_CPSR, &cpsr);
-    // Wall-clock guard against a runaway/blocked guest. Generous: GameInitialise
-    // loads + parses all assets through the (slow) interpreter and legitimately
-    // takes many seconds. Unicorn returns UC_ERR_OK on timeout, so a too-small
-    // value silently truncates init mid-way (null camera/font downstream).
-    uc_err e = uc_emu_start(uc, addr, guest::HLE_RETURN, 120'000'000, 0);
-    if (e) {
+    // Keep the generous wall-clock guard for asset initialization. Passing
+    // zero here disables Unicorn's busy polling timer; our worker owns the
+    // deadline and reports expiry as failure instead of accepting partial init.
+    if (timeout_us) watchdog_->arm(timeout_us);
+    uc_err e = uc_emu_start(uc, addr, guest::HLE_RETURN, 0, 0);
+    const bool expired = timeout_us && watchdog_->disarm();
+    if (e || expired) {
         uint32_t pc;
         uc_reg_read(uc, UC_ARM_REG_PC, &pc);
         uint32_t poff = 0;
@@ -361,7 +470,7 @@ bool Cpu::run_guest(uint32_t addr, const std::vector<uint32_t>& args, uint32_t& 
         if (!pn.empty()) {
             printf(" (%s+0x%x)", hle::demangle(pn).c_str(), poff);
         }
-        printf(": %s\n", uc_strerror(e));
+        printf(": %s\n", expired ? "guest callback timed out" : uc_strerror(e));
         static const int rr[] = {UC_ARM_REG_R0, UC_ARM_REG_R1, UC_ARM_REG_R2,
                                  UC_ARM_REG_R3, UC_ARM_REG_R4, UC_ARM_REG_R5, UC_ARM_REG_R6,
                                  UC_ARM_REG_R7, UC_ARM_REG_SP, UC_ARM_REG_LR};
@@ -520,13 +629,27 @@ uint32_t Cpu::read_u32(uint32_t a) {
     return v;
 }
 void Cpu::write_u32(uint32_t a, uint32_t v) { uc_mem_write(uc, a, &v, 4); }
-void Cpu::read_mem(uint32_t a, void* d, uint32_t n) { uc_mem_read(uc, a, d, n); }
+const uint8_t* Cpu::memory_ptr(uint32_t a, uint32_t n) const {
+    if (!heap_storage_ || a < guest::HEAP_BASE ||
+        static_cast<uint64_t>(a) + n > static_cast<uint64_t>(guest::HEAP_BASE) + guest::HEAP_SIZE)
+        return nullptr;
+    return static_cast<const uint8_t*>(heap_storage_) + (a - guest::HEAP_BASE);
+}
+void Cpu::read_mem(uint32_t a, void* d, uint32_t n) {
+    if (!n) return;
+    if (const auto* p = memory_ptr(a, n)) std::memcpy(d, p, n);
+    else uc_mem_read(uc, a, d, n);
+}
 void Cpu::write_mem(uint32_t a, const void* s, uint32_t n) { uc_mem_write(uc, a, s, n); }
 std::string Cpu::read_cstr(uint32_t a, uint32_t max) {
+    if (const auto* p = memory_ptr(a, max)) {
+        const auto* end = static_cast<const uint8_t*>(std::memchr(p, 0, max));
+        return std::string(reinterpret_cast<const char*>(p), end ? end - p : max);
+    }
     std::string s;
     for (uint32_t i = 0; i < max; i++) {
-        uint8_t c;
-        uc_mem_read(uc, a + i, &c, 1);
+        uint8_t c = 0;
+        if (uc_mem_read(uc, a + i, &c, 1) != UC_ERR_OK) break;
         if (!c) {
             break;
         }
@@ -535,19 +658,36 @@ std::string Cpu::read_cstr(uint32_t a, uint32_t max) {
     return s;
 }
 uint32_t Cpu::alloc(uint32_t size, uint32_t align) {
-    heap_next_ = align_up(heap_next_, align);
-    uint32_t p = heap_next_;
-    heap_next_ += size;
-    // Past the mapping the guest would write into unmapped memory and fault
-    // somewhere unrelated. Say so once, here, where the cause is obvious.
-    if (heap_next_ > guest::HEAP_BASE + guest::HEAP_SIZE) {
-        static bool said = false;
-        if (!said) {
-            said = true;
-            printf("[cpu] GUEST HEAP EXHAUSTED at 0x%x (%u MB); nothing is ever freed\n", p,
-                   guest::HEAP_SIZE / (1024 * 1024));
-        }
-        return 0;
-    }
+    if (!heap_pool_ || !align || (align & (align - 1)) ||
+        align > guest::HEAP_SIZE || size >= guest::HEAP_SIZE) return 0;
+    // TLSF aligns host addresses. A calloc-backed pool may have a different
+    // alignment from HEAP_BASE, so preserve the original TLSF block and align
+    // the guest address inside it when those address spaces differ.
+    const bool matching_alignment =
+        (reinterpret_cast<uintptr_t>(heap_storage_) & (align - 1)) ==
+        (guest::HEAP_BASE & (align - 1));
+    const uint64_t requested = static_cast<uint64_t>(std::max(size, uint32_t(1))) +
+                              (matching_alignment ? 0 : align - 1);
+    if (requested >= guest::HEAP_SIZE) return 0;
+    void* block = tlsf_memalign(heap_pool_, matching_alignment ?
+        std::max<size_t>(align, tlsf_align_size()) : tlsf_align_size(),
+        static_cast<size_t>(requested));
+    if (!block) return 0;
+    uint32_t p = guest::HEAP_BASE + static_cast<uint32_t>(
+        static_cast<uint8_t*>(block) - static_cast<uint8_t*>(heap_storage_));
+    if (!matching_alignment) p = (p + align - 1) & ~(align - 1);
+    allocations_[p] = {size, block};
     return p;
+}
+
+void Cpu::free(uint32_t address) {
+    const auto allocation = allocations_.find(address);
+    if (allocation == allocations_.end()) return; // includes free(nullptr)
+    tlsf_free(heap_pool_, allocation->second.block);
+    allocations_.erase(allocation);
+}
+
+uint32_t Cpu::allocation_size(uint32_t address) const {
+    const auto allocation = allocations_.find(address);
+    return allocation == allocations_.end() ? 0 : allocation->second.size;
 }

@@ -4,6 +4,7 @@ project(badanaut_android LANGUAGES C CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
+find_package(Threads REQUIRED)
 
 get_filename_component(REPO_ROOT "${CMAKE_CURRENT_LIST_DIR}/../../../../../../" ABSOLUTE)
 set(BADA_ROOT "${REPO_ROOT}/third_party/bada-hle/src")
@@ -41,6 +42,8 @@ add_library(bada-android SHARED
     "${BADA_ROOT}/hle/io.cpp"
     "${BADA_ROOT}/hle/audio.cpp"
     "${BADA_ROOT}/hle/ui.cpp"
+    "${REPO_ROOT}/third_party/pvr/PVRTDecompress.cpp"
+    "${REPO_ROOT}/third_party/tlsf/tlsf.c"
     "${CMAKE_CURRENT_LIST_DIR}/gl_android.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/diagnostic_log.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/ui_overlay_android.cpp"
@@ -52,12 +55,15 @@ target_compile_definitions(bada-android PRIVATE BADA_GLES_BACKEND=1)
 target_compile_options(bada-android PRIVATE -O2)
 target_include_directories(bada-android PRIVATE
     "${BADA_ROOT}"
+    "${REPO_ROOT}/third_party/pvr"
+    "${REPO_ROOT}/third_party/tlsf"
     "${CMAKE_CURRENT_LIST_DIR}"
     "${SDL_INCLUDE_COMPAT}"
 )
 target_link_libraries(bada-android PRIVATE
     SDL2::SDL2
     unicorn
+    Threads::Threads
     pugixml
     cxxopts
     android

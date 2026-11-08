@@ -46,7 +46,6 @@ struct Engine {
         require(uc_hook_add(cpu.uc, &hook, UC_HOOK_CODE, reinterpret_cast<void*>(entered_body),
                             &body_entries, 0x100004, 0x100004) == UC_ERR_OK, "cannot observe original pixel body");
     }
-    ~Engine() { if (cpu.uc) uc_close(cpu.uc); }
 
     void call(uint32_t source, uint32_t destination, uint32_t rows, bool thumb, bool accelerated) {
         const uint32_t sp = cpu.reg(UC_ARM_REG_SP);

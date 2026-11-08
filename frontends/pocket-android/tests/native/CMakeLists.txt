@@ -4,6 +4,7 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 find_package(PkgConfig REQUIRED)
+find_package(Threads REQUIRED)
 pkg_check_modules(SDL2 REQUIRED IMPORTED_TARGET sdl2)
 pkg_check_modules(GLES1 REQUIRED IMPORTED_TARGET glesv1_cm)
 pkg_check_modules(GLES2 REQUIRED IMPORTED_TARGET glesv2)
@@ -30,14 +31,17 @@ set(BADA_TEST_SOURCES
     "${BADA_ROOT}/hle/io.cpp"
     "${BADA_ROOT}/hle/audio.cpp"
     "${BADA_ROOT}/hle/ui.cpp"
+    "${REPO_ROOT}/third_party/pvr/PVRTDecompress.cpp"
+    "${REPO_ROOT}/third_party/tlsf/tlsf.c"
 )
 add_library(bada-test-engine STATIC ${BADA_TEST_SOURCES}
     "${REPO_ROOT}/frontends/pocket-android/app/src/main/cpp/gl_android.cpp"
 )
 target_compile_definitions(bada-test-engine PRIVATE BADA_GLES_BACKEND=1)
 target_include_directories(bada-test-engine PUBLIC "${BADA_ROOT}")
+target_include_directories(bada-test-engine PRIVATE "${REPO_ROOT}/third_party/pvr" "${REPO_ROOT}/third_party/tlsf")
 target_link_libraries(bada-test-engine PUBLIC
-    PkgConfig::SDL2 ${BADA_CPU_TARGET} PkgConfig::GLES1 PkgConfig::GLES2
+    PkgConfig::SDL2 ${BADA_CPU_TARGET} PkgConfig::GLES1 PkgConfig::GLES2 Threads::Threads
 )
 
 enable_testing()
@@ -56,6 +60,10 @@ add_executable(bada-runtime-test runtime_test.cpp)
 target_link_libraries(bada-runtime-test PRIVATE bada-test-engine)
 add_test(NAME runtime-audio COMMAND bada-runtime-test)
 set_tests_properties(runtime-audio PROPERTIES TIMEOUT 30)
+add_executable(bada-file-test file_test.cpp)
+target_link_libraries(bada-file-test PRIVATE bada-test-engine)
+add_test(NAME runtime-files COMMAND bada-file-test)
+set_tests_properties(runtime-files PROPERTIES TIMEOUT 30)
 add_executable(bada-abi-test abi_helpers_test.cpp)
 target_link_libraries(bada-abi-test PRIVATE bada-test-engine)
 add_test(NAME runtime-abi COMMAND bada-abi-test)
@@ -86,8 +94,9 @@ endforeach()
 # coverage; it does not substitute for the native ES 1 probe.
 add_library(bada-desktop-test-engine STATIC ${BADA_TEST_SOURCES})
 target_include_directories(bada-desktop-test-engine PUBLIC "${BADA_ROOT}")
+target_include_directories(bada-desktop-test-engine PRIVATE "${REPO_ROOT}/third_party/pvr" "${REPO_ROOT}/third_party/tlsf")
 target_link_libraries(bada-desktop-test-engine PUBLIC
-    PkgConfig::SDL2 ${BADA_CPU_TARGET} PkgConfig::DESKTOP_GL
+    PkgConfig::SDL2 ${BADA_CPU_TARGET} PkgConfig::DESKTOP_GL Threads::Threads
 )
 add_executable(bada-desktop-render-test gl_render_test.cpp)
 target_compile_definitions(bada-desktop-render-test PRIVATE BADA_TEST_DESKTOP=1)

@@ -5,6 +5,7 @@
 #include <cstring>
 #include <filesystem>
 #include <map>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -37,11 +38,14 @@ struct Buf {
     int limit = 0;
 };
 struct File {
-    std::vector<uint8_t> data;
+    // Like the stdio handlers below (and touchHLE's libc/stdio.rs), keep an
+    // open stream rather than copying a whole resource pack for every reader.
+    std::unique_ptr<FILE, int (*)(FILE*)> stream{nullptr, fclose};
+    size_t size = 0;
     size_t pos = 0;
 };
 std::map<uint32_t, Buf> g_bufs;           // ByteBuffer object -> backing store
-std::map<uint32_t, File> g_files;         // File object -> loaded contents
+std::map<uint32_t, File> g_files;         // File object -> owned host stream
 std::map<uint32_t, uint64_t> g_attr_size; // FileAttributes object -> size
 
 bool iequals(const std::string& a, const std::string& b) {
@@ -297,39 +301,69 @@ void ascii_getbytesn(Cpu& c) {
 }
 
 // ---- File ----
+void file_dtor(Cpu& c);
+void file_deleting_dtor(Cpu& c);
 void file_ctor(Cpu& c) {
     uint32_t o = c.arg32(0);
     if (o) {
-        c.write_u32(o, c.noop_vtable());
+        // Itanium ABI: complete destructor, then deleting destructor. Nova's
+        // Irrlicht CReadFile deletes Osp::Io::File through the second slot;
+        // binding only the imported D1 symbol never releases those files.
+        c.write_u32(o, c.make_vtable(64, {{0, file_dtor}, {1, file_deleting_dtor}}));
     }
     c.set_ret32(o);
 }
 void file_construct(Cpu& c) {
     uint32_t o = c.arg32(0);
     std::string path = read_string(c, c.arg32(1));
-    std::string host = resolve(path);
+    std::string mode = read_string(c, c.arg32(2));
+    // Reuse c_fopen's writable /Home mapping and the r/w/a modes described by
+    // touchHLE's stdio.rs. Nova's New Game must truncate its previous save.
+    if (mode.empty() || (mode[0] != 'r' && mode[0] != 'w' && mode[0] != 'a')) {
+        c.set_ret32(0x80000000);
+        return;
+    }
+    bool writing = mode[0] == 'w' || mode[0] == 'a';
+    std::string host = writing ? write_path(path) : resolve(path);
     if (host.empty()) {
         printf("[io] File::Construct(\"%s\") -> NOT FOUND\n", path.c_str());
         c.set_ret32(0x80000000);
         return;
     }
-    FILE* f = fopen(host.c_str(), "rb");
+    if (mode.find('b') == std::string::npos) mode += 'b';
+    FILE* f = fopen(host.c_str(), mode.c_str());
     if (!f) {
         c.set_ret32(0x80000000);
         return;
     }
     File fl;
+    fl.stream.reset(f);
     fseek(f, 0, SEEK_END);
     long n = ftell(f);
-    fseek(f, 0, SEEK_SET);
-    fl.data.resize(n);
-    if (n) {
-        size_t rd = fread(fl.data.data(), 1, n, f);
-        (void)rd;
+    if (n < 0) {
+        c.set_ret32(0x80000000);
+        return;
     }
-    fclose(f);
+    fseek(f, 0, SEEK_SET);
+    fl.size = static_cast<size_t>(n);
     g_files[o] = std::move(fl);
     c.set_ret32(0);
+}
+size_t file_read_into_guest(Cpu& c, File& f, uint32_t destination, size_t length) {
+    const size_t requested = std::min(length, f.size - f.pos);
+    // Reuse the stdio fread translation in bounded chunks. A request for an
+    // entire pack must not allocate another pack-sized host staging buffer.
+    std::vector<uint8_t> bytes(std::min(requested, size_t{64 * 1024}));
+    size_t total = 0;
+    while (total < requested) {
+        const size_t chunk = std::min(bytes.size(), requested - total);
+        const size_t got = fread(bytes.data(), 1, chunk, f.stream.get());
+        if (got) c.write_mem(destination + total, bytes.data(), static_cast<uint32_t>(got));
+        total += got;
+        if (got < chunk) break;
+    }
+    f.pos += total;
+    return total;
 }
 void file_read(Cpu& c) {
     auto fi = g_files.find(c.arg32(0));
@@ -340,11 +374,7 @@ void file_read(Cpu& c) {
     }
     File& f = fi->second;
     Buf& b = bi->second;
-    size_t n = std::min((size_t)b.cap, f.data.size() - f.pos);
-    if (n) {
-        c.write_mem(b.data, &f.data[f.pos], n);
-    }
-    f.pos += n;
+    size_t n = file_read_into_guest(c, f, b.data, static_cast<size_t>(b.cap));
     b.limit = n;
     c.set_ret32(0); // returns count? engine treats E_SUCCESS=0; report via buffer limit
 }
@@ -358,12 +388,35 @@ void file_read_raw(Cpu& c) {
         return;
     }
     File& f = fi->second;
-    size_t n = std::min((size_t)len, f.data.size() - f.pos);
-    if (n) {
-        c.write_mem(buf, &f.data[f.pos], (uint32_t)n);
-    }
-    f.pos += n;
+    size_t n = file_read_into_guest(c, f, buf, static_cast<size_t>(len));
     c.set_ret32((uint32_t)n); // count of bytes read
+}
+// File::Write(const void*, int) -> bytes written (Nova's CWriteFile forwards it).
+void file_write_raw(Cpu& c) {
+    auto fi = g_files.find(c.arg32(0));
+    uint32_t source = c.arg32(1);
+    int length = static_cast<int32_t>(c.arg32(2));
+    if (fi == g_files.end() || length <= 0) { c.set_ret32(0); return; }
+    File& f = fi->second;
+    std::vector<uint8_t> bytes(std::min(static_cast<size_t>(length), size_t{64 * 1024}));
+    size_t total = 0;
+    while (total < static_cast<size_t>(length)) {
+        size_t chunk = std::min(bytes.size(), static_cast<size_t>(length) - total);
+        c.read_mem(source + total, bytes.data(), static_cast<uint32_t>(chunk));
+        size_t wrote = fwrite(bytes.data(), 1, chunk, f.stream.get());
+        total += wrote;
+        if (wrote < chunk) break;
+    }
+    long position = ftell(f.stream.get());
+    f.pos = position >= 0 ? static_cast<size_t>(position) : f.pos + total;
+    f.size = std::max(f.size, f.pos);
+    c.set_ret32(static_cast<uint32_t>(total));
+}
+void file_remove(Cpu& c) {
+    // Resolve the same private data file that Construct reads. Returning
+    // success without removing it made New Game reload an old checkpoint.
+    std::string host = resolve(read_string(c, c.arg32(0)));
+    c.set_ret32(!host.empty() && std::remove(host.c_str()) == 0 ? 0 : 0x80000000);
 }
 // File::Seek(FileSeekPosition pos, long offset). pos: BEGIN=0, CUR=1, END=2.
 void file_seek(Cpu& c) {
@@ -375,13 +428,17 @@ void file_seek(Cpu& c) {
     File& f = fi->second;
     int whence = (int)c.arg32(1);
     long off = (int32_t)c.arg32(2);
-    long base = whence == 1 ? (long)f.pos : whence == 2 ? (long)f.data.size() : 0;
+    long base = whence == 1 ? (long)f.pos : whence == 2 ? (long)f.size : 0;
     long np = base + off;
     if (np < 0) {
         np = 0;
     }
-    if (np > (long)f.data.size()) {
-        np = (long)f.data.size();
+    if (np > (long)f.size) {
+        np = (long)f.size;
+    }
+    if (fseek(f.stream.get(), np, SEEK_SET) != 0) {
+        c.set_ret32(0x80000000);
+        return;
     }
     f.pos = (size_t)np;
     c.set_ret32(0);
@@ -394,6 +451,11 @@ void file_tell(Cpu& c) {
 void file_dtor(Cpu& c) {
     g_files.erase(c.arg32(0));
     c.set_ret32(0);
+}
+void file_deleting_dtor(Cpu& c) {
+    const uint32_t object = c.arg32(0);
+    file_dtor(c);
+    c.free(object);
 }
 void file_getattributes(Cpu& c) {
     std::string path = read_string(c, c.arg32(0));
@@ -688,10 +750,15 @@ void register_io() {
     register_handler("_ZN3Osp4Base10ByteBuffer7SetByteEh", bb_setbyte);
 
     register_handler("_ZN3Osp2Io4FileC1Ev", file_ctor);
+    register_handler("_ZN3Osp2Io4FileC2Ev", file_ctor);
+    register_handler("_ZN3Osp2Io4FileD0Ev", file_deleting_dtor);
     register_handler("_ZN3Osp2Io4FileD1Ev", file_dtor);
+    register_handler("_ZN3Osp2Io4FileD2Ev", file_dtor);
     register_handler("_ZN3Osp2Io4File9ConstructERKNS_4Base6StringES5_b", file_construct);
     register_handler("_ZN3Osp2Io4File4ReadERNS_4Base10ByteBufferE", file_read);
     register_handler("_ZN3Osp2Io4File4ReadEPvi", file_read_raw);              // Read(void*, int)
+    register_handler("_ZN3Osp2Io4File5WriteEPKvi", file_write_raw);
+    register_handler("_ZN3Osp2Io4File6RemoveERKNS_4Base6StringE", file_remove);
     register_handler("_ZN3Osp2Io4File4SeekENS0_16FileSeekPositionEl", file_seek);
     register_handler("_ZNK3Osp2Io4File4TellEv", file_tell);
     register_handler("_ZN3Osp2Io4File13GetAttributesERKNS_4Base6StringERNS0_14FileAttributesE", file_getattributes);

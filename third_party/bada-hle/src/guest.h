@@ -31,10 +31,8 @@ constexpr uint32_t LIB_BASE = 0x10000000;
 constexpr uint32_t STACK_TOP = 0x70000000;
 constexpr uint32_t STACK_SIZE = 0x00800000; // 8 MB
 
-// Guest heap for Osp_allocEx / malloc / new (bump allocator).
-// Nothing is ever freed, so the size has to cover every allocation the app makes
-// over its whole run, not its peak footprint. PvZ decoding its PNG set blew
-// through 128 MB and wrote past the end of the mapping.
+// Guest heap for Osp_allocEx / malloc / new. TLSF reuses freed blocks inside
+// this host-owned pool, which is shared with Unicorn through uc_mem_map_ptr.
 constexpr uint32_t HEAP_BASE = 0x80000000;
 constexpr uint32_t HEAP_SIZE = 0x20000000; // 512 MB
 

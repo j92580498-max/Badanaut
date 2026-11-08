@@ -59,7 +59,6 @@ struct Engine {
                            : guest::in_hle(address), "ELF relocation selected the wrong helper path");
         }
     }
-    ~Engine() { if (cpu.uc) uc_close(cpu.uc); }
 
     std::vector<Pair> run(uint32_t helper, bool thumb, const std::vector<Pair>& input) {
         const uint32_t bytes = input.size() * sizeof(Pair);

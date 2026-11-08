@@ -38,6 +38,7 @@ void register_gl();
 void register_osp();
 void register_io();
 void register_ui();
+void register_audio();
 
 // Osp::Base::String <-> host string, on a guest String object (osp.cpp). The UI
 // mock builds and reads them for SetText/GetText.
@@ -49,6 +50,10 @@ void set_locale(const std::string& spec); // override reported system locale (--
 // once a no-op clip has elapsed, so apps advance past intro movies. Needs a Cpu&
 // to re-enter the guest, so it's called from the frame loop (not a handler).
 void player_pump(Cpu& cpu);
+void audio_pump(Cpu& cpu); // completed PCM buffers -> guest AudioOut listener
+void audio_pause(bool pause);
+void audio_shutdown();
+bool byte_buffer_view(uint32_t object, uint32_t& data, uint32_t& length);
 // Per-frame pump (osp.cpp): delivers whatever Control::SendUserEvent queued to
 // the app's OnUserEventReceivedN. bada posts these to the UI event loop, so the
 // callback lands on a later frame, not inside the SendUserEvent call.

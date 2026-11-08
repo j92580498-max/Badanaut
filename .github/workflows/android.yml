@@ -23,12 +23,12 @@ jobs:
       - name: Install graphics test dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake ninja-build pkg-config libsdl2-dev libunicorn-dev libgles-dev libegl1-mesa-dev xvfb xauth
-      - name: Build graphics probe
+          sudo apt-get install -y cmake ninja-build pkg-config libsdl2-dev libunicorn-dev libgl-dev libgles-dev libegl1-mesa-dev xvfb xauth
+      - name: Build native regression probes
         run: |
           cmake -S frontends/pocket-android/tests/native -B .build/bada-gles -G Ninja
           cmake --build .build/bada-gles --parallel 2
-      - name: Check rendered pixels through the guest graphics calls
+      - name: Check runtime behavior and rendered pixels through guest calls
         run: xvfb-run -a env SDL_VIDEODRIVER=x11 LIBGL_ALWAYS_SOFTWARE=1 ctest --test-dir .build/bada-gles --output-on-failure
 
   android:

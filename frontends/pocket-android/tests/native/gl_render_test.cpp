@@ -1,14 +1,21 @@
 #define SDL_MAIN_HANDLED
 #include <SDL2/SDL.h>
+#ifdef BADA_TEST_DESKTOP
+#include <SDL2/SDL_opengl.h>
+#else
 #include <GLES/gl.h>
 #include <GLES2/gl2.h>
+#endif
 #include "cpu.h"
 #include "hle/gl_api.h"
+#include "pixel_accel.h"
+#include "arm_pixel_fixture.h"
 #include <array>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <stdexcept>
+#include <vector>
 
 namespace {
 void require(bool value, const char* message) {
@@ -115,6 +122,15 @@ void render(Cpu& cpu, int api) {
         call(cpu, "glLoadIdentity_1");
         call(cpu, "glEnable_1", {GL_TEXTURE_2D});
         call(cpu, "glColor4ub_1", {255, 255, 255, 255});
+        const float replace = GL_REPLACE;
+        uint32_t replace_bits;
+        memcpy(&replace_bits, &replace, sizeof replace_bits);
+        if (cpu.hard_float) uc_reg_write(cpu.uc, UC_ARM_REG_S0, &replace);
+        call(cpu, "glTexEnvf_1", {GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, replace_bits});
+        GLint texture_mode = 0;
+        glGetTexEnviv(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, &texture_mode);
+        require(texture_mode == GL_REPLACE, "mixed integer/float glTexEnvf ABI failed");
+        call(cpu, "glTexEnvi_1", {GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE});
         call(cpu, "glEnableClientState_1", {GL_VERTEX_ARRAY});
         call(cpu, "glEnableClientState_1", {GL_TEXTURE_COORD_ARRAY});
         call(cpu, "glVertexPointer_1", {2, GL_FLOAT, 16, points});
@@ -167,9 +183,15 @@ void render(Cpu& cpu, int api) {
     require(glGetError() == GL_NO_ERROR, "guest draw generated a GL error");
 
     // The Canvas path must also work when the game uses either ES context.
-    const uint8_t canvas[] = {0,255,255,255};
-    hle::gl_present_canvas(cpu, copy(cpu, canvas, sizeof canvas), 1, 1);
+    std::vector<uint32_t> canvas(64 * 64, 0x0000ffff); // opaque bada cyan in 0x00RRGGBB
+    hle::gl_present_canvas(cpu, copy(cpu, canvas.data(), canvas.size() * 4), 64, 64);
     pixel(32, 32, {0, 255, 255});
+    std::fill(canvas.begin(), canvas.end(), 0x00ff0000);
+    hle::gl_present_canvas(cpu, copy(cpu, canvas.data(), canvas.size() * 4), 64, 64);
+    pixel(32, 32, {255, 0, 0});
+    std::fill(canvas.begin(), canvas.end(), 0x000000ff);
+    hle::gl_present_canvas(cpu, copy(cpu, canvas.data(), canvas.size() * 4), 64, 64);
+    pixel(32, 32, {0, 0, 255}); // also exercises reuse of the Canvas texture
     require(glGetError() == GL_NO_ERROR, "Canvas generated a GL error");
     call(cpu, "glClear" + suffix, {GL_COLOR_BUFFER_BIT});
     call(cpu, "glDrawArrays" + suffix, {GL_TRIANGLE_STRIP, 0, 4});
@@ -177,7 +199,184 @@ void render(Cpu& cpu, int api) {
     pixel(20, 20, {0, 255, 0});
     pixel(44, 44, {255, 0, 255});
     require(glGetError() == GL_NO_ERROR, "guest rendering after Canvas generated a GL error");
+
+    // Dynamic sprites interleave positions, UVs and byte colors. Their next
+    // draw must see guest updates even when upload staging/storage is reused.
+    const uint32_t interleaved = cpu.alloc(80);
+    for (int vertex = 0; vertex < 4; ++vertex) {
+        cpu.write_mem(interleaved + vertex * 20, vertices + vertex * 4, 16);
+        cpu.write_u32(interleaved + vertex * 20 + 16, 0xffffffff);
+    }
+    if (api == 1) {
+        call(cpu, "glVertexPointer_1", {2, GL_FLOAT, 20, interleaved});
+        call(cpu, "glTexCoordPointer_1", {2, GL_FLOAT, 20, interleaved + 8});
+        call(cpu, "glColorPointer_1", {4, GL_UNSIGNED_BYTE, 20, interleaved + 16});
+        call(cpu, "glEnableClientState_1", {GL_COLOR_ARRAY});
+    } else {
+        call(cpu, "glVertexAttribPointer_2", {0, 2, GL_FLOAT, GL_FALSE, 20, interleaved});
+        call(cpu, "glVertexAttribPointer_2", {1, 2, GL_FLOAT, GL_FALSE, 20, interleaved + 8});
+    }
+    call(cpu, "glClear" + suffix, {GL_COLOR_BUFFER_BIT});
+    call(cpu, "glDrawArrays" + suffix, {GL_TRIANGLE_STRIP, 0, 4});
+    pixel(20, 20, {0, 255, 0});
+    pixel(44, 44, {255, 0, 255});
+    for (int vertex = 0; vertex < 4; ++vertex) {
+        const float uv[] = {1 - vertices[vertex * 4 + 2], 1 - vertices[vertex * 4 + 3]};
+        cpu.write_mem(interleaved + vertex * 20 + 8, uv, sizeof uv);
+    }
+    call(cpu, "glClear" + suffix, {GL_COLOR_BUFFER_BIT});
+    call(cpu, "glDrawArrays" + suffix, {GL_TRIANGLE_STRIP, 0, 4});
+    pixel(20, 20, {255, 0, 255});
+    pixel(44, 44, {0, 255, 0});
+    if (api == 1) {
+        call(cpu, "glDisableClientState_1", {GL_COLOR_ARRAY});
+        call(cpu, "glVertexPointer_1", {2, GL_FLOAT, 16, points});
+        call(cpu, "glTexCoordPointer_1", {2, GL_FLOAT, 16, points + 8});
+    } else {
+        call(cpu, "glVertexAttribPointer_2", {0, 2, GL_FLOAT, GL_FALSE, 16, points});
+        call(cpu, "glVertexAttribPointer_2", {1, 2, GL_FLOAT, GL_FALSE, 16, points + 8});
+    }
+    require(glGetError() == GL_NO_ERROR, "dynamic interleaved uploads generated a GL error");
 }
+
+void resize_test(Cpu& cpu, int api, SDL_Window* window) {
+    const std::string suffix = "_" + std::to_string(api);
+    // Rebind the same context to a larger drawable. This also works with SDL's
+    // offscreen driver, whose pbuffer cannot be resized in place.
+    const auto context = SDL_GL_GetCurrentContext();
+    auto* resized = SDL_CreateWindow("Resized Bada surface", 0, 0, 160, 96, SDL_WINDOW_OPENGL | SDL_WINDOW_HIDDEN);
+    require(resized != nullptr, SDL_GetError());
+    require(SDL_GL_MakeCurrent(resized, context) == 0, SDL_GetError());
+    hle::gl_set_window(resized);
+    hle::gl_resize();
+    call(cpu, "glViewport" + suffix, {0, 0, 64, 64});
+    floats(cpu, "glClearColor" + suffix, {0, 0, 0, 1});
+    call(cpu, "glClear" + suffix, {GL_COLOR_BUFFER_BIT});
+    call(cpu, "glDrawArrays" + suffix, {GL_TRIANGLE_STRIP, 0, 4});
+    pixel(10, 48, {0, 0, 0}); // letterbox
+    pixel(62, 30, {0, 255, 0});
+    pixel(102, 66, {255, 0, 255});
+    const uint32_t state = cpu.alloc(16);
+    call(cpu, "glGetIntegerv" + suffix, {GL_VIEWPORT, state});
+    require(cpu.read_u32(state + 8) == 64 && cpu.read_u32(state + 12) == 64,
+            "guest viewport query leaked native display dimensions");
+    int x = -1, y = -1;
+    hle::gl_map_touch(80, 48, 160, 96, x, y);
+    require(x == 32 && y == 32, "fullscreen input missed the center");
+    hle::gl_map_touch(10, 48, 160, 96, x, y);
+    require(x == 0 && y == 32, "letterbox input was not clamped to the guest");
+    call(cpu, "glScissor" + suffix, {0, 0, 32, 64});
+    call(cpu, "glEnable" + suffix, {GL_SCISSOR_TEST});
+    floats(cpu, "glClearColor" + suffix, {0, 0, 1, 1});
+    call(cpu, "glClear" + suffix, {GL_COLOR_BUFFER_BIT});
+    pixel(48, 48, {0, 0, 255});
+    pixel(120, 48, {0, 0, 0});
+    call(cpu, "glGetIntegerv" + suffix, {GL_SCISSOR_BOX, state});
+    require(cpu.read_u32(state + 8) == 32 && cpu.read_u32(state + 12) == 64,
+            "guest scissor query leaked native display dimensions");
+    call(cpu, "glDisable" + suffix, {GL_SCISSOR_TEST});
+
+    // Offscreen textures keep guest pixels even when the Android surface is
+    // larger; scaling these viewports/scissors breaks Fruit Ninja's FBOs.
+    const std::string fbo_suffix = (api == 1 ? "OES" : "") + suffix;
+    call(cpu, "glGenTextures" + suffix, {1, state});
+    call(cpu, "glBindTexture" + suffix, {GL_TEXTURE_2D, cpu.read_u32(state)});
+    call(cpu, "glTexImage2D" + suffix, {GL_TEXTURE_2D, 0, GL_RGBA, 2, 2, 0, GL_RGBA, GL_UNSIGNED_BYTE, 0});
+    const uint32_t texture_id = cpu.read_u32(state);
+    call(cpu, "glGenFramebuffers" + fbo_suffix, {1, state});
+    call(cpu, "glBindFramebuffer" + fbo_suffix, {GL_FRAMEBUFFER, cpu.read_u32(state)});
+    call(cpu, "glFramebufferTexture2D" + fbo_suffix, {GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, texture_id, 0});
+    call(cpu, "glViewport" + suffix, {0, 0, 2, 2});
+    GLint viewport[4] = {};
+    glGetIntegerv(GL_VIEWPORT, viewport);
+    require(viewport[0] == 0 && viewport[1] == 0 && viewport[2] == 2 && viewport[3] == 2,
+            "offscreen viewport was scaled to the native surface");
+    floats(cpu, "glClearColor" + suffix, {0, 0, 0, 1});
+    call(cpu, "glClear" + suffix, {GL_COLOR_BUFFER_BIT});
+    call(cpu, "glScissor" + suffix, {0, 0, 1, 2});
+    call(cpu, "glEnable" + suffix, {GL_SCISSOR_TEST});
+    floats(cpu, "glClearColor" + suffix, {1, 0, 0, 1});
+    call(cpu, "glClear" + suffix, {GL_COLOR_BUFFER_BIT});
+    pixel(0, 0, {255, 0, 0});
+    pixel(1, 0, {0, 0, 0});
+    call(cpu, "glDisable" + suffix, {GL_SCISSOR_TEST});
+    call(cpu, "glDeleteFramebuffers" + fbo_suffix, {1, state});
+    GLint binding = -1;
+    glGetIntegerv(GL_FRAMEBUFFER_BINDING, &binding);
+    glGetIntegerv(GL_VIEWPORT, viewport);
+    require(binding == 0 && viewport[0] == 32 && viewport[1] == 0 &&
+            viewport[2] == 3 && viewport[3] == 3,
+            "deleting the bound framebuffer did not restore surface scaling");
+    require(glGetError() == GL_NO_ERROR, "fullscreen/FBO rendering generated a GL error");
+    require(SDL_GL_MakeCurrent(window, context) == 0, SDL_GetError());
+    hle::gl_set_window(window);
+    hle::gl_resize();
+    SDL_DestroyWindow(resized);
+}
+
+#ifndef BADA_TEST_DESKTOP
+void compact_canvas_test(Cpu& cpu, SDL_Window* window) {
+    const uint32_t kernel = 0x100100;
+    cpu.write_mem(kernel, arm_pixel_fixture, sizeof arm_pixel_fixture);
+    ElfImage fixture_image;
+    fixture_image.segments.push_back({kernel, sizeof arm_pixel_fixture, sizeof arm_pixel_fixture, 5,
+                                      reinterpret_cast<const uint8_t*>(arm_pixel_fixture)});
+    require(pixel_accel::install(cpu, fixture_image) == 1, "generated pixel kernel was not recognized");
+    std::vector<uint16_t> source(320 * 256, 0xdead);
+    for (int y = 0; y < 320; ++y)
+        for (int x = 0; x < 240; ++x) source[y * 256 + x] = (y * 240 + x) & 0xffff;
+    const uint32_t input = copy(cpu, source.data(), source.size() * 2), output = cpu.alloc(480 * 640 * 4);
+    const auto context = SDL_GL_GetCurrentContext();
+    for (const auto size : {hle::SurfaceRect{0,0,480,640}, hle::SurfaceRect{0,0,160,96}}) {
+        auto* target = SDL_CreateWindow("Compact Canvas", 0, 0, size.width, size.height, SDL_WINDOW_OPENGL | SDL_WINDOW_HIDDEN);
+        require(target != nullptr, SDL_GetError());
+        require(SDL_GL_MakeCurrent(target, context) == 0, SDL_GetError());
+        hle::gl_set_window(target);
+        for (int mode = 0; mode < 3; ++mode) {
+            uint32_t result = 0;
+            require(cpu.run_guest(kernel, {input, output, 320}, result), "pixel kernel call failed");
+            std::vector<uint32_t> expected(480 * 640);
+            cpu.read_mem(output, expected.data(), expected.size() * 4);
+            if (mode == 1) { // arbitrary 8-bit HUD colors over the RGB565 background
+                for (int y = 9; y < 46; ++y)
+                    for (int x = 7; x < 107; ++x) expected[y * 480 + x] = 0x00123456;
+                cpu.write_mem(output, expected.data(), expected.size() * 4);
+            } else if (mode == 2) { // extensive guest changes must use full RGBA upload
+                std::fill(expected.begin(), expected.end(), 0x0000ff00);
+                cpu.write_mem(output, expected.data(), expected.size() * 4);
+            }
+            hle::gl_present_canvas(cpu, output, 480, 640);
+            const auto upload = hle::gl_canvas_upload_info();
+            require(mode == 2 ? !upload.compact && upload.bytes == expected.size() * 4
+                              : upload.compact && upload.bytes < expected.size(),
+                    "compact Canvas did not reduce texture upload bytes or retain its fallback");
+            std::vector<uint8_t> rendered(size.width * size.height * 4);
+            glReadPixels(0, 0, size.width, size.height, GL_RGBA, GL_UNSIGNED_BYTE, rendered.data());
+            const auto area = hle::fit_surface(480, 640, size.width, size.height);
+            for (int y = 0; y < size.height; ++y) {
+                for (int x = 0; x < size.width; ++x) {
+                    uint32_t rgb = 0;
+                    if (x >= area.x && x < area.x + area.width && y >= area.y && y < area.y + area.height) {
+                        const int gx = (2 * (x - area.x) + 1) * 480 / (2 * area.width);
+                        const int gy = (2 * (area.height - (y - area.y)) - 1) * 640 / (2 * area.height);
+                        rgb = expected[gy * 480 + gx];
+                    }
+                    const size_t index = (y * size.width + x) * 4;
+                    for (int channel = 0; channel < 3; ++channel)
+                        require(abs(int(rendered[index + channel]) - int((rgb >> (16 - channel * 8)) & 255)) <= 1,
+                                "RGB565/HUD composition differs from the full guest framebuffer");
+                    require(rendered[index + 3] == 255, "compact Canvas lost opaque alpha");
+                }
+            }
+            require(glGetError() == GL_NO_ERROR, "compact Canvas generated a GL error");
+        }
+        require(SDL_GL_MakeCurrent(window, context) == 0, SDL_GetError());
+        hle::gl_set_window(window);
+        SDL_DestroyWindow(target);
+    }
+    puts("RGB565 background, HUD rectangle, color precision, scaling and upload-byte reduction passed");
+}
+#endif
 } // namespace
 
 int main(int argc, char** argv) {
@@ -189,9 +388,15 @@ int main(int argc, char** argv) {
         require(hle::gles_context_version({}) == 2, "Canvas context selection failed");
         SDL_SetMainReady();
         require(SDL_Init(SDL_INIT_VIDEO) == 0, SDL_GetError());
+#ifdef BADA_TEST_DESKTOP
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_COMPATIBILITY);
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 2);
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 1);
+#else
         SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_ES);
         SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, api);
         SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
+#endif
         SDL_GL_SetAttribute(SDL_GL_RED_SIZE, 8);
         SDL_GL_SetAttribute(SDL_GL_GREEN_SIZE, 8);
         SDL_GL_SetAttribute(SDL_GL_BLUE_SIZE, 8);
@@ -199,6 +404,17 @@ int main(int argc, char** argv) {
         SDL_Window* window = SDL_CreateWindow("Bada GL test", 0, 0, 64, 64, SDL_WINDOW_OPENGL | SDL_WINDOW_HIDDEN);
         require(window != nullptr, SDL_GetError());
         auto context = SDL_GL_CreateContext(window);
+#ifndef BADA_TEST_DESKTOP
+        if (!context && api == 1 && std::strstr(SDL_GetError(), "EGL_BAD_ALLOC")) {
+            // Some Mesa software drivers advertise ES 1 configs but cannot
+            // create an ES 1 context, including on the Linux CI runner. This
+            // happens before any guest handler runs; ES 2 remains mandatory.
+            fprintf(stderr, "SKIP: host cannot create an ES 1 context: %s\n", SDL_GetError());
+            SDL_DestroyWindow(window);
+            SDL_Quit();
+            return 77;
+        }
+#endif
         require(context != nullptr, SDL_GetError());
         printf("Host GL: %s, %s\n", glGetString(GL_VERSION), glGetString(GL_RENDERER));
         hle::gl_set_window(window);
@@ -213,11 +429,19 @@ int main(int argc, char** argv) {
         cpu.set_reg(UC_ARM_REG_SP, cpu.reg(UC_ARM_REG_SP) - 256);
         cpu.hard_float = std::string(argv[2]) == "hard";
         render(cpu, api);
+        resize_test(cpu, api, window);
+#ifndef BADA_TEST_DESKTOP
+        if (api == 2) compact_canvas_test(cpu, window);
+#endif
         uc_close(cpu.uc);
         SDL_GL_DeleteContext(context);
         SDL_DestroyWindow(window);
         SDL_Quit();
-        printf("ES %d %s: guest textures, arrays, indices, swap and Canvas passed\n", api, argv[2]);
+#ifdef BADA_TEST_DESKTOP
+        printf("Desktop compatibility GL: ES %d %s guest textures, arrays, indices, swap and Canvas passed\n", api, argv[2]);
+#else
+        printf("Native ES %d %s: guest textures, arrays, indices, swap and Canvas passed\n", api, argv[2]);
+#endif
         return 0;
     } catch (const std::exception& error) {
         fprintf(stderr, "FAIL: %s\n", error.what());

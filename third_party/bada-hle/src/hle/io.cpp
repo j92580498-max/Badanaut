@@ -183,7 +183,7 @@ void bb_construct_copy(Cpu& c) {
     g_bufs[c.arg32(0)] = src == g_bufs.end() ? Buf{} : src->second;
     c.set_ret32(0);
 }
-void bb_dtor(Cpu& c) { c.set_ret32(0); } // bump allocator: nothing to free
+void bb_dtor(Cpu& c) { g_bufs.erase(c.arg32(0)); c.set_ret32(0); }
 void bb_getpointer(Cpu& c) { c.set_ret32(g_bufs.count(c.arg32(0)) ? g_bufs[c.arg32(0)].data : 0); }
 void bb_getbyte(Cpu& c) {
     auto it = g_bufs.find(c.arg32(0));
@@ -223,6 +223,35 @@ void bb_flip(Cpu& c) {
     if (it != g_bufs.end()) {
         it->second.limit = it->second.pos;
         it->second.pos = 0;
+    }
+    c.set_ret32(0);
+}
+void bb_clear(Cpu& c) {
+    auto found = g_bufs.find(c.arg32(0));
+    if (found != g_bufs.end()) {
+        found->second.pos = 0;
+        found->second.limit = found->second.cap;
+    }
+    c.set_ret32(0);
+}
+void bb_rewind(Cpu& c) {
+    auto found = g_bufs.find(c.arg32(0));
+    if (found != g_bufs.end()) found->second.pos = 0;
+    c.set_ret32(0);
+}
+void bb_setarray(Cpu& c) {
+    auto found = g_bufs.find(c.arg32(0));
+    const uint32_t source = c.arg32(1);
+    const int index = static_cast<int>(c.arg32(2)), count = static_cast<int>(c.arg32(3));
+    if (found == g_bufs.end() || index < 0 || count < 0 ||
+        index > found->second.limit || count > found->second.limit - index || (count && !source)) {
+        c.set_ret32(0x80000000);
+        return;
+    }
+    std::vector<uint8_t> bytes(count);
+    if (count) {
+        c.read_mem(source, bytes.data(), count);
+        c.write_mem(found->second.data + index, bytes.data(), count);
     }
     c.set_ret32(0);
 }
@@ -627,6 +656,14 @@ void set_package_root(const std::string& root) {
     printf("[io] package root: %s (home: %s)\n", root.c_str(), g_home.c_str());
 }
 
+bool byte_buffer_view(uint32_t object, uint32_t& data, uint32_t& length) {
+    const auto found = g_bufs.find(object);
+    if (found == g_bufs.end() || found->second.limit < 0 || found->second.limit > found->second.cap) return false;
+    data = found->second.data;
+    length = static_cast<uint32_t>(found->second.limit);
+    return true;
+}
+
 void register_io() {
     register_handler("_ZN3Osp4Base10ByteBufferC1Ev", bb_ctor);
     register_handler("_ZN3Osp4Base10ByteBufferC2Ev", bb_ctor);
@@ -635,6 +672,9 @@ void register_io() {
     register_handler("_ZNK3Osp4Base10BufferBase8GetLimitEv", bb_getlimit);
     register_handler("_ZN3Osp4Base10BufferBase11SetPositionEi", bb_setposition);
     register_handler("_ZN3Osp4Base10BufferBase4FlipENS0_10PositionToE", bb_flip);
+    register_handler("_ZN3Osp4Base10BufferBase5ClearEv", bb_clear);
+    register_handler("_ZN3Osp4Base10BufferBase6RewindEv", bb_rewind);
+    register_handler("_ZN3Osp4Base10ByteBuffer8SetArrayEPKhii", bb_setarray);
     register_handler("_ZN3Osp4Base10ByteBuffer8GetArrayEPhii", bb_getarray);
     register_handler("_ZN3Osp4Text13AsciiEncodingC1Ev", ascii_ctor);
     register_handler("_ZN3Osp4Text13AsciiEncodingC2Ev", ascii_ctor);

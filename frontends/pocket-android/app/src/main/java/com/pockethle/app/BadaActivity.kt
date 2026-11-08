@@ -1,12 +1,17 @@
 package com.pockethle.app
 
 import android.os.Bundle
+import android.os.Build
+import android.view.WindowManager
 import android.widget.Toast
 import android.widget.Button
 import android.widget.RelativeLayout
 import java.io.File
 import kotlin.concurrent.thread
 import org.libsdl.app.SDLActivity
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 
 class BadaActivity : SDLActivity() {
     companion object {
@@ -26,6 +31,7 @@ class BadaActivity : SDLActivity() {
             Toast.makeText(this, getString(R.string.bada_log_failed, it.message), Toast.LENGTH_LONG).show()
         }.getOrNull()
         super.onCreate(savedInstanceState)
+        enterFullscreen()
         installation = try {
             BadaAssets.prepare(this, intent.getStringExtra(EXTRA_GAME_ID) ?: error("No Bada game selected"))
         } catch (error: Exception) {
@@ -66,6 +72,25 @@ class BadaActivity : SDLActivity() {
     }
 
     override fun getLibraries(): Array<String> = arrayOf("SDL2", "unicorn", "main")
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus) enterFullscreen()
+    }
+
+    private fun enterFullscreen() {
+        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            window.attributes = window.attributes.apply {
+                layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+            }
+        }
+        WindowCompat.setDecorFitsSystemWindows(window, false)
+        WindowCompat.getInsetsController(window, window.decorView).apply {
+            systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            hide(WindowInsetsCompat.Type.systemBars())
+        }
+    }
 
     override fun getArguments(): Array<String> {
         val files = installation ?: return arrayOf("--help")

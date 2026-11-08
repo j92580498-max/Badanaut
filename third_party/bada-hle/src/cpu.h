@@ -63,6 +63,7 @@ class Cpu {
     uint32_t timer_obj = 0;    // the guest Timer object
     bool timer_active = false;
     uint32_t timer_interval_ms = 0; // last Timer::Start(msec); 0 = never armed
+    uint32_t timer_deadline_ms = 0; // SDL monotonic clock at Start(), not after Draw()
 
     uint32_t reg(int ucreg);
     void set_reg(int ucreg, uint32_t v);
@@ -90,6 +91,7 @@ class Cpu {
     std::vector<hle::Handler> synth_; // synthetic handlers (slot = synth_base_ + index)
     uint32_t noop_tramp_ = 0;
     uint32_t noop_vtable_ = 0;
+    bool native_abi_ = false;
     uint32_t import_slot(const std::string& name); // slot address for an import
     bool map_image(std::string& err);
     void apply_relocs();

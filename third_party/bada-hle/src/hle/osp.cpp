@@ -1,5 +1,7 @@
 #include "cpu.h"
 #include "dispatch.h"
+#include <SDL2/SDL.h>
+#include <algorithm>
 #include <cctype>
 #include <chrono>
 #include <cstdint>
@@ -439,6 +441,7 @@ void timer_start(Cpu& c) {
                iv ? 1000.0 / iv : 0.0);
     }
     c.timer_interval_ms = iv;
+    c.timer_deadline_ms = SDL_GetTicks() + std::max(iv, 1u);
     c.set_ret32(0);
 }
 void timer_cancel(Cpu& c) {
@@ -519,7 +522,6 @@ void register_osp() {
     register_handler("_ZN3Osp4Base7Runtime5Timer9ConstructERKNS1_19ITimerEventListenerE", timer_construct);
     register_handler("_ZN3Osp4Base7Runtime5Timer5StartEi", timer_start);
     register_handler("_ZN3Osp4Base7Runtime5Timer6CancelEv", timer_cancel);
-    register_handler("_ZN3Osp4Base7Runtime5Timer6CancelEv", ret_ok);
 
     // Control::GetBounds(int&,int&,int&,int&) const -- viewport size for Draw()
     register_handler("_ZNK3Osp2Ui7Control9GetBoundsERiS2_S2_S2_", control_getbounds);
@@ -575,16 +577,6 @@ void register_osp() {
     register_handler("_ZNK3Osp7Locales6Locale14GetCountryCodeEv", locale_country);
     register_handler("_ZN3Osp7Locales6LocaleD1Ev", ret_ok);
 
-    // Audio subsystem -- not needed for rendering; stub so init doesn't crash.
-    // (ByteBuffer is implemented for real in io.cpp; only AudioOut stubbed here.)
-    register_handler("_ZN3Osp5Media8AudioOutC1Ev", stub_ctor); // AudioOut()
-    register_handler("_ZN3Osp5Media8AudioOutC2Ev", stub_ctor);
-    register_handler("_ZN3Osp5Media8AudioOut9ConstructERKNS0_22IAudioOutEventListenerE", ret_ok);
-    register_handler("_ZN3Osp5Media8AudioOut7PrepareENS0_15AudioSampleTypeENS0_16AudioChannelTypeEi", ret_ok);
-    register_handler("_ZN3Osp5Media8AudioOut11WriteBufferERKNS_4Base10ByteBufferE", ret_ok);
-    register_handler("_ZN3Osp5Media8AudioOut5StartEv", ret_ok);
-    register_handler("_ZN3Osp5Media8AudioOut4StopEv", ret_ok);
-    register_handler("_ZN3Osp5Media8AudioOut9SetVolumeEi", ret_ok);
     register_handler("_ZN3Osp8Graphics6Canvas4LockERNS0_10BufferInfoEl", canvas_lock);
     register_handler("_ZN3Osp8Graphics6Canvas6UnlockEv", canvas_unlock);
     register_handler("_ZN3Osp8Graphics6Canvas4ShowEv", canvas_show);

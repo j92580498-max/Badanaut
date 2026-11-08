@@ -404,8 +404,9 @@ void init_dispatch() {
     register_libc();
     register_gl();
     register_osp();
-    register_io(); // after osp: real ByteBuffer/File override the audio stubs
+    register_io();
     register_ui();
+    register_audio();
     printf("[hle] %zu handlers registered\n", g_handlers.size());
 }
 

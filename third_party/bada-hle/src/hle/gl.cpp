@@ -1,5 +1,6 @@
 #include "cpu.h"
 #include "dispatch.h"
+#include "gl_api.h"
 #include <SDL2/SDL.h>
 #ifdef BADA_GLES_BACKEND
 #include <GLES/gl.h>
@@ -11,6 +12,8 @@
 #include <SDL2/SDL_opengl.h>
 #endif
 #include <algorithm>
+#include <array>
+#include <cmath>
 #include <functional>
 #include <cstdio>
 #include <cstring>
@@ -30,6 +33,11 @@
 namespace {
 
 SDL_Window* g_window = nullptr;
+int g_surface_width = 480, g_surface_height = 800;
+GLuint g_framebuffer = 0;
+GLint g_viewport[4] = {0, 0, 480, 800};
+GLint g_scissor[4] = {};
+bool g_scissor_set = false;
 #ifdef BADA_GLES_BACKEND
 // ES 1.1 only accepts STATIC_DRAW and DYNAMIC_DRAW buffer usage.
 constexpr GLenum client_buffer_usage = GL_DYNAMIC_DRAW;
@@ -38,12 +46,39 @@ constexpr GLenum client_buffer_usage = GL_STREAM_DRAW;
 #endif
 GLuint g_canvas_texture = 0;
 bool g_canvas_window_sized = false;
+hle::CanvasUploadInfo g_canvas_upload_info;
 void fit_window(GLint x, GLint y, GLsizei w, GLsizei h); // defined in the ES1 section
+
+hle::SurfaceRect host_rect(const GLint* rectangle) {
+    if (g_framebuffer || !g_window) return {rectangle[0], rectangle[1], rectangle[2], rectangle[3]};
+    int width = 0, height = 0;
+    SDL_GL_GetDrawableSize(g_window, &width, &height);
+    const auto area = hle::fit_surface(g_surface_width, g_surface_height, width, height);
+    if (!area.width || !area.height) return {rectangle[0], rectangle[1], rectangle[2], rectangle[3]};
+    const double sx = static_cast<double>(area.width) / g_surface_width;
+    const double sy = static_cast<double>(area.height) / g_surface_height;
+    const int left = static_cast<int>(std::lround(rectangle[0] * sx));
+    const int bottom = static_cast<int>(std::lround(rectangle[1] * sy));
+    return {area.x + left, area.y + bottom,
+        static_cast<int>(std::lround((static_cast<double>(rectangle[0]) + rectangle[2]) * sx)) - left,
+        static_cast<int>(std::lround((static_cast<double>(rectangle[1]) + rectangle[3]) * sy)) - bottom};
+}
+
+void apply_viewport() {
+    const auto rectangle = host_rect(g_viewport);
+    glViewport(rectangle.x, rectangle.y, rectangle.width, rectangle.height);
+}
+
+void apply_scissor() {
+    if (!g_scissor_set) return;
+    const auto rectangle = host_rect(g_scissor);
+    glScissor(rectangle.x, rectangle.y, rectangle.width, rectangle.height);
+}
 
 // ---- host GL entry points (resolved lazily) ----
 template <class F>
 F host(const char* name) {
-    static std::map<std::string, void*> cache;
+    static std::map<std::string, void*, std::less<>> cache;
     auto it = cache.find(name);
     if (it != cache.end()) {
         return (F)it->second;
@@ -62,6 +97,7 @@ struct AttribArray {
     GLenum type = GL_FLOAT;
     GLboolean norm = GL_FALSE;
     GLsizei stride = 0;
+    std::vector<uint8_t> staging;
 };
 std::map<GLuint, AttribArray> g_attribs;
 
@@ -81,6 +117,7 @@ uint32_t type_size(GLenum t) {
 // real VBOs bound under a VAO and draw with buffer offsets.
 GLuint g_vao = 0, g_ebo = 0;
 std::map<GLuint, GLuint> g_vbo; // per attrib-location VBO
+std::vector<uint8_t> g_indices;
 
 typedef void (*genfn)(GLsizei, GLuint*);
 typedef void (*bindfn)(GLenum, GLuint);
@@ -100,8 +137,14 @@ void gl_clear(Cpu& c) { glClear(c.arg32(0)); }
 void gl_viewport(Cpu& c) {
     GLint x = c.arg32(0), y = c.arg32(1);
     GLsizei w = c.arg32(2), h = c.arg32(3);
-    fit_window(x, y, w, h);
-    glViewport(x, y, w, h);
+    if (!g_framebuffer) fit_window(x, y, w, h);
+    g_viewport[0] = x; g_viewport[1] = y; g_viewport[2] = w; g_viewport[3] = h;
+    apply_viewport();
+}
+void gl_scissor(Cpu& c) {
+    for (int i = 0; i < 4; ++i) g_scissor[i] = static_cast<GLint>(c.arg32(i));
+    g_scissor_set = true;
+    apply_scissor();
 }
 void gl_enable(Cpu& c) { glEnable(c.arg32(0)); }
 void gl_disable(Cpu& c) { glDisable(c.arg32(0)); }
@@ -129,6 +172,10 @@ int getiv_count(GLenum pn) {
     }
 }
 void getiv_into_guest(Cpu& c, GLenum pn, uint32_t out) {
+    if (pn == GL_VIEWPORT || (pn == GL_SCISSOR_BOX && g_scissor_set)) {
+        c.write_mem(out, pn == GL_VIEWPORT ? g_viewport : g_scissor, 4 * sizeof(GLint));
+        return;
+    }
     // glGetIntegerv writes a pname-dependent number of GLints into the caller's
     // buffer. getiv_count() is only how many we forward to the *guest*; the host
     // driver writes as many as the pname implies regardless. Most pnames write
@@ -249,15 +296,12 @@ void gl_disablevattrib(Cpu& c) { g_attribs[c.arg32(0)].enabled = false; }
 
 // glVertexAttribPointer(idx,size,type,norm,stride,ptr): record guest ptr; bind at draw.
 void gl_vattribpointer(Cpu& c) {
-    AttribArray a;
+    auto& a = g_attribs[c.arg32(0)];
     a.size = c.arg32(1);
     a.type = c.arg32(2);
     a.norm = c.arg32(3);
     a.stride = c.arg32(4);
     a.guest_ptr = c.arg32(5);
-    GLuint idx = c.arg32(0);
-    a.enabled = g_attribs[idx].enabled;
-    g_attribs[idx] = a;
 }
 // glUniformMatrix4fv(loc,count,transpose,value): copy 16*count floats from guest.
 void gl_uniformmatrix4fv(Cpu& c) {
@@ -286,14 +330,16 @@ void bind_client_arrays(Cpu& c, uint32_t vert_count) {
             continue;
         }
         uint32_t stride = a.stride ? a.stride : a.size * type_size(a.type);
-        std::vector<uint8_t> data(stride * vert_count);
-        c.read_mem(a.guest_ptr, data.data(), data.size());
+        const size_t bytes = vert_count ? static_cast<size_t>(stride) * (vert_count - 1) + a.size * type_size(a.type) : 0;
+        auto& data = a.staging;
+        if (data.size() < bytes) data.resize(bytes);
+        c.read_mem(a.guest_ptr, data.data(), bytes);
         GLuint& vbo = g_vbo[idx];
         if (!vbo) {
             host<genfn>("glGenBuffers")(1, &vbo);
         }
         host<bindfn>("glBindBuffer")(GL_ARRAY_BUFFER, vbo);
-        host<datafn>("glBufferData")(GL_ARRAY_BUFFER, data.size(), data.data(), client_buffer_usage);
+        host<datafn>("glBufferData")(GL_ARRAY_BUFFER, bytes, bytes ? data.data() : nullptr, client_buffer_usage);
         host<void (*)(GLuint, GLint, GLenum, GLboolean, GLsizei, const void*)>("glVertexAttribPointer")(idx, a.size, a.type, a.norm, a.stride, (const void*)0);
         host<void (*)(GLuint)>("glEnableVertexAttribArray")(idx);
     }
@@ -305,8 +351,10 @@ void gl_drawelements(Cpu& c) {
     GLenum type = c.arg32(2);
     uint32_t iptr = c.arg32(3);
     uint32_t isz = type_size(type);
-    std::vector<uint8_t> idx(count * isz);
-    c.read_mem(iptr, idx.data(), count * isz);
+    const size_t bytes = static_cast<size_t>(count) * isz;
+    auto& idx = g_indices;
+    if (idx.size() < bytes) idx.resize(bytes);
+    c.read_mem(iptr, idx.data(), bytes);
     uint32_t maxi = 0;
     for (int i = 0; i < count; i++) {
         uint32_t v = (isz == 1) ? idx[i] : (isz == 2) ? ((uint16_t*)idx.data())[i]
@@ -321,7 +369,7 @@ void gl_drawelements(Cpu& c) {
         host<genfn>("glGenBuffers")(1, &g_ebo);
     }
     host<bindfn>("glBindBuffer")(GL_ELEMENT_ARRAY_BUFFER, g_ebo);
-    host<datafn>("glBufferData")(GL_ELEMENT_ARRAY_BUFFER, idx.size(), idx.data(), client_buffer_usage);
+    host<datafn>("glBufferData")(GL_ELEMENT_ARRAY_BUFFER, bytes, bytes ? idx.data() : nullptr, client_buffer_usage);
     host<void (*)(GLenum, GLsizei, GLenum, const void*)>("glDrawElements")(mode, count, type, (const void*)0);
     static bool once = false;
     if (!once) {
@@ -350,7 +398,12 @@ struct FFArray {
     GLuint vbo = 0; // guest's GL_ARRAY_BUFFER bound when the pointer was set (0 = client array)
 };
 FFArray g_ff_vertex, g_ff_color, g_ff_texcoord, g_ff_normal;
-GLuint g_ff_vbo[4] = {0, 0, 0, 0};
+struct FFStream {
+    GLuint buffer = 0;
+    std::vector<uint8_t> staging;
+};
+std::array<FFStream, 4> g_ff_streams;
+std::vector<uint8_t> g_ff_indices;
 
 // state forwards
 void g1_clear(Cpu& c) { glClear(c.arg32(0)); }
@@ -380,6 +433,8 @@ void fit_window(GLint x, GLint y, GLsizei w, GLsizei h) {
         return;
     }
     g_window_fit = true;
+    g_surface_width = w;
+    g_surface_height = h;
     int cw, ch;
     SDL_GetWindowSize(g_window, &cw, &ch);
     if (w != cw || h != ch) {
@@ -388,10 +443,7 @@ void fit_window(GLint x, GLint y, GLsizei w, GLsizei h) {
     }
 }
 void g1_viewport(Cpu& c) {
-    GLint x = c.arg32(0), y = c.arg32(1);
-    GLsizei w = c.arg32(2), h = c.arg32(3);
-    fit_window(x, y, w, h);
-    glViewport(x, y, w, h);
+    gl_viewport(c);
 }
 void g1_finish(Cpu&) { glFinish(); }
 void g1_flush(Cpu&) { glFlush(); }
@@ -441,6 +493,7 @@ void g1_clientactivetexture(Cpu& c) { host<void (*)(GLenum)>("glClientActiveText
 void g1_bindtexture(Cpu& c) { glBindTexture(c.arg32(0), c.arg32(1)); }
 void g1_texparameteri(Cpu& c) { glTexParameteri(c.arg32(0), c.arg32(1), c.arg32(2)); }
 void g1_texenvi(Cpu& c) { glTexEnvi(c.arg32(0), c.arg32(1), c.arg32(2)); }
+void g1_texenvf(Cpu& c) { glTexEnvf(c.arg32(0), c.arg32(1), c.argf32(c.hard_float ? 0 : 2)); }
 void g1_gentextures(Cpu& c) {
     GLsizei n = c.arg32(0);
     std::vector<GLuint> ids(n);
@@ -531,6 +584,9 @@ F fbo(const char* core, const char* ext) {
 }
 void g1_bindframebuffer(Cpu& c) {
     fbo<bindfn>("glBindFramebuffer", "glBindFramebufferEXT")(c.arg32(0), c.arg32(1));
+    g_framebuffer = c.arg32(1);
+    apply_viewport();
+    apply_scissor();
 }
 void g1_genframebuffers(Cpu& c) {
     GLsizei n = c.arg32(0);
@@ -547,6 +603,11 @@ void g1_deleteframebuffers(Cpu& c) {
         ids[i] = c.read_u32(c.arg32(1) + i * 4);
     }
     fbo<void (*)(GLsizei, const GLuint*)>("glDeleteFramebuffers", "glDeleteFramebuffersEXT")(n, ids.data());
+    if (g_framebuffer && std::find(ids.begin(), ids.end(), g_framebuffer) != ids.end()) {
+        g_framebuffer = 0; // GL resets the binding when the bound FBO is deleted.
+        apply_viewport();
+        apply_scissor();
+    }
 }
 void g1_framebuffertexture2d(Cpu& c) {
     fbo<void (*)(GLenum, GLenum, GLenum, GLuint, GLint)>("glFramebufferTexture2D",
@@ -612,58 +673,66 @@ void g1_vertexpointer(Cpu& c) { g_ff_vertex = {g_ff_vertex.enabled, c.arg32(3), 
 void g1_colorpointer(Cpu& c) { g_ff_color = {g_ff_color.enabled, c.arg32(3), (GLint)c.arg32(0), c.arg32(1), (GLsizei)c.arg32(2), cur_array_buffer()}; }
 void g1_texcoordpointer(Cpu& c) { g_ff_texcoord = {g_ff_texcoord.enabled, c.arg32(3), (GLint)c.arg32(0), c.arg32(1), (GLsizei)c.arg32(2), cur_array_buffer()}; }
 void g1_normalpointer(Cpu& c) { g_ff_normal = {g_ff_normal.enabled, c.arg32(2), 3, c.arg32(0), (GLsizei)c.arg32(1), cur_array_buffer()}; }
-// set(a, off): enable the client state and point at byte offset `off` into the
-// currently-bound GL_ARRAY_BUFFER (0 for our translated client-array VBO).
-void ff_bind(Cpu& c, FFArray& a, int slot, void (*set)(FFArray&, GLuint), uint32_t vcount) {
-    if (!a.enabled) {
-        return;
-    }
-    if (a.vbo) {
-        // Server-side VBO (FruitNinja's models): the guest already uploaded the
-        // data to this buffer (mirrored host-side via glBufferData); `a.ptr` is a
-        // byte offset into it. Bind it and point straight at the offset.
-        host<bindfn>("glBindBuffer")(GL_ARRAY_BUFFER, a.vbo);
-        set(a, a.ptr);
-        return;
-    }
-    if (!a.ptr) {
-        return;
-    }
-    // Client array (guest pointer): copy guest memory into our scratch VBO.
-    uint32_t stride = a.stride ? a.stride : a.size * type_size(a.type);
-    std::vector<uint8_t> d(stride * vcount);
-    c.read_mem(a.ptr, d.data(), d.size());
-    if (!g_ff_vbo[slot]) {
-        host<genfn>("glGenBuffers")(1, &g_ff_vbo[slot]);
-    }
-    host<bindfn>("glBindBuffer")(GL_ARRAY_BUFFER, g_ff_vbo[slot]);
-    host<datafn>("glBufferData")(GL_ARRAY_BUFFER, d.size(), d.data(), client_buffer_usage);
-    set(a, 0);
-}
 void ff_bind_all(Cpu& c, uint32_t vcount) {
-    if (g_ff_vertex.enabled && (g_ff_vertex.vbo || g_ff_vertex.ptr)) {
-        ff_bind(
-            c, g_ff_vertex, 0, [](FFArray& a, GLuint off) {glEnableClientState(GL_VERTEX_ARRAY);glVertexPointer(a.size,a.type,a.stride,(const void*)(uintptr_t)off); }, vcount);
-    } else {
-        glDisableClientState(GL_VERTEX_ARRAY);
+    struct Binding { FFArray* array; GLenum state; void (*set)(const FFArray&, uint32_t); };
+    const std::array<Binding, 4> bindings = {{
+        {&g_ff_vertex, GL_VERTEX_ARRAY, [](const FFArray& a, uint32_t off) { glVertexPointer(a.size, a.type, a.stride, (const void*)(uintptr_t)off); }},
+        {&g_ff_color, GL_COLOR_ARRAY, [](const FFArray& a, uint32_t off) { glColorPointer(a.size, a.type, a.stride, (const void*)(uintptr_t)off); }},
+        {&g_ff_texcoord, GL_TEXTURE_COORD_ARRAY, [](const FFArray& a, uint32_t off) { glTexCoordPointer(a.size, a.type, a.stride, (const void*)(uintptr_t)off); }},
+        {&g_ff_normal, GL_NORMAL_ARRAY, [](const FFArray& a, uint32_t off) { glNormalPointer(a.type, a.stride, (const void*)(uintptr_t)off); }},
+    }};
+    const auto stride_of = [](const FFArray& a) { return a.stride ? a.stride : a.size * type_size(a.type); };
+    std::array<bool, 4> uploaded{};
+    for (const auto& binding : bindings) {
+        const auto& a = *binding.array;
+        if (a.enabled && (a.vbo || a.ptr)) glEnableClientState(binding.state);
+        else glDisableClientState(binding.state);
     }
-    if (g_ff_color.enabled && (g_ff_color.vbo || g_ff_color.ptr)) {
-        ff_bind(
-            c, g_ff_color, 1, [](FFArray& a, GLuint off) {glEnableClientState(GL_COLOR_ARRAY);glColorPointer(a.size,a.type,a.stride,(const void*)(uintptr_t)off); }, vcount);
-    } else {
-        glDisableClientState(GL_COLOR_ARRAY);
-    }
-    if (g_ff_texcoord.enabled && (g_ff_texcoord.vbo || g_ff_texcoord.ptr)) {
-        ff_bind(
-            c, g_ff_texcoord, 2, [](FFArray& a, GLuint off) {glEnableClientState(GL_TEXTURE_COORD_ARRAY);glTexCoordPointer(a.size,a.type,a.stride,(const void*)(uintptr_t)off); }, vcount);
-    } else {
-        glDisableClientState(GL_TEXTURE_COORD_ARRAY);
-    }
-    if (g_ff_normal.enabled && (g_ff_normal.vbo || g_ff_normal.ptr)) {
-        ff_bind(
-            c, g_ff_normal, 3, [](FFArray& a, GLuint off) {glEnableClientState(GL_NORMAL_ARRAY);glNormalPointer(a.type,a.stride,(const void*)(uintptr_t)off); }, vcount);
-    } else {
-        glDisableClientState(GL_NORMAL_ARRAY);
+    for (size_t slot = 0; slot < bindings.size(); ++slot) {
+        const auto& binding = bindings[slot];
+        const auto& a = *binding.array;
+        if (!a.enabled || uploaded[slot] || (!a.vbo && !a.ptr)) continue;
+        if (a.vbo) {
+            // Guest VBOs stay on the GPU; pointers are offsets into the data
+            // already uploaded by glBufferData (Fruit Ninja's static models).
+            host<bindfn>("glBindBuffer")(GL_ARRAY_BUFFER, a.vbo);
+            binding.set(a, a.ptr);
+            continue;
+        }
+
+        // Fruit Ninja's sprites interleave positions, UVs and colors. Copy and
+        // upload each shared record once instead of sending its full stride
+        // separately for every array. Separate arrays keep separate streams.
+        const uint32_t stride = stride_of(a);
+        uint32_t base = a.ptr, last = a.ptr;
+        uint64_t end = static_cast<uint64_t>(a.ptr) + a.size * type_size(a.type);
+        std::array<bool, 4> members{};
+        members[slot] = true;
+        for (size_t next = slot + 1; next < bindings.size(); ++next) {
+            const auto& other = *bindings[next].array;
+            if (!other.enabled || other.vbo || !other.ptr || uploaded[next] || stride_of(other) != stride) continue;
+            const uint32_t first = std::min(base, other.ptr), final = std::max(last, other.ptr);
+            if (final - first >= stride) continue;
+            base = first;
+            last = final;
+            end = std::max(end, static_cast<uint64_t>(other.ptr) + other.size * type_size(other.type));
+            members[next] = true;
+        }
+        const size_t bytes = vcount ? static_cast<size_t>(stride) * (vcount - 1) + end - base : 0;
+        auto& stream = g_ff_streams[slot];
+        if (stream.staging.size() < bytes) stream.staging.resize(bytes);
+        if (bytes) c.read_mem(base, stream.staging.data(), bytes);
+        if (!stream.buffer) host<genfn>("glGenBuffers")(1, &stream.buffer);
+        host<bindfn>("glBindBuffer")(GL_ARRAY_BUFFER, stream.buffer);
+        // BufferData lets the driver orphan in-flight storage. Updating the
+        // same live storage with BufferSubData can stall a mobile GPU.
+        host<datafn>("glBufferData")(GL_ARRAY_BUFFER, bytes, bytes ? stream.staging.data() : nullptr, client_buffer_usage);
+        for (size_t member = slot; member < bindings.size(); ++member) {
+            if (!members[member]) continue;
+            const auto& view = *bindings[member].array;
+            bindings[member].set(view, view.ptr - base);
+            uploaded[member] = true;
+        }
     }
 }
 void g1_drawarrays(Cpu& c) {
@@ -705,7 +774,7 @@ void g1_drawelements(Cpu& c) {
     glGetIntegerv(GL_ELEMENT_ARRAY_BUFFER_BINDING, &guest_ebo);
     glGetIntegerv(GL_ARRAY_BUFFER_BINDING, &save_abuf);
 
-    std::vector<uint8_t> idx;  // host copy of client-side indices (EBO mode: empty)
+    auto& idx = g_ff_indices; // reusable host copy of client-side indices
     const void* host_idx;      // what we hand glDrawElements
     if (guest_ebo) {
         // Server-side indices (FruitNinja models): the guest's mirrored EBO stays
@@ -717,8 +786,9 @@ void g1_drawelements(Cpu& c) {
         // Client-side indices: read from guest memory, size client arrays by the
         // max index, draw from the host copy.
         uint32_t isz = type_size(t);
-        idx.resize((size_t)n * isz);
-        c.read_mem(ip, idx.data(), idx.size());
+        const size_t bytes = static_cast<size_t>(n) * isz;
+        if (idx.size() < bytes) idx.resize(bytes);
+        c.read_mem(ip, idx.data(), bytes);
         uint32_t maxi = 0;
         for (int i = 0; i < n; i++) {
             uint32_t v = (isz == 1) ? idx[i] : (isz == 2) ? ((uint16_t*)idx.data())[i]
@@ -792,25 +862,43 @@ void egl_swapbuffers(Cpu& c) {
 
 namespace hle {
 void gl_set_window(void* w) { g_window = (SDL_Window*)w; }
+SurfaceRect gl_content_rect(int width, int height) {
+    return fit_surface(g_surface_width, g_surface_height, width, height);
+}
+void gl_map_touch(int x, int y, int width, int height, int& guest_x, int& guest_y) {
+    const auto area = gl_content_rect(width, height);
+    const int top = height - area.y - area.height; // SDL input starts at the top
+    guest_x = area.width ? std::clamp(static_cast<int>(
+        static_cast<int64_t>(x - area.x) * g_surface_width / area.width), 0, g_surface_width - 1) : 0;
+    guest_y = area.height ? std::clamp(static_cast<int>(
+        static_cast<int64_t>(y - top) * g_surface_height / area.height), 0, g_surface_height - 1) : 0;
+}
+void gl_resize() { apply_viewport(); apply_scissor(); }
 void gl_set_preswap(std::function<void(Cpu&)> fn) { g_preswap = std::move(fn); }
 #ifdef BADA_GLES_BACKEND
 // Implemented alongside the Android frontend, using ES arrays/shaders instead
 // of desktop immediate mode. Keep the game's GL dispatch shared with desktop.
 void gles_present_canvas(Cpu& cpu, void* window, uint32_t pixels, int width, int height);
+CanvasUploadInfo gles_canvas_upload_info();
+CanvasUploadInfo gl_canvas_upload_info() { return gles_canvas_upload_info(); }
 void gl_present_canvas(Cpu& cpu, uint32_t pixels, int width, int height) {
+    fit_window(0, 0, width, height);
     gles_present_canvas(cpu, g_window, pixels, width, height);
 }
 #else
+CanvasUploadInfo gl_canvas_upload_info() { return g_canvas_upload_info; }
 void gl_present_canvas(Cpu& cpu, uint32_t pixels, int width, int height) {
     if (!g_window || !pixels || width <= 0 || height <= 0) {
         return;
     }
     if (!g_canvas_window_sized) {
+        fit_window(0, 0, width, height);
         SDL_SetWindowSize(g_window, width, height);
         g_canvas_window_sized = true;
     }
     std::vector<uint8_t> image((size_t)width * (size_t)height * 4);
     cpu.read_mem(pixels, image.data(), (uint32_t)image.size());
+    g_canvas_upload_info = {static_cast<uint32_t>(image.size()), false};
     static int canvas_frames = 0;
     ++canvas_frames;
     if (canvas_frames <= 12 || canvas_frames % 100 == 0) {
@@ -827,14 +915,20 @@ void gl_present_canvas(Cpu& cpu, uint32_t pixels, int width, int height) {
     if (ww <= 0 || wh <= 0) {
         SDL_GetWindowSize(g_window, &ww, &wh);
     }
+    glPushAttrib(GL_ENABLE_BIT | GL_COLOR_BUFFER_BIT | GL_TEXTURE_BIT |
+                 GL_VIEWPORT_BIT | GL_CURRENT_BIT | GL_TRANSFORM_BIT);
+    glPushClientAttrib(GL_CLIENT_PIXEL_STORE_BIT);
     glViewport(0, 0, ww, wh);
+    glDisable(GL_SCISSOR_TEST);
     glDisable(GL_DEPTH_TEST);
     glDisable(GL_BLEND);
     glDisable(GL_CULL_FACE);
     glMatrixMode(GL_PROJECTION);
+    glPushMatrix();
     glLoadIdentity();
     glOrtho(0.0, (GLdouble)ww, (GLdouble)wh, 0.0, -1.0, 1.0);
     glMatrixMode(GL_MODELVIEW);
+    glPushMatrix();
     glLoadIdentity();
     glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT);
@@ -847,7 +941,7 @@ void gl_present_canvas(Cpu& cpu, uint32_t pixels, int width, int height) {
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP);
     glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, image.data());
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, width, height, 0, GL_BGRA, GL_UNSIGNED_BYTE, image.data());
     float scale = std::min((float)ww / (float)width, (float)wh / (float)height);
     float dw = width * scale, dh = height * scale;
     float left = (ww - dw) * 0.5f, top = (wh - dh) * 0.5f;
@@ -861,6 +955,11 @@ void gl_present_canvas(Cpu& cpu, uint32_t pixels, int width, int height) {
     glEnd();
     glDisable(GL_TEXTURE_2D);
     SDL_GL_SwapWindow(g_window);
+    glPopMatrix();
+    glMatrixMode(GL_PROJECTION);
+    glPopMatrix();
+    glPopClientAttrib();
+    glPopAttrib();
 }
 #endif
 
@@ -868,6 +967,7 @@ void register_gl() {
     register_handler("glClearColor_2", gl_clearcolor);
     register_handler("glClear_2", gl_clear);
     register_handler("glViewport_2", gl_viewport);
+    register_handler("glScissor_2", gl_scissor);
     register_handler("glEnable_2", gl_enable);
     register_handler("glDisable_2", gl_disable);
     register_handler("glFinish_2", gl_finish);
@@ -933,6 +1033,7 @@ void register_gl() {
     register_handler("glBlendFunc_1", g1_blendfunc);
     register_handler("glShadeModel_1", g1_shademodel);
     register_handler("glViewport_1", g1_viewport);
+    register_handler("glScissor_1", gl_scissor);
     register_handler("glFinish_1", g1_finish);
     register_handler("glFlush_1", g1_flush);
     register_handler("glColor4ub_1", g1_color4ub);
@@ -952,6 +1053,7 @@ void register_gl() {
     register_handler("glBindTexture_1", g1_bindtexture);
     register_handler("glTexParameteri_1", g1_texparameteri);
     register_handler("glTexEnvi_1", g1_texenvi);
+    register_handler("glTexEnvf_1", g1_texenvf);
     register_handler("glGenTextures_1", g1_gentextures);
     register_handler("glDeleteTextures_1", g1_deletetextures);
     register_handler("glTexImage2D_1", g1_teximage2d);

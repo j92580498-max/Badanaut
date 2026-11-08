@@ -197,46 +197,6 @@ uint32_t g_on_background = 0;                    // FruitNinja::OnBackground(thi
 uint32_t g_on_foreground = 0;                    // FruitNinja::OnForeground(this)
 bool g_app_focused = true;                       // debounce redundant focus events
 
-// ---- audio pump: the Mortar software mixer's missing heartbeat (FruitNinja) ----
-// MAMAudioThread is a *cooperative* mixer: Draw() ticks ThreadMainLoop() once per
-// frame, which calls FillBuffer() -- the function that mixes each voice, advances
-// its play cursor and, when a voice reaches its end, posts SendSoundStoppedCmd.
-// But once the output stream is up (state@+0x2c == 1), ThreadMainLoop only re-enters
-// FillBuffer if the previous block was refused (flag@+0x14). On hardware the real
-// pump is the AudioOut event path: IAudioOutEventListener::OnAudioOutBufferEndReached
-// -> MAMAudioThread::SubsystemBufferCopied(false) -> FillBuffer, once per consumed
-// buffer. Our Osp::Media::AudioOut is a write-only stub that never posts events, so
-// FillBuffer dies after the priming block: no voice ever ends, no stop is posted,
-// MAMAudioController::Update has nothing to dispatch, DefaultSoundRemovedCallback ->
-// GameSound::Release never runs, and GameSound's 32 slots leak until every later
-// SFXPlay is refused by FindFree() == -1 (i.e. the game goes silent).
-// So we generate the heartbeat here, at the true block rate: WriteSamples ships
-// 1200 bytes = 300 stereo S16 frames = 37.5 ms at the 8 kHz the game prepares.
-// SubsystemBufferCopied self-gates on the stream state, so early calls are no-ops.
-uint32_t g_mam_thread = 0;             // MAMAudioThread* (captured at Controller::Init)
-uint32_t g_subsystem_buffer_copied = 0; // MAMAudioThread::SubsystemBufferCopied(bool)
-bool g_audio_pump = true;              // BADA_NO_AUDIO_PUMP=1 disables (A/B testing)
-
-void audio_pump(Cpu& cpu) {
-    if (!g_audio_pump || !g_mam_thread || !g_subsystem_buffer_copied) {
-        return;
-    }
-    static uint32_t last = 0;
-    static uint32_t acc = 0; // elapsed, in half-milliseconds (37.5 ms -> 75)
-    uint32_t now = SDL_GetTicks();
-    if (last) {
-        acc += (now - last) * 2;
-    }
-    last = now;
-    for (int blocks = 0; acc >= 75 && blocks < 4; acc -= 75, blocks++) {
-        uint32_t r = 0;
-        cpu.run_guest(g_subsystem_buffer_copied, {g_mam_thread, 0}, r);
-    }
-    if (acc > 300) {
-        acc = 0; // a long stall (breakpoint, load spike) shouldn't burst-mix
-    }
-}
-
 // Count calls to the guest audio functions we hook for diagnosis
 // (BADA_TRACE_AUDIO=1). One handler for all of them: at an observer the PC *is*
 // the hooked entry, so the symbol names itself.
@@ -299,11 +259,10 @@ void feed_touch(Cpu& cpu, SDL_Window* win, int kind, int wx, int wy) {
     }
     int ww = 800, wh = 480;
     SDL_GetWindowSize(win, &ww, &wh);
-    // window px -> device px (800x480) -- TransformTouchPos applies the rest.
-    float device_w = g_skyforce_touch[kind] ? 480.0f : 800.0f;
-    float device_h = g_skyforce_touch[kind] ? 640.0f : 480.0f;
-    int dx = (int)((float)wx * device_w / (float)(ww ? ww : (int)device_w));
-    int dy = (int)((float)wy * device_h / (float)(wh ? wh : (int)device_h));
+    // Undo presentation scaling and letterboxing. The form applies any guest
+    // rotation itself (Fruit Ninja maps portrait device points to landscape).
+    int dx = 0, dy = 0;
+    hle::gl_map_touch(wx, wy, ww, wh, dx, dy);
     cpu.write_u32(g_pt_obj, 0);
     cpu.write_u32(g_pt_obj + 4, (uint32_t)dx); // Osp::Graphics::Point.x (@+4)
     cpu.write_u32(g_pt_obj + 8, (uint32_t)dy); // Osp::Graphics::Point.y (@+8)
@@ -929,7 +888,7 @@ int main(int argc, char** argv) {
         g_skyforce_touch[TK_PRESSED] = img.resolve("_ZN8SkyForce14OnTouchPressedERKN3Osp2Ui7ControlERKNS0_8Graphics5PointERKNS1_14TouchEventInfoE");
         g_skyforce_touch[TK_MOVED] = img.resolve("_ZN8SkyForce12OnTouchMovedERKN3Osp2Ui7ControlERKNS0_8Graphics5PointERKNS1_14TouchEventInfoE");
         g_skyforce_touch[TK_RELEASED] = img.resolve("_ZN8SkyForce15OnTouchReleasedERKN3Osp2Ui7ControlERKNS0_8Graphics5PointERKNS1_14TouchEventInfoE");
-        printf("[touch] SkyForce OnTouch P/M/R=0x%x/0x%x/0x%x\\n", g_skyforce_touch[0], g_skyforce_touch[1], g_skyforce_touch[2]);
+        printf("[touch] SkyForce OnTouch P/M/R=0x%x/0x%x/0x%x\n", g_skyforce_touch[0], g_skyforce_touch[1], g_skyforce_touch[2]);
     }
 
     if (exe.find("FruitNinja") != std::string::npos) {
@@ -986,6 +945,7 @@ int main(int argc, char** argv) {
         // it is a dropped play (slot leak), not a missing hook. Music is a wholly
         // separate path (Song*) that never reaches SFXPlayInternal.
         auto trace = [&](const char* sym, hle::Handler fn) {
+            if (!getenv("BADA_TRACE_AUDIO")) return;
             uint32_t a = img.resolve(sym) & ~1u; // & ~1: Thumb bit isn't part of the addr
             if (a) {
                 cpu.add_observer(a, fn);
@@ -1058,16 +1018,6 @@ int main(int argc, char** argv) {
                    c.read_cstr(c.reg(UC_ARM_REG_R1)).c_str(), c.reg(UC_ARM_REG_R2));
         });
 
-        // ---- host heartbeat for the guest mixer (see audio_pump) ----
-        if (getenv("BADA_NO_AUDIO_PUMP")) {
-            g_audio_pump = false;
-        }
-        g_subsystem_buffer_copied = img.resolve("_ZN14MAMAudioThread21SubsystemBufferCopiedEb") & ~1u;
-        trace("_ZN18MAMAudioController4InitEP14MAMAudioThread", [](Cpu& c) {
-            g_mam_thread = c.reg(UC_ARM_REG_R1); // Init(this, MAMAudioThread*)
-            printf("[sfx] MAMAudioThread @ 0x%x -- host audio pump %s\n", g_mam_thread,
-                   g_audio_pump ? "armed" : "DISABLED (BADA_NO_AUDIO_PUMP)");
-        });
         // Diagnosis: call counts along the mixer -> voice-end -> slot-release chain.
         if (getenv("BADA_TRACE_AUDIO")) {
             for (const char* s : {"_ZN14MAMAudioThread14ThreadMainLoopEv",
@@ -1141,11 +1091,16 @@ int main(int argc, char** argv) {
             start_control_server(atoi(cp), control_exec);
         }
         const uint32_t kFrameMs = 16;        // host loop granularity
-        uint32_t next_tick = SDL_GetTicks(); // when the app's timer is next due
+        bool bootstrap_tick = !cpu.timer_active;
         int frames = 0;
         uint32_t fps_t0 = SDL_GetTicks(); // window-title FPS counter
         int fps_frames = 0;
         uint32_t busy_ms = 0; // accumulated per-frame work time (diag)
+#ifdef __ANDROID__
+        const bool trace_fps = true;
+#else
+        const bool trace_fps = getenv("BADA_TRACE_FPS") != nullptr;
+#endif
         for (bool running = true; running;) {
             uint32_t frame_start = SDL_GetTicks();
             SDL_Event ev;
@@ -1191,6 +1146,7 @@ int main(int argc, char** argv) {
                     g_mouse_down = false;
                     feed_touch(cpu, win, TK_RELEASED, ev.button.x, ev.button.y);
                 } else if (ev.type == SDL_WINDOWEVENT) {
+                    if (ev.window.event == SDL_WINDOWEVENT_SIZE_CHANGED) hle::gl_resize();
                     // Window focus drives the app lifecycle: losing focus pauses
                     // the game (OnBackground), regaining it resumes (OnForeground).
                     bool lost = ev.window.event == SDL_WINDOWEVENT_FOCUS_LOST ||
@@ -1207,9 +1163,11 @@ int main(int argc, char** argv) {
                             feed_touch(cpu, win, TK_RELEASED, mx, my);
                         }
                         feed_focus(cpu, g_on_background, "OnBackground (focus lost -> pause)");
+                        hle::audio_pause(true);
                     } else if (gained && !g_app_focused) {
                         g_app_focused = true;
                         feed_focus(cpu, g_on_foreground, "OnForeground (focus gained -> resume)");
+                        hle::audio_pause(false);
                     }
                 }
             }
@@ -1254,13 +1212,14 @@ int main(int argc, char** argv) {
             // clock at our frame rate -- the game plays several times too fast.
             bool ticked = false;
             if (ote) {
-                if ((int32_t)(SDL_GetTicks() - next_tick) >= 0) {
+                if (bootstrap_tick || (cpu.timer_active &&
+                    (int32_t)(SDL_GetTicks() - cpu.timer_deadline_ms) >= 0)) {
+                    bootstrap_tick = false;
+                    cpu.timer_active = false; // one-shot; the callback may re-arm it
                     uint32_t rr = 0;
                     if (!cpu.run_guest(ote, {cpu.app_instance, cpu.timer_obj}, rr)) {
                         break;
                     }
-                    uint32_t iv = cpu.timer_interval_ms ? cpu.timer_interval_ms : kFrameMs;
-                    next_tick = SDL_GetTicks() + iv;
                     ticked = true;
                 }
             } else {
@@ -1271,7 +1230,7 @@ int main(int argc, char** argv) {
             overlay::pump(cpu);        // replay mocked-UI input into the app
             hle::user_event_pump(cpu); // deliver Control::SendUserEvent posts
             hle::player_pump(cpu);     // signal no-op video clips as ended (intro skip)
-            audio_pump(cpu);       // AudioOut buffer-end heartbeat for the guest mixer
+            hle::audio_pump(cpu);      // consumed PCM buffers -> AudioOut listener
             if (ticked && ++frames == 1) {
                 printf("[boot] first frame drawn\n");
             }
@@ -1279,7 +1238,7 @@ int main(int argc, char** argv) {
             // so window events still get answered between slow ticks.
             uint32_t now = SDL_GetTicks();
             busy_ms += now - frame_start;
-            uint32_t wake = next_tick;
+            uint32_t wake = cpu.timer_active ? cpu.timer_deadline_ms : now + kFrameMs;
             if ((int32_t)(wake - now) > (int32_t)kFrameMs) {
                 wake = now + kFrameMs;
             }
@@ -1288,11 +1247,20 @@ int main(int argc, char** argv) {
             }
             // Count what the app actually drew, not how often the host loop ran.
             if (uint32_t dt = SDL_GetTicks() - fps_t0; fps_frames += ticked, dt >= 500) {
-                char title[256];
                 int n = fps_frames ? fps_frames : 1; // a single slow tick can span the window
+#ifndef __ANDROID__
+                // Android has no visible window title. Updating it would post
+                // UI work and request an activity relayout every half second.
+                char title[256];
                 snprintf(title, sizeof title, "%s %dfps (%.1fms cpu)", base_title.c_str(),
                          (int)(fps_frames * 1000.0 / dt + 0.5), (double)busy_ms / n);
                 SDL_SetWindowTitle(win, title);
+#endif
+                if (trace_fps) {
+                    printf("[perf] frames=%d fps=%.1f busy=%.1f ms/frame timer=%u ms canvas-upload=%u bytes\n",
+                           frames, fps_frames * 1000.0 / dt, static_cast<double>(busy_ms) / n, cpu.timer_interval_ms,
+                           hle::gl_canvas_upload_info().bytes);
+                }
                 fps_t0 += dt;
                 fps_frames = 0;
                 busy_ms = 0;
@@ -1308,6 +1276,7 @@ int main(int argc, char** argv) {
     }
 
     hle::dump_stats();
+    hle::audio_shutdown();
     SDL_GL_DeleteContext(glctx);
     SDL_DestroyWindow(win);
     SDL_Quit();

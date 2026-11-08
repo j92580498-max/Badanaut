@@ -47,11 +47,13 @@ add_executable(bada-hle
     src/control.cpp
     src/elf_loader.cpp
     src/cpu.cpp
+    src/pixel_accel.cpp
     src/hle/dispatch.cpp
     src/hle/libc.cpp
     src/hle/gl.cpp
     src/hle/osp.cpp
     src/hle/io.cpp
+    src/hle/audio.cpp
     src/hle/ui.cpp
     src/ui_overlay.cpp
 )

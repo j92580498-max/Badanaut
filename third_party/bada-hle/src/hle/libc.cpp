@@ -462,7 +462,7 @@ void h_log10(Cpu& c) { c.set_retf64(log10(c.argf64(0))); }
 // ---- __aeabi integer divide ----
 void h_idiv(Cpu& c) {
     int32_t a = c.arg32(0), b = c.arg32(1);
-    c.set_ret32(b ? a / b : 0);
+    c.set_ret32(b ? static_cast<int64_t>(a) / b : 0); // INT_MIN/-1 wraps without C++ overflow
 }
 void h_uidiv(Cpu& c) {
     uint32_t a = c.arg32(0), b = c.arg32(1);
@@ -470,8 +470,8 @@ void h_uidiv(Cpu& c) {
 }
 void h_idivmod(Cpu& c) {
     int32_t a = c.arg32(0), b = c.arg32(1);
-    c.set_reg(UC_ARM_REG_R0, b ? a / b : 0);
-    c.set_reg(UC_ARM_REG_R1, b ? a % b : 0);
+    c.set_reg(UC_ARM_REG_R0, b ? static_cast<int64_t>(a) / b : 0);
+    c.set_reg(UC_ARM_REG_R1, b ? static_cast<int64_t>(a) % b : 0);
 }
 void h_uidivmod(Cpu& c) {
     uint32_t a = c.arg32(0), b = c.arg32(1);

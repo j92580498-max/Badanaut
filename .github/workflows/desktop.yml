@@ -1,0 +1,106 @@
+name: Desktop builds
+
+on:
+  push:
+    branches: [main, 'codex/**']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  desktop:
+    name: Build ${{ matrix.platform }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            platform: Linux
+            artifact: Badanaut-Linux-x64.tar.gz
+          - os: windows-2022
+            platform: Windows
+            artifact: Badanaut-Windows-x64.zip
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: frontends/pocket-desktop/requirements.txt
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build libsdl2-dev libsdl2-image-dev libgl-dev libegl1 libopengl0 libxcb-cursor0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-render-util0 libxcb-xinerama0 libxcb-shape0 libxcb-shm0 libxcb-sync1 libxcb-randr0 libxcb-render0 libxcb-xfixes0 libxcb-xkb1 libx11-xcb1 libxkbcommon-x11-0 xvfb xauth
+      - name: Set up Windows compiler
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+      - name: Install Windows dependencies
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          & "$env:VCPKG_INSTALLATION_ROOT/vcpkg.exe" install sdl2:x64-windows sdl2-image:x64-windows
+          "$env:VCPKG_INSTALLATION_ROOT/installed/x64-windows/bin" >> $env:GITHUB_PATH
+      - name: Install desktop host and packager
+        run: python -m pip install -r frontends/pocket-desktop/requirements.txt
+      - name: Check Linux Qt platform dependencies
+        if: runner.os == 'Linux'
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import subprocess
+          from PySide6.QtCore import QLibraryInfo
+          plugin = Path(QLibraryInfo.path(QLibraryInfo.PluginsPath)) / "platforms/libqxcb.so"
+          report = subprocess.check_output(["ldd", str(plugin)], text=True)
+          print(report)
+          assert "not found" not in report, "Missing Qt X11 runtime dependency"
+          PY
+      - name: Test Bada library imports and display settings
+        run: python -m unittest discover -s frontends/pocket-desktop/tests -v
+      - name: Test native picker at reference, desktop and phone sizes
+        if: runner.os == 'Linux'
+        run: xvfb-run -a python tools/check-shared-ui.py --screenshots .build/ui-preview
+      - name: Upload native interface previews
+        if: runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: Badanaut-UI-previews-${{ github.run_number }}
+          path: .build/ui-preview/*.png
+          if-no-files-found: error
+      - name: Configure Linux engine
+        if: runner.os == 'Linux'
+        run: cmake -S . -B .build/desktop -G Ninja -DCMAKE_BUILD_TYPE=Release
+      - name: Configure Windows engine
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: cmake -S . -B .build/desktop -G Ninja -DCMAKE_BUILD_TYPE=Release "-DCMAKE_TOOLCHAIN_FILE=$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake"
+      - name: Build native Bada engine
+        run: cmake --build .build/desktop --parallel 2
+      - name: Check engine display options
+        shell: bash
+        run: .build/desktop/native/bada-hle --help
+      - name: Package application and native dependencies
+        run: python frontends/pocket-desktop/package.py
+      - name: Check packaged Linux interface
+        if: runner.os == 'Linux'
+        run: xvfb-run -a dist/Badanaut/Badanaut --library .build/smoke-library --smoke-test
+      - name: Check packaged Windows interface
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $process = Start-Process -FilePath "dist/Badanaut/Badanaut.exe" -ArgumentList "--library", ".build/smoke-library", "--smoke-test" -Wait -PassThru
+          if ($process.ExitCode -ne 0) { throw "Desktop interface smoke test failed ($($process.ExitCode))" }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Badanaut-${{ matrix.platform }}-${{ github.run_number }}
+          path: dist/${{ matrix.artifact }}
+          if-no-files-found: error
+          retention-days: 30

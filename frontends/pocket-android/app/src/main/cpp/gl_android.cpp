@@ -1,4 +1,5 @@
 #include "cpu.h"
+#include "display.h"
 #include "hle/dispatch.h"
 #include "hle/gl_api.h"
 #include "pixel_accel.h"
@@ -46,7 +47,9 @@ bool ensure_program() {
     if (program_id && glIsProgram(program_id)) return true;
     GLint range[2], precision = 0;
     glGetShaderPrecisionFormat(GL_FRAGMENT_SHADER, GL_HIGH_FLOAT, range, &precision);
-    exact_coordinates = precision > 0;
+    // Smooth filtering needs interpolated UVs. The packed RGB565 optimization
+    // snaps to guest pixels and therefore stays on the sharp-pixel path.
+    exact_coordinates = precision > 0 && !display::smooth;
     const char* vertex_source = exact_coordinates ?
         "attribute vec2 a_position;void main(){gl_Position=vec4(a_position,0.0,1.0);}" :
         "attribute vec2 a_position;attribute vec2 a_uv;varying mediump vec2 v_uv;"
@@ -107,8 +110,8 @@ void upload_texture(GLuint& id, int& stored_width, int& stored_height, int width
         glGenTextures(1, &id);
         stored_width = stored_height = 0;
         glBindTexture(GL_TEXTURE_2D, id);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, display::smooth ? GL_LINEAR : GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, display::smooth ? GL_LINEAR : GL_NEAREST);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     } else {
@@ -223,7 +226,7 @@ void gles_present_canvas(Cpu& cpu, void* sdl_window, uint32_t pixels, int width,
     glViewport(0, 0, drawable_width, drawable_height);
     glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT);
-    const auto area = fit_surface(width, height, drawable_width, drawable_height);
+    const auto area = display::content_rect(width, height, drawable_width, drawable_height);
     glViewport(area.x, area.y, area.width, area.height);
     glDisable(GL_DEPTH_TEST);
     glDisable(GL_BLEND);

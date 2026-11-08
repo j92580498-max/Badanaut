@@ -1,57 +1,97 @@
-# Badanaut — Samsung bada HLE for Android
+# Badanaut — Samsung bada emulator
 
-Badanaut runs original 32-bit ARM Samsung bada applications through high-level emulation. Its Android frontend uses the PocketHLE launcher interface; the bada engine is based on [`mariotaku/bada-hle`](https://github.com/mariotaku/bada-hle). The repository also retains PocketHLE's Windows CE / Windows Mobile emulator.
+Badanaut runs original 32-bit ARM Samsung bada applications through high-level
+emulation. The Bada engine is based on [mariotaku/bada-hle](https://github.com/mariotaku/bada-hle).
 
-## Build the Android APK
+The native launcher on **Windows, Linux, and Android** follows the compact
+[touchHLE / HyperHLE-Reborn app picker](https://github.com/KlugKlugTG/HyperHLE-Reborn):
+a black background, four columns of rounded game icons and gray labels. A
+top-right ⋮ menu contains Open file manager, Copyright info and Settings.
+Swipe left/right through pages of 16 games; small dots indicate the current page. Qt draws the desktop interface; Android
+uses Canvas. Both use the same layout and bundled fonts. The browser UI has
+been removed. Package artwork is detected where available; game details let
+you select your own icon.
 
-Requirements:
+## Download builds
 
-- JDK 17
-- Android SDK Platform 34 and Build Tools 34.0.0
-- Android NDK `26.1.10909125` and CMake `3.22.1`
-- Stable Rust and `cargo-ndk` (`cargo install --locked cargo-ndk`)
+In **Actions**, open a successful **Desktop builds** or **Android APK** run and
+download its artifact:
 
-Set `ANDROID_SDK_ROOT` to the SDK directory. If the NDK is installed somewhere else, set `ANDROID_NDK_HOME`. Then run from the repository root:
+| Platform | Artifact contents | Start |
+| --- | --- | --- |
+| Windows x86-64 | `Badanaut-Windows-x64.zip` | Extract everything; run `Badanaut/Badanaut.exe` |
+| Linux x86-64 | `Badanaut-Linux-x64.tar.gz` | Extract everything; run `./Badanaut/Badanaut` |
+| Android ARM64/ARMv7 | `Badanaut-Android.apk` | Install the APK |
 
-```bash
+Workflows run on `main`, `codex/**`, pull requests and manual dispatch. Desktop
+builds include the native Bada engine and Qt host; Android includes its native
+libraries and shared UI. Artifacts are kept for 30 days. Linux packages are built
+on Ubuntu 22.04 and require a compatible glibc and OpenGL driver.
+
+## Add and play games
+
+1. Open the **⋮ menu → Open file manager** and select a Bada ZIP containing one `Bin/*.exe` ARM32
+   ELF and `Info/Appinfo.sys` or `Info/manifest.xml`, along with its resources.
+   A containing directory inside the ZIP is supported.
+2. Open **Settings → Select Bada runtime** and select an original ARM32 Bada `libstdc++.so.6`
+   or `libstdc++.so.6.0.12` from your SDK/firmware. Its hard/soft-float ABI must
+   match the game. Host Windows, Linux and Android libraries are incompatible.
+3. Click or tap the game's icon. Right-click or hold an icon to open
+   details, choose artwork or remove the installed package and its saves.
+
+Packages, runtime and saves stay in local application storage. Android uses the package name
+`org.badanaut.emulator`, which installs separately from the former
+`com.pockethle.app` app. Import games and the runtime into the new app. Importing a
+package does not guarantee compatibility with the current HLE implementation.
+Game files and firmware are not included in builds and must not be committed.
+
+## Display settings
+
+The application and games start **windowed on Windows and Linux**. Game windows
+are resizable; **F11** toggles fullscreen. **Settings** offers:
+
+- Original automatic output, 240×400, 480×800, 540×960, 720×1280 and 1080×1920.
+- Fit or whole-pixel scaling, preserving aspect ratio.
+- Sharp or smooth Canvas filtering and vertical sync.
+- Optional fullscreen games.
+
+Resolution follows each game's orientation. On desktop it sets the window size,
+constrained to the monitor; on Android it limits the presentation area in physical
+pixels inside the device screen. The guest always retains its original dimensions.
+Whole-pixel scaling falls back to fitting when the screen is smaller than the
+guest. Filtering applies to Canvas output; the game controls its own GL textures.
+Vsync depends on driver support. Changes apply at the next game launch.
+
+## Build
+
+**Desktop:** Python 3.12, CMake 3.22+, SDL2, SDL2_image, OpenGL and a C/C++17
+compiler. Windows uses Visual Studio and vcpkg. See
+[desktop build instructions](frontends/pocket-desktop/README.md).
+
+**Android:** JDK 17, Android SDK Platform/Build Tools 34, NDK `26.1.10909125`
+and CMake `3.22.1`. Set `ANDROID_SDK_ROOT`, then run:
+
+```sh
 ./frontends/pocket-android/build-android.sh
 ```
 
-The script builds the Unicorn-backed native library for `arm64-v8a` and `armeabi-v7a`, then creates `dist/Badanaut-Android.apk`.
+The APK is written to `dist/Badanaut-Android.apk`. Native builds download the
+pinned Unicorn 2.1.4 source archive and verify its SHA-256. Rust is not required
+for either Bada frontend.
 
-## Download an APK from GitHub Actions
+## Source map and attribution
 
-Open the repository's **Actions** tab, select **Android APK**, and open a successful run. Under **Artifacts**, download **Badanaut-Android-…**, extract the ZIP, and install `Badanaut-Android.apk` on your phone.
+- `frontends/shared-ui/` — shared native layout, text and fonts.
+- `frontends/pocket-desktop/` — Python/Qt desktop host and packaging.
+- `frontends/pocket-android/` — Android host, package management and SDL activity.
+- `third_party/bada-hle/` — Bada HLE engine and upstream notice.
+- `third_party/unicorn/` — pinned ARM CPU build.
+- `.github/workflows/` — Windows, Linux and Android builds and validation.
+- `crates/` and `frontends/pocket-cli/` — retained legacy PocketHLE headless code;
+  it is not part of the new Bada launchers.
 
-CI builds both native engines for ARM64 and ARMv7, runs the Android unit tests, and checks the APK's native libraries and signature before uploading it. It runs on `main`, `codex/**` branches and pull requests. Once the workflow is on the default branch, use **Run workflow** to start a new build manually. APK artifacts are retained for 30 days.
-
-## Launch a Bada game on Android
-
-1. Open **Bada**, the default library tab.
-2. Tap **Add Bada game** and select the game's ZIP package. It must contain `Bin/*.exe` (a 32-bit ARM ELF) and `Info/Appinfo.sys` or `Info/manifest.xml`, together with its resources. A containing folder inside the ZIP is supported.
-3. Tap **Select runtime** and select a compatible Bada `libstdc++.so.6` or `libstdc++.so.6.0.12` from your SDK/firmware. Match its hard-float or soft-float ABI to the game.
-4. Tap the installed game's card to launch it. The card menu also provides game information, runtime setup and removal.
-
-The **Pocket PC** tab retains CAB/ZIP/RAR/Windows EXE imports and the PocketHLE runner. Bada packages use the separate bada engine. Importing a package does not guarantee game compatibility with the current HLE implementation.
-
-## Optional bundled game files
-
-Games and the Bada firmware C++ runtime are intentionally not included. Users can import them on the phone without rebuilding the APK. To preinstall Sky Force in a local APK, place a legally obtained package and compatible Bada runtime at:
-
-```text
-frontends/pocket-android/app/src/main/assets/bada/sky-force-spaces.im.zip
-frontends/pocket-android/app/src/main/assets/bada/libstdc++.so.6
-```
-
-The ZIP must contain `Bin/SkyForce.exe`, `Info/Appinfo.sys`, and `Res/data.pak` at its root. The Android app extracts it into private storage. Do not commit these game or firmware files.
-
-## Source map
-
-- `frontends/pocket-android/` — Android launcher, SDL2 activity, and APK build.
-- `frontends/pocket-android/app/src/main/cpp/` — Android JNI/native build entry and Bada integration.
-- `third_party/bada-hle/` — bada HLE engine source and upstream notice.
-- `crates/` — PocketHLE emulator core and Windows CE APIs.
-- `docs/AGENTS.md` — PocketHLE architecture and invariants.
-- `THIRD_PARTY_NOTICES.md` — component attribution and licensing boundaries.
-
-The Bada HLE source is published here with the upstream author's permission, as communicated to the Badanaut maintainer. See `third_party/bada-hle/UPSTREAM.md`; the root PocketHLE license does not apply to that component.
+The new app picker is an original adaptation of HyperHLE-Reborn's visual approach;
+no code or graphics from that picker are copied. The Bada HLE source is published
+here with upstream permission, as communicated to the maintainer; see
+[UPSTREAM.md](third_party/bada-hle/UPSTREAM.md). The root PocketHLE license does
+not apply to that component. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

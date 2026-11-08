@@ -1,3 +1,37 @@
+# Current Badanaut frontend notes
+
+Windows/Linux and Android now use `frontends/shared-ui/`. The old Rust desktop UI
+and Kotlin library/settings activities have been removed. Desktop is hosted by
+Python/PySide6 and launches the Bada engine as an SDL process. Android remains a
+Kotlin package host with a separate `:bada` process. Bada native builds use the
+pinned ARM32 Unicorn CMake target; Rust is not needed for the Bada application.
+
+Keep `com.pockethle.app` and `filesDir/bada/games/<id>` stable for Android upgrades.
+Installed `.badanaut-game.json` retains its original fields, with optional `icon`
+and `last_played`. Desktop uses that same Bada package metadata. Never let
+metadata paths escape a package. Imports run off the UI thread and preserve
+resources. A firmware runtime remains a separate ARM32 library.
+
+Display preferences are presentation settings. Do not change guest bounds or
+texture state to implement them. `third_party/bada-hle/src/display.h` supplies
+an aspect-preserving rectangle for rendering and touch mapping. Desktop starts
+windowed and supports F11; Android presets limit physical presentation pixels.
+Native regression probes are in `frontends/pocket-android/tests/native/`, desktop
+library tests in `frontends/pocket-desktop/tests/`, and Android JVM tests in its
+app source tree. The desktop workflow builds and smoke-tests packaged apps on
+both Windows and Linux. The Android workflow builds both ABIs and verifies the
+APK. Game/firmware files and generated outputs stay outside Git.
+
+Read `third_party/bada-hle/README.md` and `UPSTREAM.md` before engine changes.
+Preserve upstream attribution. Do not commit unless asked and never push directly
+to the target branch.
+
+---
+
+The following is retained architecture documentation for the legacy PocketHLE
+headless crates and CLI. Its references to removed graphical frontends describe
+historical behavior and do not apply to the new Bada picker.
+
 # PocketHLE — architecture reference for coding agents
 
 PocketHLE runs Windows CE / Windows Mobile (Pocket PC) applications on

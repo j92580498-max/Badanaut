@@ -13,5 +13,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "PocketHLE"
+rootProject.name = "Badanaut"
 include(":app")

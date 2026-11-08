@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Reject APKs missing either Android ABI or one of the native engines."""
+"""Verify the bada engine for both Android ABIs and reject Pocket PC libraries."""
 
 import argparse
 import struct
@@ -7,15 +7,19 @@ import zipfile
 
 
 def verify_apk(path):
-    libraries = ("libSDL2.so", "libunicorn.so", "libmain.so", "libpockethle_jni.so", "libc++_shared.so")
+    libraries = ("libSDL2.so", "libunicorn.so", "libmain.so", "libc++_shared.so")
     architectures = {"arm64-v8a": (2, 183), "armeabi-v7a": (1, 40)}
     with zipfile.ZipFile(path) as apk:
         names = apk.namelist()
         if len(names) != len(set(names)):
             raise ValueError("APK contains duplicate entries")
-        for name in ("AndroidManifest.xml", "classes.dex", "resources.arsc"):
+        if any(name.startswith("lib/") and name.endswith("/libpockethle_jni.so") for name in names):
+            raise ValueError("APK still contains the Pocket PC native engine")
+        for name in ("AndroidManifest.xml", "classes.dex", "resources.arsc", "assets/launcher.json", "assets/fonts/LiberationSans-Regular.ttf", "assets/fonts/LiberationSans-Bold.ttf", "assets/fonts/LICENSE.txt"):
             if name not in names or not apk.getinfo(name).file_size:
                 raise ValueError(f"APK is missing {name}")
+        if any(name in names for name in ("assets/index.html", "assets/style.css", "assets/app.js")):
+            raise ValueError("APK still contains the browser interface")
         for abi, (elf_class, machine) in architectures.items():
             for library in libraries:
                 name = f"lib/{abi}/{library}"
@@ -27,7 +31,7 @@ def verify_apk(path):
                     raise ValueError(f"Invalid ELF architecture: {name}")
                 if struct.unpack_from("<HH", header, 16) != (3, machine):
                     raise ValueError(f"Invalid ELF type/machine: {name}")
-    print(f"Verified APK: {path} (ARM64/ARMv7, Bada and PocketHLE native engines)")
+    print(f"Verified APK: {path} (ARM64/ARMv7, bada native engine)")
 
 
 if __name__ == "__main__":

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
-project(pockethle_bada_android LANGUAGES C CXX)
+project(badanaut_android LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -8,12 +8,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 get_filename_component(REPO_ROOT "${CMAKE_CURRENT_LIST_DIR}/../../../../../../" ABSOLUTE)
 set(BADA_ROOT "${REPO_ROOT}/third_party/bada-hle/src")
 set(SDL_ROOT "${REPO_ROOT}/third_party/SDL2")
-set(UNICORN_INCLUDE "${REPO_ROOT}/third_party/unicorn/include")
-set(UNICORN_LIBRARY "${CMAKE_CURRENT_LIST_DIR}/../jniLibs/${ANDROID_ABI}/libunicorn.so")
-
-if(NOT EXISTS "${UNICORN_LIBRARY}")
-    message(FATAL_ERROR "Missing ${UNICORN_LIBRARY}. Run frontends/pocket-android/build-android.sh first.")
-endif()
+add_subdirectory("${REPO_ROOT}/third_party/unicorn" "${CMAKE_CURRENT_BINARY_DIR}/unicorn")
 
 set(SDL_SHARED ON CACHE BOOL "" FORCE)
 set(SDL_STATIC OFF CACHE BOOL "" FORCE)
@@ -32,12 +27,6 @@ target_include_directories(pugixml PUBLIC "${REPO_ROOT}/third_party/pugixml")
 
 add_library(cxxopts INTERFACE)
 target_include_directories(cxxopts INTERFACE "${REPO_ROOT}/third_party/cxxopts/include")
-
-add_library(unicorn SHARED IMPORTED GLOBAL)
-set_target_properties(unicorn PROPERTIES
-    IMPORTED_LOCATION "${UNICORN_LIBRARY}"
-    INTERFACE_INCLUDE_DIRECTORIES "${UNICORN_INCLUDE}"
-)
 
 add_library(bada-android SHARED
     "${BADA_ROOT}/main.cpp"
@@ -65,7 +54,6 @@ target_include_directories(bada-android PRIVATE
     "${BADA_ROOT}"
     "${CMAKE_CURRENT_LIST_DIR}"
     "${SDL_INCLUDE_COMPAT}"
-    "${UNICORN_INCLUDE}"
 )
 target_link_libraries(bada-android PRIVATE
     SDL2::SDL2

@@ -1,6 +1,6 @@
 # Android bada frontend
 
-The Android APK opens a Bada game library by default. A separate Pocket PC tab retains the PocketHLE launcher. The interface includes English and Russian strings and a visible runtime setup card.
+The Android APK hosts the same offline library and settings interface as Windows and Linux, packaged from `frontends/shared-ui/`. The old Pocket PC tab and native launcher screens have been removed. Package artwork, rounded icons, paging, search, sorting, game details and a bottom dock are shared across all hosts.
 
 ## Launch path
 
@@ -8,9 +8,9 @@ The Android APK opens a Bada game library by default. A separate Pocket PC tab r
 2. `BadaPackage` extracts into a staging directory, rejecting unsafe paths, case aliases, more than 20,000 entries and more than 512 MiB of uncompressed data. It accepts one package at the ZIP root or in a containing directory, normalizes `Bin`/`Info`/`Res` and `.exe` paths, verifies an ARM32 little-endian ELF shared object and reads the AppId from XML metadata. Windows PE executables and ambiguous packages are rejected.
 3. `BadaAssets` installs packages under `filesDir/bada/games/<id>` with launcher metadata. It migrates an existing `filesDir/bada/sky-force` installation into this library, keeping its resources and saves. Launch preparation reads the stored metadata and checks the executable/runtime instead of traversing all resource files again. Runtime selection installs a validated ARM32 ELF library (up to 32 MiB) as `filesDir/bada/libstdc++.so.6`. Replacing a runtime affects all Bada games, so its hard-float/soft-float ABI must match the game being launched. Failed installs clean their staging files and leave installed games/runtime intact.
 4. `BadaActivity` extends SDL2's `SDLActivity`, loads `libSDL2.so`, `libunicorn.so`, and `libmain.so`, and passes the selected package path, guest runtime path and AppId to the native entry point. It runs in the `:bada` process, which exits when the activity is destroyed so each launch starts with fresh native globals.
-5. The Android CMake target compiles `third_party/bada-hle/src` and links SDL2, Unicorn, GLESv2, pugixml, and cxxopts. The Rust `pocket-android-jni` crate builds Unicorn for both Android ABIs; `build-android.sh` copies those libraries into `jniLibs` before Gradle builds the APK.
+5. The Android CMake target compiles `third_party/bada-hle/src` and links SDL2, Unicorn, GLESv2, pugixml, and cxxopts. `third_party/unicorn/CMakeLists.txt` builds pinned Unicorn 2.1.4 directly for both Android ABIs. Gradle ignores legacy `jniLibs` outputs; Rust is not required.
 
-Pocket PC imports continue to use the existing PocketHLE Rust runner and are not routed through the bada engine.
+Display preferences in `filesDir/bada/display.json` are passed to the native engine. Output presets limit the presentation area in physical pixels, preserving guest dimensions and aspect ratio. Rendering and touches use the same rectangle. Canvas filtering, whole-pixel scaling, vsync and optional fullscreen apply at the next launch. New optional game metadata fields are `icon` and `last_played`; existing installations remain valid.
 
 ## Local game assets
 
@@ -33,7 +33,7 @@ With the Android SDK and JDK configured, run from `frontends/pocket-android`:
 
 ## Build environment
 
-Use JDK 17, Android SDK Platform 34, Build Tools 34.0.0, NDK 26.1.10909125, and Android CMake 3.22.1. Install stable Rust and `cargo-ndk`, set `ANDROID_SDK_ROOT`, then run from the repository root:
+Use JDK 17, Android SDK Platform 34, Build Tools 34.0.0, NDK 26.1.10909125, and Android CMake 3.22.1. Set `ANDROID_SDK_ROOT`, then run from the repository root:
 
 ```bash
 ./frontends/pocket-android/build-android.sh
@@ -41,7 +41,7 @@ Use JDK 17, Android SDK Platform 34, Build Tools 34.0.0, NDK 26.1.10909125, and 
 
 The output is `dist/Badanaut-Android.apk`, containing `arm64-v8a` and `armeabi-v7a` libraries. Game and runtime assets are excluded by `.gitignore`.
 
-`.github/workflows/android.yml` builds this APK on an x86-64 Ubuntu runner, using the same SDK/NDK/CMake versions and cargo-ndk 4.1.2. It runs the unit tests and `tools/verify-android-apk.py`, verifies the APK signature, and uploads APK/test-report artifacts. The APK check requires SDL2, Unicorn, Bada, PocketHLE JNI and the shared C++ runtime for both ABIs, preventing an interface-only APK from being published as a complete build.
+`.github/workflows/android.yml` builds this APK on an x86-64 Ubuntu runner, using the same SDK/NDK/CMake versions. It runs the unit tests and `tools/verify-android-apk.py`, verifies the APK signature, and uploads APK/test-report artifacts. The APK check requires SDL2, Unicorn, Bada and the shared C++ runtime for both ABIs, requires the shared HTML/CSS/JavaScript assets, and rejects the old PocketHLE JNI engine. Desktop artifacts are built separately by `.github/workflows/desktop.yml`.
 
 ## Attribution and permission
 

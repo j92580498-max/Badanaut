@@ -67,7 +67,7 @@ jobs:
         run: python -m unittest discover -s frontends/pocket-desktop/tests -v
       - name: Test native picker at reference, desktop and phone sizes
         if: runner.os == 'Linux'
-        run: xvfb-run -a env QT_DEBUG_PLUGINS=1 python tools/check-shared-ui.py --screenshots .build/ui-preview
+        run: xvfb-run -a python tools/check-shared-ui.py --screenshots .build/ui-preview
       - name: Upload native interface previews
         if: runner.os == 'Linux'
         uses: actions/upload-artifact@v4

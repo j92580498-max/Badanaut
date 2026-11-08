@@ -12,7 +12,7 @@ import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "frontends/pocket-desktop"))
-from main import Host, Library, assets, engine_path
+from main import Host, Library, assets
 from launcher import Launcher
 from PySide6.QtCore import QPoint, Qt
 from PySide6.QtGui import QColor, QImage, QPainter
@@ -43,7 +43,9 @@ def main():
             library.import_game(base / "demo.zip")
         window = QMainWindow()
         view = Launcher(assets(), window)
-        host = Host(window, library, engine_path())
+        # An existing executable isolates the missing-runtime error. The fixture
+        # library has no runtime, so no process can actually be started.
+        host = Host(window, library, Path(sys.executable))
         view.request.connect(host.request); host.reply.connect(view.receive); host.event.connect(view.engine_event)
         window.setCentralWidget(view); window.resize(320, 480); window.show()
 

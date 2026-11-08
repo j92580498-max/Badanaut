@@ -2,13 +2,16 @@ package com.pockethle.app
 
 import android.content.Context
 import android.net.Uri
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.util.Base64
 import org.json.JSONObject
 import java.io.File
 import java.io.IOException
 import java.io.InputStream
 import java.util.UUID
 
-/** Bada packages live separately from the Pocket PC library and its Rust runner. */
+/** Installs and manages Samsung bada packages and their guest runtime. */
 object BadaAssets {
     data class Installation(val packageDirectory: File, val runtimeLibrary: File, val appId: String)
 
@@ -31,21 +34,29 @@ object BadaAssets {
     @Synchronized
     fun listGames(context: Context): List<GameEntry> = games(context).listFiles().orEmpty()
         .filter { it.isDirectory && !it.name.startsWith('.') }
-        .map { directory ->
+        .mapNotNull { directory -> runCatching {
             val metadata = JSONObject(File(directory, ENTRY_FILE).readText())
             GameEntry(
                 id = directory.name,
                 displayName = metadata.getString("display_name"),
-                provider = "Samsung bada",
                 executable = metadata.getString("executable"),
-                sourceCab = metadata.getString("source"),
+                sourcePackage = metadata.getString("source"),
                 importedAt = metadata.getLong("imported_at"),
-                icon = null,
-                settings = GameSettings.default(),
-                platform = GamePlatform.BADA,
+                icon = BadaPackage.iconFile(directory, metadata.optString("icon"))?.let {
+                    val bytes = it.readBytes()
+                    val mime = when {
+                        bytes.size >= 8 && bytes.copyOfRange(0, 8).contentEquals(byteArrayOf(137.toByte(), 80, 78, 71, 13, 10, 26, 10)) -> "png"
+                        bytes.size >= 3 && bytes[0] == 255.toByte() && bytes[1] == 216.toByte() -> "jpeg"
+                        bytes.size >= 12 && String(bytes.copyOfRange(0, 4), Charsets.US_ASCII) == "RIFF" && String(bytes.copyOfRange(8, 12), Charsets.US_ASCII) == "WEBP" -> "webp"
+                        else -> null
+                    }
+                    mime?.let { "data:image/$it;base64," + Base64.encodeToString(bytes, Base64.NO_WRAP) }
+                },
                 directory = directory.absolutePath,
+                appId = metadata.getString("app_id"),
+                lastPlayed = metadata.optLong("last_played", 0),
             )
-        }.sortedByDescending { it.importedAt }
+        }.getOrNull() }.sortedByDescending { it.importedAt }
 
     @Synchronized
     fun importGame(context: Context, uri: Uri, name: String): GameEntry {
@@ -76,6 +87,7 @@ object BadaAssets {
             put("executable", details.executable.relativeTo(details.directory).invariantSeparatorsPath)
             put("source", source)
             put("imported_at", System.currentTimeMillis() / 1000)
+            put("icon", details.icon)
         }.toString())
     }
 
@@ -113,6 +125,37 @@ object BadaAssets {
     @Synchronized
     fun removeGame(context: Context, id: String) {
         if (!gameDirectory(context, id).deleteRecursively()) throw IOException("Could not remove Bada game")
+    }
+
+    @Synchronized
+    fun played(context: Context, id: String) {
+        val file = File(gameDirectory(context, id), ENTRY_FILE)
+        val metadata = JSONObject(file.readText()).put("last_played", System.currentTimeMillis() / 1000)
+        val temporary = File(file.parentFile, "$ENTRY_FILE.tmp")
+        temporary.writeText(metadata.toString())
+        check(temporary.renameTo(file)) { "Could not update game metadata" }
+    }
+
+    @Synchronized
+    fun setIcon(context: Context, id: String, uri: Uri) {
+        val temporary = File(context.cacheDir, "bada-icon-import")
+        try {
+            val input = context.contentResolver.openInputStream(uri) ?: error("Could not open image")
+            BadaPackage.copyLimited(input, temporary, 2L * 1024 * 1024)
+            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeFile(temporary.absolutePath, bounds)
+            require(bounds.outWidth > 0 && bounds.outHeight > 0 && bounds.outWidth.toLong() * bounds.outHeight <= 16_000_000) { "Choose an image up to 16 megapixels" }
+            val options = BitmapFactory.Options().apply {
+                inSampleSize = 1
+                while (bounds.outWidth / inSampleSize > 768 && bounds.outHeight / inSampleSize > 768) inSampleSize *= 2
+            }
+            val original = BitmapFactory.decodeFile(temporary.absolutePath, options) ?: error("Could not decode image")
+            val side = minOf(original.width, original.height)
+            val crop = Bitmap.createBitmap(original, (original.width - side) / 2, (original.height - side) / 2, side, side)
+            val icon = Bitmap.createScaledBitmap(crop, 192, 192, true)
+            File(gameDirectory(context, id), "_badanaut-icon.png").outputStream().use { check(icon.compress(Bitmap.CompressFormat.PNG, 100, it)) }
+            icon.recycle(); if (crop !== icon) crop.recycle(); if (original !== crop && original !== icon) original.recycle()
+        } finally { temporary.delete() }
     }
 
     /** Preserve optional locally bundled Sky Force assets without showing a broken shortcut. */

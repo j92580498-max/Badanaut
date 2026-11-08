@@ -1,6 +1,7 @@
 # Rust
 /target
 /.build/
+/build/
 **/*.rs.bk
 Cargo.lock.bak
 
@@ -46,4 +47,5 @@ emulator-trace.json
 
 # Python venv (helper scripts)
 .venv/
+*.spec
 __pycache__/

@@ -1,6 +1,7 @@
 #include "cpu.h"
 #include "dispatch.h"
 #include "gl_api.h"
+#include "display.h"
 #include <SDL2/SDL.h>
 #ifdef BADA_GLES_BACKEND
 #include <GLES/gl.h>
@@ -53,7 +54,7 @@ hle::SurfaceRect host_rect(const GLint* rectangle) {
     if (g_framebuffer || !g_window) return {rectangle[0], rectangle[1], rectangle[2], rectangle[3]};
     int width = 0, height = 0;
     SDL_GL_GetDrawableSize(g_window, &width, &height);
-    const auto area = hle::fit_surface(g_surface_width, g_surface_height, width, height);
+    const auto area = display::content_rect(g_surface_width, g_surface_height, width, height);
     if (!area.width || !area.height) return {rectangle[0], rectangle[1], rectangle[2], rectangle[3]};
     const double sx = static_cast<double>(area.width) / g_surface_width;
     const double sy = static_cast<double>(area.height) / g_surface_height;
@@ -435,12 +436,7 @@ void fit_window(GLint x, GLint y, GLsizei w, GLsizei h) {
     g_window_fit = true;
     g_surface_width = w;
     g_surface_height = h;
-    int cw, ch;
-    SDL_GetWindowSize(g_window, &cw, &ch);
-    if (w != cw || h != ch) {
-        SDL_SetWindowSize(g_window, w, h);
-        printf("[gl] window -> %dx%d\n", w, h);
-    }
+    display::size_window(g_window, w, h);
 }
 void g1_viewport(Cpu& c) {
     gl_viewport(c);
@@ -863,7 +859,7 @@ void egl_swapbuffers(Cpu& c) {
 namespace hle {
 void gl_set_window(void* w) { g_window = (SDL_Window*)w; }
 SurfaceRect gl_content_rect(int width, int height) {
-    return fit_surface(g_surface_width, g_surface_height, width, height);
+    return display::content_rect(g_surface_width, g_surface_height, width, height);
 }
 void gl_map_touch(int x, int y, int width, int height, int& guest_x, int& guest_y) {
     const auto area = gl_content_rect(width, height);
@@ -893,7 +889,6 @@ void gl_present_canvas(Cpu& cpu, uint32_t pixels, int width, int height) {
     }
     if (!g_canvas_window_sized) {
         fit_window(0, 0, width, height);
-        SDL_SetWindowSize(g_window, width, height);
         g_canvas_window_sized = true;
     }
     std::vector<uint8_t> image((size_t)width * (size_t)height * 4);
@@ -936,15 +931,15 @@ void gl_present_canvas(Cpu& cpu, uint32_t pixels, int width, int height) {
         glGenTextures(1, &g_canvas_texture);
     }
     glBindTexture(GL_TEXTURE_2D, g_canvas_texture);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, display::smooth ? GL_LINEAR : GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, display::smooth ? GL_LINEAR : GL_NEAREST);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP);
     glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, width, height, 0, GL_BGRA, GL_UNSIGNED_BYTE, image.data());
-    float scale = std::min((float)ww / (float)width, (float)wh / (float)height);
-    float dw = width * scale, dh = height * scale;
-    float left = (ww - dw) * 0.5f, top = (wh - dh) * 0.5f;
+    const auto area = display::content_rect(width, height, ww, wh);
+    float dw = area.width, dh = area.height;
+    float left = area.x, top = wh - area.y - area.height;
     glEnable(GL_TEXTURE_2D);
     glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
     glBegin(GL_QUADS);

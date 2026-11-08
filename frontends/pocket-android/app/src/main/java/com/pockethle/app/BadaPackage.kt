@@ -13,7 +13,7 @@ object BadaPackage {
     const val MAX_RUNTIME_BYTES = 32L * 1024L * 1024L
     private const val MAX_ENTRIES = 20_000
 
-    data class Details(val directory: File, val executable: File, val appId: String, val name: String)
+    data class Details(val directory: File, val executable: File, val appId: String, val name: String, val icon: String = "")
 
     fun extract(input: InputStream, destination: File) {
         checkDirectory(destination)
@@ -73,6 +73,7 @@ object BadaPackage {
         val factory = DocumentBuilderFactory.newInstance().apply { isExpandEntityReferences = false }
         var appId = ""
         var name = ""
+        var icon = ""
         for (filename in listOf("Appinfo.sys", "manifest.xml")) {
             val file = File(root, "Info/$filename")
             if (!file.isFile || file.length() > 1024 * 1024) continue
@@ -90,14 +91,29 @@ object BadaPackage {
                 if (element.tagName != "Application") continue
                 appId = element.getAttribute("AppId")
                 name = element.getAttribute("Name").ifBlank { element.getAttribute("AppName") }
+                icon = element.getElementsByTagName("Icon").item(0)?.textContent.orEmpty().trim()
             } else {
                 if (element.tagName != "Manifest") continue
                 if (appId.isBlank()) appId = element.getElementsByTagName("Id").item(0)?.textContent.orEmpty().trim()
                 if (name.isBlank()) name = element.getElementsByTagName("Name").item(0)?.textContent.orEmpty().trim()
+                if (icon.isBlank()) icon = element.getElementsByTagName("Icon").item(0)?.textContent.orEmpty().trim()
             }
         }
         if (appId.isBlank()) throw IOException("No AppId found in the Bada package metadata")
-        return Details(root, executables.single(), appId, name.ifBlank { executables.single().nameWithoutExtension })
+        return Details(root, executables.single(), appId, name.ifBlank { executables.single().nameWithoutExtension }, icon)
+    }
+
+    fun iconFile(root: File, hint: String = ""): File? {
+        val candidates = mutableListOf(File(root, "_badanaut-icon.png"))
+        if (hint.isNotBlank()) for (base in listOf(root, File(root, "Res"), File(root, "Info"))) {
+            val file = File(base, hint.replace('\\', '/'))
+            if (file.canonicalPath.startsWith(root.canonicalPath + File.separator)) candidates.add(file)
+        }
+        for (directory in listOf(File(root, "Res"), File(root, "Info"), root)) candidates.addAll(
+            directory.listFiles().orEmpty().filter { it.nameWithoutExtension.lowercase(Locale.ROOT) in listOf("icon", "appicon", "mainmenuicon") }
+                .sortedBy { it.name },
+        )
+        return candidates.firstOrNull { it.isFile && it.length() <= 2L * 1024 * 1024 && it.extension.lowercase(Locale.ROOT) in listOf("png", "jpg", "jpeg", "webp") }
     }
 
     /** Reject Windows PE, Android ARM64 and host libraries before launching SDL. */

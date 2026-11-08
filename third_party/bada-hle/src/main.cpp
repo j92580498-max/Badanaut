@@ -33,6 +33,7 @@
 #include "hle/dispatch.h"
 #include "hle/gl_api.h"
 #include "ui_overlay.h"
+#include "display.h"
 namespace fs = std::filesystem;
 
 // ---- stdin command interface (for scripted control: screenshots, quit) ----
@@ -710,6 +711,12 @@ int main(int argc, char** argv) {
          cxxopts::value<std::string>()->default_value(""))   //
         ("libstdcxx", "guest libstdc++.so to map (or env BADA_LIBSTDCXX); found automatically if omitted",
          cxxopts::value<std::string>()->default_value(""))   //
+        ("resolution", "presentation size: native, 240x400, 480x800, 540x960, 720x1280, 1080x1920",
+         cxxopts::value<std::string>()->default_value("native"))
+        ("scaling", "fit or integer", cxxopts::value<std::string>()->default_value("fit"))
+        ("filter", "Canvas filtering: nearest or linear", cxxopts::value<std::string>()->default_value("nearest"))
+        ("vsync", "synchronize presentation", cxxopts::value<bool>()->default_value("true"))
+        ("fullscreen", "start games fullscreen (default: windowed)", cxxopts::value<bool>()->default_value("false"))
         ("h,help", "show this help");
 #ifdef __ANDROID__
     opts.add_options()("log-file", "capture native diagnostics", cxxopts::value<std::string>()->default_value(""));
@@ -720,6 +727,7 @@ int main(int argc, char** argv) {
 
     std::string input, appid, locale, libstdcxx;
     int max_frames = 0;
+    bool fullscreen = false, vsync = true;
     try {
         auto res = opts.parse(argc, argv);
 #ifdef __ANDROID__
@@ -735,6 +743,23 @@ int main(int argc, char** argv) {
         max_frames = res["max-frames"].as<int>();
         locale = res["locale"].as<std::string>();
         libstdcxx = res["libstdcxx"].as<std::string>();
+        fullscreen = res["fullscreen"].as<bool>();
+        vsync = res["vsync"].as<bool>();
+        const auto resolution = res["resolution"].as<std::string>();
+        if (resolution != "native") {
+            const std::vector<std::string> presets = {"240x400", "480x800", "540x960", "720x1280", "1080x1920"};
+            if (std::find(presets.begin(), presets.end(), resolution) == presets.end())
+                throw std::invalid_argument("Unsupported resolution");
+            const auto split = resolution.find('x');
+            display::output_width = std::stoi(resolution.substr(0, split));
+            display::output_height = std::stoi(resolution.substr(split + 1));
+        }
+        const auto scaling = res["scaling"].as<std::string>();
+        const auto filter = res["filter"].as<std::string>();
+        if (scaling != "fit" && scaling != "integer") throw std::invalid_argument("Unsupported scaling");
+        if (filter != "nearest" && filter != "linear") throw std::invalid_argument("Unsupported filter");
+        display::integer_scaling = scaling == "integer";
+        display::smooth = filter == "linear";
     } catch (const std::exception& e) {
         printf("arg error: %s\n%s\n", e.what(), opts.help().c_str());
         return 2;
@@ -806,22 +831,26 @@ int main(int argc, char** argv) {
     SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
     SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 16);
     std::string exe_name = exe.substr(exe.find_last_of("/\\") + 1);
-    std::string base_title = "bada-hle [" + exe_name + "]";
-    Uint32 window_flags = SDL_WINDOW_OPENGL;
-#ifdef __ANDROID__
-    window_flags |= SDL_WINDOW_FULLSCREEN_DESKTOP | SDL_WINDOW_ALLOW_HIGHDPI;
-#endif
+    std::string base_title = "Badanaut — " + exe_name;
+    Uint32 window_flags = SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI;
+    if (fullscreen) window_flags |= SDL_WINDOW_FULLSCREEN_DESKTOP;
     SDL_Window* win = SDL_CreateWindow(base_title.c_str(), SDL_WINDOWPOS_CENTERED,
                                        SDL_WINDOWPOS_CENTERED, DEV_W, DEV_H, window_flags);
     if (!win) {
         printf("SDL_CreateWindow: %s\n", SDL_GetError());
         return 1;
     }
+    display::size_window(win, DEV_W, DEV_H);
     SDL_GLContext glctx = SDL_GL_CreateContext(win);
     if (!glctx) {
         printf("SDL_GL_CreateContext: %s\n", SDL_GetError());
         return 1;
     }
+    if (SDL_GL_SetSwapInterval(vsync ? 1 : 0) != 0)
+        printf("[display] swap interval unavailable: %s\n", SDL_GetError());
+    printf("[display] resolution=%dx%d scaling=%s filter=%s vsync=%d fullscreen=%d\n",
+           display::output_width, display::output_height, display::integer_scaling ? "integer" : "fit",
+           display::smooth ? "linear" : "nearest", vsync, fullscreen);
     printf("[gl] vendor=%s renderer=%s\n", glGetString(GL_VENDOR), glGetString(GL_RENDERER));
     printf("[gl] version=%s\n", glGetString(GL_VERSION));
 #ifdef __ANDROID__
@@ -1116,6 +1145,14 @@ int main(int argc, char** argv) {
                 }
 #endif
 
+#ifndef __ANDROID__
+                if (ev.type == SDL_KEYDOWN && !ev.key.repeat && ev.key.keysym.sym == SDLK_F11) {
+                    const bool active = SDL_GetWindowFlags(win) & SDL_WINDOW_FULLSCREEN_DESKTOP;
+                    SDL_SetWindowFullscreen(win, active ? 0 : SDL_WINDOW_FULLSCREEN_DESKTOP);
+                    hle::gl_resize();
+                    continue;
+                }
+#endif
                 if (overlay::handle_event(ev)) {
                     continue; // a mocked control has focus; the guest sees nothing
                 }

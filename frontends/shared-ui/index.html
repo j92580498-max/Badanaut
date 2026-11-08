@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' qrc:; style-src 'self'; img-src data:; connect-src 'none'; base-uri 'none'; form-action 'none'">
+  <title>Badanaut</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <div class="wallpaper" aria-hidden="true"></div>
+  <div class="shell">
+    <header>
+      <div class="brand"><span class="brand-mark" aria-hidden="true">≈</span><div>Badanaut<span class="brand-caption">SAMSUNG BADA EMULATOR</span></div></div>
+      <span id="runtime-badge" class="badge">Bada OS</span>
+    </header>
+    <main>
+      <div class="library-heading"><div><p class="eyebrow">YOUR COLLECTION</p><h1>Game library<span id="game-count"></span></h1></div><button id="previous-page" class="round-button" aria-label="Previous page">‹</button><button id="next-page" class="round-button" aria-label="Next page">›</button></div>
+      <div id="library-tools" class="library-tools"><label class="search"><span aria-hidden="true">⌕</span><input id="search" type="search" placeholder="Search your games" aria-label="Search games" autocomplete="off"></label><select id="sort" aria-label="Sort games"><option value="name">Name A–Z</option><option value="recent">Recently played</option><option value="added">Recently added</option></select></div>
+      <section id="grid" class="icon-grid" aria-label="Installed games"></section>
+      <section id="empty" class="empty" hidden><div class="empty-icon" aria-hidden="true">+</div><h2>Your Bada collection starts here</h2><p>Add a game ZIP to see its icon in your library.</p><button id="empty-import" class="primary">Add a Bada game</button><small>Your games and saves stay on this device.</small></section>
+      <section id="no-results" class="empty" hidden><h2>No games found</h2><p>Try another name.</p></section>
+      <nav id="pagination" class="pagination" aria-label="Library pages"></nav>
+    </main>
+    <nav class="dock" aria-label="Library actions">
+      <button id="import-game" class="dock-item"><span class="dock-icon add" aria-hidden="true">+</span><span>Add game</span></button>
+      <button id="select-runtime" class="dock-item"><span class="dock-icon runtime" aria-hidden="true">≈</span><span id="runtime-label">Bada runtime</span></button>
+      <button id="open-settings" class="dock-item"><span class="dock-icon settings" aria-hidden="true">⚙</span><span>Settings</span></button>
+      <button id="recent-game" class="dock-item" disabled><span id="recent-icon" class="dock-icon recent" aria-hidden="true">▷</span><span>Play again</span></button>
+    </nav>
+    <div id="status" class="status" role="status" aria-live="polite"></div>
+  </div>
+  <dialog id="settings-dialog" class="panel">
+    <div class="panel-heading"><div><p class="eyebrow">MAKE IT YOURS</p><h2>Settings</h2></div><button class="close round-button" aria-label="Close settings">×</button></div>
+    <form id="settings-form">
+      <h3>Display</h3>
+      <div class="display-preview" aria-hidden="true"><div id="preview-screen">Bada</div></div>
+      <label class="setting-row"><span>Screen resolution<small>Output size. The game keeps its original resolution.</small></span><select name="resolution"><option value="native">Original (automatic)</option><option value="240x400">240 × 400</option><option value="480x800">480 × 800</option><option value="540x960">540 × 960</option><option value="720x1280">720 × 1280</option><option value="1080x1920">1080 × 1920</option></select></label>
+      <p id="resolution-help" class="help">Resolution follows the game’s orientation.</p>
+      <label class="setting-row"><span>Scaling<small>Keep the original aspect ratio.</small></span><select name="scaling"><option value="fit">Fit to screen</option><option value="integer">Whole pixel scaling</option></select></label>
+      <label class="setting-row"><span>Image filtering<small>For games that draw to a Canvas.</small></span><select name="filter"><option value="nearest">Sharp pixels</option><option value="linear">Smooth</option></select></label>
+      <label class="setting-row"><span>Vertical sync<small>Synchronize presentation with the display.</small></span><input name="vsync" type="checkbox" role="switch"></label>
+      <label class="setting-row"><span>Fullscreen games<small id="fullscreen-help">Games open in a resizable window by default. F11 toggles fullscreen.</small></span><input name="fullscreen" type="checkbox" role="switch"></label>
+      <h3>Library</h3>
+      <label class="setting-row"><span>Icon appearance</span><select name="iconStyle"><option value="glossy">Classic gloss</option><option value="flat">Flat</option></select></label>
+      <h3>Bada runtime</h3>
+      <p class="help">Select the original ARM32 Bada libstdc++.so.6 from your SDK or firmware. Its float ABI must match your game.</p>
+      <button type="button" id="settings-runtime" class="secondary">Select runtime…</button>
+      <p id="settings-runtime-status" class="help"></p>
+      <div class="panel-footer"><button type="button" id="view-log" class="text-button">Export last launch log</button><button type="submit" class="primary">Save settings</button></div>
+      <p class="help">Display changes apply the next time you launch a game.</p>
+      <p class="credits">Badanaut · Samsung bada HLE<br>App picker inspired by touchHLE / HyperHLE-Reborn.</p>
+    </form>
+  </dialog>
+  <dialog id="game-dialog" class="panel game-panel">
+    <div class="panel-heading"><h2>Game details</h2><button class="close round-button" aria-label="Close game details">×</button></div>
+    <div id="game-details"></div>
+    <div class="game-actions"><button id="change-icon" class="secondary">Change icon…</button><button id="launch-selected" class="primary">Play game</button></div>
+    <button id="remove-game" class="danger text-button">Remove from library</button>
+  </dialog>
+  <dialog id="message-dialog" class="panel message-panel"><h2 id="message-title"></h2><p id="message-text"></p><div class="panel-footer"><button id="message-cancel" class="secondary">Cancel</button><button id="message-ok" class="primary">OK</button></div></dialog>
+</body>
+</html>

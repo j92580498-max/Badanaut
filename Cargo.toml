@@ -10,7 +10,6 @@ members = [
     "crates/pocket-core",
     "crates/pocket-library",
     "frontends/pocket-cli",
-    "frontends/pocket-desktop",
     "frontends/pocket-android-jni",
 ]
 

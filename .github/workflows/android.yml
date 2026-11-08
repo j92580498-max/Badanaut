@@ -26,7 +26,7 @@ jobs:
           sudo apt-get install -y cmake ninja-build pkg-config libsdl2-dev libunicorn-dev libgl-dev libgles-dev libegl1-mesa-dev xvfb xauth
       - name: Build native regression probes
         run: |
-          cmake -S frontends/pocket-android/tests/native -B .build/bada-gles -G Ninja
+          cmake -S frontends/pocket-android/tests/native -B .build/bada-gles -G Ninja -DCMAKE_BUILD_TYPE=Release
           cmake --build .build/bada-gles --parallel 2
       - name: Check runtime behavior and rendered pixels through guest calls
         run: xvfb-run -a env SDL_VIDEODRIVER=x11 LIBGL_ALWAYS_SOFTWARE=1 ctest --test-dir .build/bada-gles --output-on-failure
@@ -36,8 +36,6 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 90
     env:
-      CARGO_TARGET_DIR: ${{ github.workspace }}/.build/cargo-target
-      CARGO_BUILD_JOBS: 2
       CMAKE_BUILD_PARALLEL_LEVEL: 2
     steps:
       - name: Check out source
@@ -60,17 +58,6 @@ jobs:
           sdkmanager "platforms;android-34" "build-tools;34.0.0" "ndk;26.1.10909125" "cmake;3.22.1"
           printf 'ANDROID_NDK_HOME=%s\n' "$ANDROID_SDK_ROOT/ndk/26.1.10909125" >> "$GITHUB_ENV"
 
-      - name: Set up Rust and Android targets
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-linux-android, armv7-linux-androideabi
-
-      - name: Cache Rust builds
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: '. -> .build/cargo-target'
-          shared-key: android-ndk-26.1.10909125
-
       - name: Cache Gradle
         uses: actions/cache@v4
         with:
@@ -86,10 +73,7 @@ jobs:
           path: ~/.android/debug.keystore
           key: ${{ runner.os }}-badanaut-debug-signing-v1
 
-      - name: Install cargo-ndk
-        run: cargo install --locked --version 4.1.2 cargo-ndk
-
-      - name: Build native engines and APK
+      - name: Build Bada engine and shared UI APK
         run: bash frontends/pocket-android/build-android.sh
 
       - name: Run Android unit tests
@@ -98,6 +82,7 @@ jobs:
 
       - name: Verify packaged native libraries and APK signature
         run: |
+          python3 -m unittest discover -s tools -p 'test_*.py'
           python3 tools/verify-android-apk.py dist/Badanaut-Android.apk
           "$ANDROID_SDK_ROOT/build-tools/34.0.0/apksigner" verify dist/Badanaut-Android.apk
 
@@ -124,5 +109,5 @@ jobs:
           ## Android APK
           Download **Badanaut-Android** from the **Artifacts** section of this run, unzip it and install **Badanaut-Android.apk** on your phone.
 
-          The APK contains both native engines for **arm64-v8a** and **armeabi-v7a**. In the Bada tab, import your game ZIP and select a compatible Bada **libstdc++.so.6** runtime.
+          The APK contains the Bada engine for **arm64-v8a** and **armeabi-v7a**. Import your game ZIP and select a compatible Bada **libstdc++.so.6** runtime.
           SUMMARY

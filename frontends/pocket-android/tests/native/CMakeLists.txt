@@ -14,6 +14,7 @@ get_filename_component(REPO_ROOT "${CMAKE_CURRENT_LIST_DIR}/../../../.." ABSOLUT
 set(BADA_ROOT "${REPO_ROOT}/third_party/bada-hle/src")
 set(BADA_TEST_SOURCES
     "${BADA_ROOT}/cpu.cpp"
+    "${BADA_ROOT}/pixel_accel.cpp"
     "${BADA_ROOT}/elf_loader.cpp"
     "${BADA_ROOT}/hle/dispatch.cpp"
     "${BADA_ROOT}/hle/libc.cpp"
@@ -39,6 +40,14 @@ add_executable(bada-runtime-test runtime_test.cpp)
 target_link_libraries(bada-runtime-test PRIVATE bada-test-engine)
 add_test(NAME runtime-audio COMMAND bada-runtime-test)
 set_tests_properties(runtime-audio PROPERTIES TIMEOUT 30)
+add_executable(bada-abi-test abi_helpers_test.cpp)
+target_link_libraries(bada-abi-test PRIVATE bada-test-engine)
+add_test(NAME runtime-abi COMMAND bada-abi-test)
+set_tests_properties(runtime-abi PROPERTIES TIMEOUT 30)
+add_executable(bada-pixel-test pixel_accel_test.cpp)
+target_link_libraries(bada-pixel-test PRIVATE bada-test-engine)
+add_test(NAME runtime-pixels COMMAND bada-pixel-test)
+set_tests_properties(runtime-pixels PROPERTIES TIMEOUT 30)
 add_executable(bada-log-test
     diagnostic_log_test.cpp
     "${REPO_ROOT}/frontends/pocket-android/app/src/main/cpp/diagnostic_log.cpp"

@@ -24,11 +24,27 @@ unmodified binary by faithfully emulating only the **OS/library boundary**.
                                              └── Osp::*      -> HLE impls
 ```
 
-Every imported symbol is bound to a 4-byte **trampoline slot** (`bx lr`). A
+Most imported symbols are bound to a 4-byte **trampoline slot** (`bx lr`). A
 `UC_HOOK_CODE` over that page catches the call, runs a host C++ handler that
 reads args from the guest regs (AAPCS hard-float/VFP **or** soft-float, detected
 per binary), and writes the result back — then `bx lr` returns to the guest. See
 `src/guest.h` for the address map.
+
+The four 32-bit integer division helpers (`__aeabi_uidiv`, `__aeabi_idiv`,
+`__aeabi_uidivmod`, `__aeabi_idivmod`) run as short ARM routines on a separate
+guest page inside Unicorn's JIT. This avoids host dispatch for frequent integer
+arithmetic. `BADA_NO_NATIVE_ABI=1` restores the host handlers for comparisons;
+`BADA_TRACE` also uses them so import tracing includes arithmetic calls.
+
+Verified pixel-copy kernels can also use native acceleration (`src/pixel_accel.cpp`).
+The supported RGB565-to-XRGB8888 2x expansion preserves the full guest framebuffer,
+pointer advances, saved registers and flags. It checks every instruction in the
+routine and retains ARM execution for changed code or unsupported inputs.
+`BADA_NO_PIXEL_ACCEL=1` and `BADA_TRACE` retain the original pixel-copy execution.
+The Android ES 2 presenter can upload the original RGB565 rows plus later Canvas
+changes as a separate rectangle; its shader preserves the guest conversion
+colors and scales both layers on the same pixel grid. Large changes or missing
+fragment high precision use the ordinary full-frame upload.
 
 The imports split into three buckets:
 
@@ -36,7 +52,7 @@ The imports split into three buckets:
 |---|---|
 | `Osp::*` framework | HLE — the real work (`src/hle/osp.cpp`, `src/hle/io.cpp`) |
 | GL ES 1.x/2.0 + EGL (`glFoo_1`/`_2`, `sgl*`) | forward to host desktop GL / SDL (`src/hle/gl.cpp`) |
-| libc / libm / `__aeabi_*` / heap | host runtime (`src/hle/libc.cpp`, `src/hle/io.cpp`) |
+| libc / libm / `__aeabi_*` / heap | host runtime (`src/hle/libc.cpp`, `src/hle/io.cpp`); hot integer division helpers in the ARM JIT |
 | C++ runtime (`std::*`) | the guest's own libstdc++.so, mapped as a second image (required) |
 
 ## Status

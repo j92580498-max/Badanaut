@@ -91,6 +91,7 @@ class Cpu {
     std::vector<hle::Handler> synth_; // synthetic handlers (slot = synth_base_ + index)
     uint32_t noop_tramp_ = 0;
     uint32_t noop_vtable_ = 0;
+    bool native_abi_ = false;
     uint32_t import_slot(const std::string& name); // slot address for an import
     bool map_image(std::string& err);
     void apply_relocs();

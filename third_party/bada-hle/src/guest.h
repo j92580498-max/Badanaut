@@ -17,6 +17,12 @@ constexpr uint32_t HLE_RETURN = HLE_BASE; // slot 0
 constexpr uint32_t HLE_DATA_BASE = 0x41000000;
 constexpr uint32_t HLE_DATA_SIZE = 0x00100000;
 
+// Tiny ARM runtime helpers execute in Unicorn's JIT, outside the host dispatch
+// hook. Frequent integer arithmetic must not cross the C++ boundary per call.
+constexpr uint32_t ABI_HELPER_BASE = 0x42000000;
+constexpr uint32_t ABI_HELPER_SIZE = 0x00001000;
+constexpr uint32_t ABI_HELPER_STRIDE = 32;
+
 // Second image (the guest libstdc++.so). Its own vaddrs start at 0, so it loads
 // at this bias, clear of the app image (which sits below ~0x400000).
 constexpr uint32_t LIB_BASE = 0x10000000;

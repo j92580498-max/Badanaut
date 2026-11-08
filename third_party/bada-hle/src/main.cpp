@@ -1096,6 +1096,11 @@ int main(int argc, char** argv) {
         uint32_t fps_t0 = SDL_GetTicks(); // window-title FPS counter
         int fps_frames = 0;
         uint32_t busy_ms = 0; // accumulated per-frame work time (diag)
+#ifdef __ANDROID__
+        const bool trace_fps = true;
+#else
+        const bool trace_fps = getenv("BADA_TRACE_FPS") != nullptr;
+#endif
         for (bool running = true; running;) {
             uint32_t frame_start = SDL_GetTicks();
             SDL_Event ev;
@@ -1242,11 +1247,20 @@ int main(int argc, char** argv) {
             }
             // Count what the app actually drew, not how often the host loop ran.
             if (uint32_t dt = SDL_GetTicks() - fps_t0; fps_frames += ticked, dt >= 500) {
-                char title[256];
                 int n = fps_frames ? fps_frames : 1; // a single slow tick can span the window
+#ifndef __ANDROID__
+                // Android has no visible window title. Updating it would post
+                // UI work and request an activity relayout every half second.
+                char title[256];
                 snprintf(title, sizeof title, "%s %dfps (%.1fms cpu)", base_title.c_str(),
                          (int)(fps_frames * 1000.0 / dt + 0.5), (double)busy_ms / n);
                 SDL_SetWindowTitle(win, title);
+#endif
+                if (trace_fps) {
+                    printf("[perf] frames=%d fps=%.1f busy=%.1f ms/frame timer=%u ms canvas-upload=%u bytes\n",
+                           frames, fps_frames * 1000.0 / dt, static_cast<double>(busy_ms) / n, cpu.timer_interval_ms,
+                           hle::gl_canvas_upload_info().bytes);
+                }
                 fps_t0 += dt;
                 fps_frames = 0;
                 busy_ms = 0;

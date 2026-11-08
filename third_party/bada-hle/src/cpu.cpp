@@ -1,8 +1,12 @@
 #include "cpu.h"
 #include "guest.h"
 #include "hle/dispatch.h"
+#include "pixel_accel.h"
+#include <array>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <iterator>
 #include "compat/elf.h"
 
 #ifndef R_ARM_ABS32
@@ -15,6 +19,29 @@
 static uint32_t align_down(uint32_t v, uint32_t a) { return v & ~(a - 1); }
 static uint32_t align_up(uint32_t v, uint32_t a) { return (v + a - 1) & ~(a - 1); }
 
+namespace {
+struct AbiHelper { const char* name; std::array<uint32_t, 8> code; };
+// Generated ARMv7-A arithmetic routines for the library boundary. AAPCS
+// permits r2 and condition flags to be clobbered; r4-r11 and SP stay intact.
+constexpr AbiHelper abi_helpers[] = {
+    {"__aeabi_uidiv", {0xe730f110, 0xe12fff1e}}, // udiv r0,r0,r1; bx lr
+    {"__aeabi_idiv", {0xe710f110, 0xe12fff1e}},  // sdiv r0,r0,r1; bx lr
+    {"__aeabi_uidivmod", {
+        0xe3510000, // cmp r1,#0
+        0x03a00000, // moveq r0,#0 (zero-divisor result matches the HLE)
+        0x012fff1e, // bxeq lr (r1 is already zero)
+        0xe1a02000, // mov r2,r0
+        0xe730f110, // udiv r0,r0,r1
+        0xe0612190, // mls r1,r0,r1,r2 -> remainder = numerator - quotient*divisor
+        0xe12fff1e, // bx lr
+    }},
+    {"__aeabi_idivmod", {
+        0xe3510000, 0x03a00000, 0x012fff1e, 0xe1a02000,
+        0xe710f110, 0xe0612190, 0xe12fff1e,
+    }},
+};
+} // namespace
+
 bool Cpu::init(ElfImage& image, std::string& err, ElfImage* lib) {
     img = &image;
     // The library goes first: its constructors must run before the app's, and
@@ -26,6 +53,14 @@ bool Cpu::init(ElfImage& image, std::string& err, ElfImage* lib) {
     uc_err e = uc_open(UC_ARCH_ARM, UC_MODE_ARM, &uc);
     if (e) {
         err = std::string("uc_open: ") + uc_strerror(e);
+        return false;
+    }
+
+    // Cortex-A15 is Unicorn's default ARM model. Select it explicitly because
+    // the runtime helpers below use its integer divide instructions.
+    e = uc_ctl_set_cpu_model(uc, UC_CPU_ARM_CORTEX_A15);
+    if (e) {
+        err = std::string("ARM CPU model: ") + uc_strerror(e);
         return false;
     }
 
@@ -54,6 +89,25 @@ bool Cpu::init(ElfImage& image, std::string& err, ElfImage* lib) {
     uc_mem_write(uc, guest::HLE_BASE, bxlr.data(), guest::HLE_SIZE);
     uc_mem_map(uc, guest::HLE_DATA_BASE, guest::HLE_DATA_SIZE, UC_PROT_ALL);
 
+    const char* no_native = getenv("BADA_NO_NATIVE_ABI");
+    native_abi_ = (!no_native || std::strcmp(no_native, "0") == 0) && !getenv("BADA_TRACE");
+    if (native_abi_) {
+        e = uc_mem_map(uc, guest::ABI_HELPER_BASE, guest::ABI_HELPER_SIZE, UC_PROT_READ | UC_PROT_EXEC);
+        if (e) {
+            err = std::string("ARM ABI helper mapping: ") + uc_strerror(e);
+            return false;
+        }
+        for (size_t i = 0; i < std::size(abi_helpers); ++i) {
+            e = uc_mem_write(uc, guest::ABI_HELPER_BASE + i * guest::ABI_HELPER_STRIDE,
+                             abi_helpers[i].code.data(), guest::ABI_HELPER_STRIDE);
+            if (e) {
+                err = std::string("ARM ABI helper write: ") + uc_strerror(e);
+                return false;
+            }
+        }
+        puts("[cpu] integer ABI helpers run in the ARM JIT (no host callbacks)");
+    }
+
     // Dispatch hook over the trampoline page.
     uc_hook h;
     uc_hook_add(uc, &h, UC_HOOK_CODE, (void*)&Cpu::hook_code, this,
@@ -70,6 +124,7 @@ bool Cpu::init(ElfImage& image, std::string& err, ElfImage* lib) {
 
     apply_relocs();
     hle::init_dispatch();
+    pixel_accel::install(*this, image);
     return true;
 }
 
@@ -98,6 +153,11 @@ bool Cpu::map_image(std::string& err) {
 
 // One trampoline slot per distinct import name, shared by every image.
 uint32_t Cpu::import_slot(const std::string& name) {
+    if (native_abi_) {
+        for (size_t i = 0; i < std::size(abi_helpers); ++i) {
+            if (name == abi_helpers[i].name) return guest::ABI_HELPER_BASE + i * guest::ABI_HELPER_STRIDE;
+        }
+    }
     auto it = slot_of_.find(name);
     if (it != slot_of_.end()) {
         return guest::tramp_addr(it->second);
@@ -110,6 +170,12 @@ uint32_t Cpu::import_slot(const std::string& name) {
 
 // Name an address using whichever image it falls in (app or library).
 std::string Cpu::symbolize(uint32_t addr, uint32_t* off) const {
+    if (native_abi_ && addr >= guest::ABI_HELPER_BASE &&
+        addr < guest::ABI_HELPER_BASE + std::size(abi_helpers) * guest::ABI_HELPER_STRIDE) {
+        const uint32_t relative = addr - guest::ABI_HELPER_BASE;
+        if (off) *off = relative % guest::ABI_HELPER_STRIDE;
+        return abi_helpers[relative / guest::ABI_HELPER_STRIDE].name;
+    }
     for (ElfImage* im : images) {
         std::string n = im->nearest_symbol(addr, off);
         if (!n.empty()) {
@@ -345,7 +411,9 @@ void Cpu::do_return() {
         cpsr &= ~(1 << 5);
     }
     uc_reg_write(uc, UC_ARM_REG_CPSR, &cpsr);
-    uint32_t pc = lr & ~1u;
+    // Unicorn uses the written PC's low bit to select Thumb mode. Clearing it
+    // here would undo CPSR.T and decode a Thumb caller's return as ARM code.
+    uint32_t pc = lr;
     uc_reg_write(uc, UC_ARM_REG_PC, &pc);
 }
 static void patch_hook(uc_engine*, uint64_t addr, uint32_t, void* user) {

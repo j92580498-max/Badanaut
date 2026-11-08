@@ -46,6 +46,7 @@ constexpr GLenum client_buffer_usage = GL_STREAM_DRAW;
 #endif
 GLuint g_canvas_texture = 0;
 bool g_canvas_window_sized = false;
+hle::CanvasUploadInfo g_canvas_upload_info;
 void fit_window(GLint x, GLint y, GLsizei w, GLsizei h); // defined in the ES1 section
 
 hle::SurfaceRect host_rect(const GLint* rectangle) {
@@ -878,11 +879,14 @@ void gl_set_preswap(std::function<void(Cpu&)> fn) { g_preswap = std::move(fn); }
 // Implemented alongside the Android frontend, using ES arrays/shaders instead
 // of desktop immediate mode. Keep the game's GL dispatch shared with desktop.
 void gles_present_canvas(Cpu& cpu, void* window, uint32_t pixels, int width, int height);
+CanvasUploadInfo gles_canvas_upload_info();
+CanvasUploadInfo gl_canvas_upload_info() { return gles_canvas_upload_info(); }
 void gl_present_canvas(Cpu& cpu, uint32_t pixels, int width, int height) {
     fit_window(0, 0, width, height);
     gles_present_canvas(cpu, g_window, pixels, width, height);
 }
 #else
+CanvasUploadInfo gl_canvas_upload_info() { return g_canvas_upload_info; }
 void gl_present_canvas(Cpu& cpu, uint32_t pixels, int width, int height) {
     if (!g_window || !pixels || width <= 0 || height <= 0) {
         return;
@@ -894,6 +898,7 @@ void gl_present_canvas(Cpu& cpu, uint32_t pixels, int width, int height) {
     }
     std::vector<uint8_t> image((size_t)width * (size_t)height * 4);
     cpu.read_mem(pixels, image.data(), (uint32_t)image.size());
+    g_canvas_upload_info = {static_cast<uint32_t>(image.size()), false};
     static int canvas_frames = 0;
     ++canvas_frames;
     if (canvas_frames <= 12 || canvas_frames % 100 == 0) {

@@ -22,6 +22,8 @@ inline SurfaceRect fit_surface(int width, int height, int output_width, int outp
 SurfaceRect gl_content_rect(int output_width, int output_height);
 void gl_map_touch(int x, int y, int width, int height, int& guest_x, int& guest_y);
 void gl_resize();
+struct CanvasUploadInfo { uint32_t bytes = 0; bool compact = false; };
+CanvasUploadInfo gl_canvas_upload_info(); // payload of the last Canvas presentation
 
 // Samsung exports glFoo_1 for the fixed pipeline and glFoo_2 for shaders.
 // Canvas-only applications use the ES 2 presenter.

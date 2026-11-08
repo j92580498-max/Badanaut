@@ -44,6 +44,7 @@ add_library(bada-android SHARED
     "${BADA_ROOT}/control.cpp"
     "${BADA_ROOT}/elf_loader.cpp"
     "${BADA_ROOT}/cpu.cpp"
+    "${BADA_ROOT}/pixel_accel.cpp"
     "${BADA_ROOT}/hle/dispatch.cpp"
     "${BADA_ROOT}/hle/libc.cpp"
     "${BADA_ROOT}/hle/gl.cpp"

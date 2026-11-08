@@ -8,6 +8,8 @@
 #endif
 #include "cpu.h"
 #include "hle/gl_api.h"
+#include "pixel_accel.h"
+#include "arm_pixel_fixture.h"
 #include <array>
 #include <cstdio>
 #include <cstdlib>
@@ -311,6 +313,70 @@ void resize_test(Cpu& cpu, int api, SDL_Window* window) {
     hle::gl_resize();
     SDL_DestroyWindow(resized);
 }
+
+#ifndef BADA_TEST_DESKTOP
+void compact_canvas_test(Cpu& cpu, SDL_Window* window) {
+    const uint32_t kernel = 0x100100;
+    cpu.write_mem(kernel, arm_pixel_fixture, sizeof arm_pixel_fixture);
+    ElfImage fixture_image;
+    fixture_image.segments.push_back({kernel, sizeof arm_pixel_fixture, sizeof arm_pixel_fixture, 5,
+                                      reinterpret_cast<const uint8_t*>(arm_pixel_fixture)});
+    require(pixel_accel::install(cpu, fixture_image) == 1, "generated pixel kernel was not recognized");
+    std::vector<uint16_t> source(320 * 256, 0xdead);
+    for (int y = 0; y < 320; ++y)
+        for (int x = 0; x < 240; ++x) source[y * 256 + x] = (y * 240 + x) & 0xffff;
+    const uint32_t input = copy(cpu, source.data(), source.size() * 2), output = cpu.alloc(480 * 640 * 4);
+    const auto context = SDL_GL_GetCurrentContext();
+    for (const auto size : {hle::SurfaceRect{0,0,480,640}, hle::SurfaceRect{0,0,160,96}}) {
+        auto* target = SDL_CreateWindow("Compact Canvas", 0, 0, size.width, size.height, SDL_WINDOW_OPENGL | SDL_WINDOW_HIDDEN);
+        require(target != nullptr, SDL_GetError());
+        require(SDL_GL_MakeCurrent(target, context) == 0, SDL_GetError());
+        hle::gl_set_window(target);
+        for (int mode = 0; mode < 3; ++mode) {
+            uint32_t result = 0;
+            require(cpu.run_guest(kernel, {input, output, 320}, result), "pixel kernel call failed");
+            std::vector<uint32_t> expected(480 * 640);
+            cpu.read_mem(output, expected.data(), expected.size() * 4);
+            if (mode == 1) { // arbitrary 8-bit HUD colors over the RGB565 background
+                for (int y = 9; y < 46; ++y)
+                    for (int x = 7; x < 107; ++x) expected[y * 480 + x] = 0x00123456;
+                cpu.write_mem(output, expected.data(), expected.size() * 4);
+            } else if (mode == 2) { // extensive guest changes must use full RGBA upload
+                std::fill(expected.begin(), expected.end(), 0x0000ff00);
+                cpu.write_mem(output, expected.data(), expected.size() * 4);
+            }
+            hle::gl_present_canvas(cpu, output, 480, 640);
+            const auto upload = hle::gl_canvas_upload_info();
+            require(mode == 2 ? !upload.compact && upload.bytes == expected.size() * 4
+                              : upload.compact && upload.bytes < expected.size(),
+                    "compact Canvas did not reduce texture upload bytes or retain its fallback");
+            std::vector<uint8_t> rendered(size.width * size.height * 4);
+            glReadPixels(0, 0, size.width, size.height, GL_RGBA, GL_UNSIGNED_BYTE, rendered.data());
+            const auto area = hle::fit_surface(480, 640, size.width, size.height);
+            for (int y = 0; y < size.height; ++y) {
+                for (int x = 0; x < size.width; ++x) {
+                    uint32_t rgb = 0;
+                    if (x >= area.x && x < area.x + area.width && y >= area.y && y < area.y + area.height) {
+                        const int gx = (2 * (x - area.x) + 1) * 480 / (2 * area.width);
+                        const int gy = (2 * (area.height - (y - area.y)) - 1) * 640 / (2 * area.height);
+                        rgb = expected[gy * 480 + gx];
+                    }
+                    const size_t index = (y * size.width + x) * 4;
+                    for (int channel = 0; channel < 3; ++channel)
+                        require(abs(int(rendered[index + channel]) - int((rgb >> (16 - channel * 8)) & 255)) <= 1,
+                                "RGB565/HUD composition differs from the full guest framebuffer");
+                    require(rendered[index + 3] == 255, "compact Canvas lost opaque alpha");
+                }
+            }
+            require(glGetError() == GL_NO_ERROR, "compact Canvas generated a GL error");
+        }
+        require(SDL_GL_MakeCurrent(window, context) == 0, SDL_GetError());
+        hle::gl_set_window(window);
+        SDL_DestroyWindow(target);
+    }
+    puts("RGB565 background, HUD rectangle, color precision, scaling and upload-byte reduction passed");
+}
+#endif
 } // namespace
 
 int main(int argc, char** argv) {
@@ -364,6 +430,9 @@ int main(int argc, char** argv) {
         cpu.hard_float = std::string(argv[2]) == "hard";
         render(cpu, api);
         resize_test(cpu, api, window);
+#ifndef BADA_TEST_DESKTOP
+        if (api == 2) compact_canvas_test(cpu, window);
+#endif
         uc_close(cpu.uc);
         SDL_GL_DeleteContext(context);
         SDL_DestroyWindow(window);

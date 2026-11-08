@@ -34,6 +34,7 @@
 #include "hle/gl_api.h"
 #include "ui_overlay.h"
 #include "display.h"
+#include "touch_input.h"
 namespace fs = std::filesystem;
 
 // ---- stdin command interface (for scripted control: screenshots, quit) ----
@@ -178,16 +179,15 @@ std::string dump_texture(const std::string& arg) {
 // ITouchEventListener overrides GlesForm::OnTouchPressed/Moved/Released(source,
 // currentPosition, touchInfo). The form's TransformTouchPos scales the Point
 // (device px -> logical) and forwards to Mortar::Touch; the only TouchEventInfo
-// method it calls is GetPointId() (an Osp import whose default HLE stub returns
-// 0 = a valid point id). Addresses are resolved by symbol name (see main()).
+// method it calls is GetPointId(). The HLE reports a distinct, stable ID for
+// every active contact. Addresses are resolved by symbol name (see main()).
 enum TouchKind { TK_PRESSED = 0, TK_MOVED = 1, TK_RELEASED = 2 };
 
 uint32_t g_glesform = 0;                       // GlesForm `this` (from its ctor)
 uint32_t g_on[3] = {0, 0, 0};                  // OnTouchPressed/Moved/Released addrs
 uint32_t g_skyforce_touch[3] = {0, 0, 0};
 uint32_t g_pt_obj = 0;                          // guest Osp::Graphics::Point (x@+4, y@+8)
-uint32_t g_ti_obj = 0;                          // guest TouchEventInfo (dummy)
-bool g_mouse_down = false;
+uint32_t g_ti_obj = 0;                          // emulator-owned TouchEventInfo
 
 // ---- app focus / lifecycle (FruitNinja) ----
 // Bada delivers OnBackground()/OnForeground() to the Osp::App::Application when
@@ -230,7 +230,7 @@ struct GestureStep {
 std::deque<GestureStep> g_gesture; // scripted multi-point gesture, one step/frame
 
 // Deliver one touch event through the bada listener. wx,wy are window pixels.
-void feed_touch(Cpu& cpu, SDL_Window* win, int kind, int wx, int wy) {
+void feed_touch(Cpu& cpu, SDL_Window* win, int kind, int wx, int wy, uint32_t point_id = 0) {
     // Two routes to the same event. Fruit Ninja's GlesForm overrides land at
     // fixed addresses we resolved by name; anything else goes through whatever
     // ITouchEventListener it registered, dispatched via its vtable.
@@ -268,6 +268,9 @@ void feed_touch(Cpu& cpu, SDL_Window* win, int kind, int wx, int wy) {
     cpu.write_u32(g_pt_obj + 4, (uint32_t)dx); // Osp::Graphics::Point.x (@+4)
     cpu.write_u32(g_pt_obj + 8, (uint32_t)dy); // Osp::Graphics::Point.y (@+8)
     cpu.write_u32(g_pt_obj + 12, 0);
+    hle::touch_event_set(g_ti_obj, point_id);
+    if (getenv("BADA_TRACE_TOUCH"))
+        printf("[touch] id=%u kind=%d guest=%d,%d\n", point_id, kind, dx, dy);
     uint32_t ret = 0;
     // OnTouch*(this, source, &currentPosition, &touchInfo)
     cpu.run_guest(fn, {self, source, g_pt_obj, g_ti_obj}, ret);
@@ -400,6 +403,28 @@ std::string run_command(Cpu& cpu, SDL_Window* win, std::string c, bool& quit) {
                                               : TK_PRESSED;
         feed_touch(cpu, win, kind, x, y);
         return "ok";
+    } else if (verb == "finger") {
+        // Script the same SDL events delivered by Android, retaining identity
+        // across calls so simultaneous joystick/fire input can be verified.
+        char sub[16] = {};
+        long long id = 0;
+        int x = 0, y = 0, width = 0, height = 0;
+        if (sscanf(arg.c_str(), "%15s %lld %d %d", sub, &id, &x, &y) != 4 ||
+            (strcmp(sub, "down") && strcmp(sub, "move") && strcmp(sub, "up")))
+            return "usage: finger down|move|up id x y";
+        SDL_GetWindowSize(win, &width, &height);
+        if (width <= 0 || height <= 0) return "no input surface";
+        SDL_Event event{};
+        event.type = strcmp(sub, "down") == 0 ? SDL_FINGERDOWN :
+                     strcmp(sub, "up") == 0 ? SDL_FINGERUP : SDL_FINGERMOTION;
+        event.tfinger.timestamp = SDL_GetTicks();
+        event.tfinger.touchId = 0;
+        event.tfinger.fingerId = id;
+        event.tfinger.x = static_cast<float>(x) / width;
+        event.tfinger.y = static_cast<float>(y) / height;
+        event.tfinger.pressure = event.type == SDL_FINGERUP ? 0.0f : 1.0f;
+        event.tfinger.windowID = SDL_GetWindowID(win);
+        return SDL_PushEvent(&event) == 1 ? "queued" : SDL_GetError();
     } else if (verb == "type") {
         // Type into a mocked UI control (see hle/ui.h). Real SDL events, so this
         // drives exactly the path a person at the keyboard does. A trailing
@@ -812,9 +837,8 @@ int main(int argc, char** argv) {
 
     // ---- SDL window + GL context (compatibility profile for fixed-function) ----
     SDL_SetMainReady(); // we used SDL_MAIN_HANDLED; tell SDL the entry point ran
-#ifdef __ANDROID__
     SDL_SetHint(SDL_HINT_TOUCH_MOUSE_EVENTS, "0");
-#endif
+    SDL_SetHint(SDL_HINT_MOUSE_TOUCH_EVENTS, "0");
     if (SDL_Init(SDL_INIT_VIDEO) != 0) {
         printf("SDL_Init: %s\n", SDL_GetError());
         return 1;
@@ -912,7 +936,7 @@ int main(int argc, char** argv) {
     // Touch event arguments, shared by both delivery routes (see feed_touch).
     // Every app needs these, not just the one with a named GlesForm.
     g_pt_obj = cpu.alloc(16);                    // Osp::Graphics::Point (x@+4, y@+8)
-    g_ti_obj = cpu.make_stub_object(32);         // TouchEventInfo (GetPointId() only)
+    g_ti_obj = cpu.make_stub_object(32);         // TouchEventInfo (HLE accessor)
     if (exe.find("SkyForce") != std::string::npos) {
         g_skyforce_touch[TK_PRESSED] = img.resolve("_ZN8SkyForce14OnTouchPressedERKN3Osp2Ui7ControlERKNS0_8Graphics5PointERKNS1_14TouchEventInfoE");
         g_skyforce_touch[TK_MOVED] = img.resolve("_ZN8SkyForce12OnTouchMovedERKN3Osp2Ui7ControlERKNS0_8Graphics5PointERKNS1_14TouchEventInfoE");
@@ -1130,6 +1154,12 @@ int main(int argc, char** argv) {
 #else
         const bool trace_fps = getenv("BADA_TRACE_FPS") != nullptr;
 #endif
+        input::TouchInput touch_input;
+        const input::TouchInput::Sink deliver_touch = [&](const input::TouchEvent& event) {
+            const int kind = event.kind == input::TouchKind::pressed ? TK_PRESSED :
+                             event.kind == input::TouchKind::released ? TK_RELEASED : TK_MOVED;
+            feed_touch(cpu, win, kind, event.x, event.y, event.point_id);
+        };
         for (bool running = true; running;) {
             uint32_t frame_start = SDL_GetTicks();
             SDL_Event ev;
@@ -1156,49 +1186,28 @@ int main(int argc, char** argv) {
                 if (overlay::handle_event(ev)) {
                     continue; // a mocked control has focus; the guest sees nothing
                 }
-#ifdef __ANDROID__
-                if (ev.type == SDL_FINGERDOWN && !g_mouse_down) {
-                    int w = 0, h = 0;
-                    SDL_GetWindowSize(win, &w, &h);
-                    g_mouse_down = true;
-                    feed_touch(cpu, win, TK_PRESSED, (int)(ev.tfinger.x * w), (int)(ev.tfinger.y * h));
-                } else if (ev.type == SDL_FINGERMOTION && g_mouse_down) {
-                    int w = 0, h = 0;
-                    SDL_GetWindowSize(win, &w, &h);
-                    feed_touch(cpu, win, TK_MOVED, (int)(ev.tfinger.x * w), (int)(ev.tfinger.y * h));
-                } else if (ev.type == SDL_FINGERUP && g_mouse_down) {
-                    int w = 0, h = 0;
-                    SDL_GetWindowSize(win, &w, &h);
-                    g_mouse_down = false;
-                    feed_touch(cpu, win, TK_RELEASED, (int)(ev.tfinger.x * w), (int)(ev.tfinger.y * h));
-                }
-#endif
+                int input_width = 0, input_height = 0;
+                SDL_GetWindowSize(win, &input_width, &input_height);
+                uint32_t input_listener = 0, input_source = g_glesform;
+                if (!input_source) hle::touch_listener(input_listener, input_source);
+                if (touch_input.handle(ev, input_width, input_height,
+                        hle::touch_multipoint_enabled(input_source), deliver_touch)) continue;
 
-                if (ev.type == SDL_MOUSEBUTTONDOWN && ev.button.button == SDL_BUTTON_LEFT) {
-                    g_mouse_down = true;
-                    feed_touch(cpu, win, TK_PRESSED, ev.button.x, ev.button.y);
-                } else if (ev.type == SDL_MOUSEMOTION && g_mouse_down) {
-                    feed_touch(cpu, win, TK_MOVED, ev.motion.x, ev.motion.y);
-                } else if (ev.type == SDL_MOUSEBUTTONUP && ev.button.button == SDL_BUTTON_LEFT) {
-                    g_mouse_down = false;
-                    feed_touch(cpu, win, TK_RELEASED, ev.button.x, ev.button.y);
-                } else if (ev.type == SDL_WINDOWEVENT) {
-                    if (ev.window.event == SDL_WINDOWEVENT_SIZE_CHANGED) hle::gl_resize();
+                if (ev.type == SDL_WINDOWEVENT || ev.type == SDL_APP_WILLENTERBACKGROUND ||
+                    ev.type == SDL_APP_DIDENTERFOREGROUND) {
+                    if (ev.type == SDL_WINDOWEVENT && ev.window.event == SDL_WINDOWEVENT_SIZE_CHANGED)
+                        hle::gl_resize();
                     // Window focus drives the app lifecycle: losing focus pauses
                     // the game (OnBackground), regaining it resumes (OnForeground).
-                    bool lost = ev.window.event == SDL_WINDOWEVENT_FOCUS_LOST ||
-                                ev.window.event == SDL_WINDOWEVENT_MINIMIZED ||
-                                ev.window.event == SDL_WINDOWEVENT_HIDDEN;
-                    bool gained = ev.window.event == SDL_WINDOWEVENT_FOCUS_GAINED ||
-                                  ev.window.event == SDL_WINDOWEVENT_RESTORED;
+                    bool lost = ev.type == SDL_APP_WILLENTERBACKGROUND ||
+                                (ev.type == SDL_WINDOWEVENT && (ev.window.event == SDL_WINDOWEVENT_FOCUS_LOST ||
+                                 ev.window.event == SDL_WINDOWEVENT_MINIMIZED || ev.window.event == SDL_WINDOWEVENT_HIDDEN));
+                    bool gained = ev.type == SDL_APP_DIDENTERFOREGROUND ||
+                                  (ev.type == SDL_WINDOWEVENT && (ev.window.event == SDL_WINDOWEVENT_FOCUS_GAINED ||
+                                   ev.window.event == SDL_WINDOWEVENT_RESTORED));
                     if (lost && g_app_focused) {
                         g_app_focused = false;
-                        if (g_mouse_down) { // don't leave a blade stroke held
-                            g_mouse_down = false;
-                            int mx = 0, my = 0;
-                            SDL_GetMouseState(&mx, &my);
-                            feed_touch(cpu, win, TK_RELEASED, mx, my);
-                        }
+                        touch_input.cancel(deliver_touch);
                         feed_focus(cpu, g_on_background, "OnBackground (focus lost -> pause)");
                         hle::audio_pause(true);
                     } else if (gained && !g_app_focused) {

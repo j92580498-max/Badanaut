@@ -66,6 +66,14 @@ void heap_test(Cpu& cpu) {
     const uint32_t dirty = call(cpu, "malloc", {64});
     call(cpu, "memset", {dirty, 0x5a, 64});
     call(cpu, "free", {dirty});
+    // Fruit Ninja's optional HUD state relied on the original zero-backed
+    // allocation behavior. A recycled ordinary allocation must retain it.
+    const uint32_t recycled = call(cpu, "malloc", {64});
+    require(recycled != 0, "ordinary allocation failed after recycling");
+    for (uint32_t offset = 0; offset < 64; offset += 4)
+        require(cpu.read_u32(recycled + offset) == 0, "recycled allocation retained stale HUD state");
+    call(cpu, "memset", {recycled, 0x5a, 64});
+    call(cpu, "free", {recycled});
     const uint32_t zero = call(cpu, "calloc", {16, 4});
     require(zero != 0, "calloc failed after recycling");
     for (uint32_t offset = 0; offset < 64; offset += 4)

@@ -677,6 +677,17 @@ uint32_t Cpu::alloc(uint32_t size, uint32_t align) {
         static_cast<uint8_t*>(block) - static_cast<uint8_t*>(heap_storage_));
     if (!matching_alignment) p = (p + align - 1) & ~(align - 1);
     allocations_[p] = {size, block};
+    // The previous zero-backed heap always supplied cleared storage. Keep
+    // that behavior when TLSF reuses a block, as touchHLE's Mem::alloc does.
+    // Fruit Ninja leaves optional HUD fields at their initial zero values;
+    // stale payload bytes made its first frame bind a null coin texture.
+    // Write through Unicorn so reused executable storage stays coherent.
+    static const std::array<uint8_t, 64 * 1024> zero{};
+    for (uint32_t offset = 0; offset < size;) {
+        const uint32_t bytes = std::min<uint32_t>(zero.size(), size - offset);
+        write_mem(p + offset, zero.data(), bytes);
+        offset += bytes;
+    }
     return p;
 }
 

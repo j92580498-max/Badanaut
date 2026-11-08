@@ -1,7 +1,6 @@
 #include "cpu.h"
 #include "dispatch.h"
 #include <algorithm>
-#include <array>
 #include <cctype>
 #include <cmath>
 #include <cstdlib>
@@ -23,14 +22,7 @@ void h_calloc(Cpu& c) {                                    // Osp_callocEx(n,siz
     if (total64 > UINT32_MAX) { c.set_ret32(0); return; }
     uint32_t total = static_cast<uint32_t>(total64);
     uint32_t p = c.alloc(total);
-    if (p && total) {
-        const std::array<uint8_t, 4096> zero{};
-        for (uint32_t offset = 0; offset < total;) {
-            const uint32_t bytes = std::min<uint32_t>(zero.size(), total - offset);
-            c.write_mem(p + offset, zero.data(), bytes);
-            offset += bytes;
-        }
-    }
+    // Cpu::alloc clears recycled payloads as well as fresh storage.
     c.set_ret32(p);
 }
 void h_realloc(Cpu& c) { // Osp_reallocEx(ptr,size,...)

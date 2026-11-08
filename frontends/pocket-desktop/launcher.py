@@ -27,6 +27,8 @@ class Launcher(QWidget):
         self.games, self.images, self.settings, self.draft = [], {}, {}, {}
         self.runtime_ready = False
         self.page_index = 0
+        self.menu_open = False
+        self.wheel_distance = 0
         self.screen = "library"
         self.selected = None
         self.choice = None
@@ -73,13 +75,17 @@ class Launcher(QWidget):
     def controls(self):
         # (id, rectangle, label). This same list drives painting and hit testing.
         if self.screen == "library":
-            g = self.layout["grid"]
+            menu = self.layout["menu"]
+            if self.menu_open:
+                x, y, w, _ = menu["rect"]
+                return [("more", QRectF(*menu["trigger"]), "More options")] + [
+                    (item["id"], QRectF(x, y + i * menu["itemHeight"], w, menu["itemHeight"]), item["text"])
+                    for i, item in enumerate(menu["items"])]
             controls = []
             for i, game in enumerate(self.visible_games()):
                 tile = self.tile_rect(i)
                 controls.append(("game:" + game["id"], QRectF(tile.x() - 8, tile.y(), 74, 76), game["name"]))
-            controls.append(("next", self.tile_rect(g["gamesPerPage"]), "Next page"))
-            return controls + [(b["id"], QRectF(*b["rect"]), b["text"]) for b in self.layout["buttons"]]
+            return controls + [("more", QRectF(*menu["trigger"]), "More options")]
         controls = [("back", QRectF(10, 10, 72, 28), "Back")]
         if self.screen == "settings":
             for i, option in enumerate(self.layout["settings"]):
@@ -109,6 +115,7 @@ class Launcher(QWidget):
 
     def navigate(self, screen):
         self.screen = screen
+        self.menu_open = False
         self.focus_index = 0
         self.pressed = None
         self.update()
@@ -135,7 +142,7 @@ class Launcher(QWidget):
             self.games = sorted(state["games"], key=lambda game: (game["name"].lower(), game["id"]))
             self.settings = state["settings"]
             self.runtime_ready = state["runtimeReady"]
-            self.page_index = min(self.page_index, max(0, math.ceil(len(self.games) / 15) - 1))
+            self.page_index = min(self.page_index, max(0, math.ceil(len(self.games) / self.layout["grid"]["gamesPerPage"]) - 1))
             self.images = {}
             for game in self.games:
                 if game.get("icon"):
@@ -178,8 +185,8 @@ class Launcher(QWidget):
             return
         if key.startswith("game:"):
             self.send("launch", {"id": key[5:]})
-        elif key == "next":
-            self.page_index = (self.page_index + 1) % max(1, math.ceil(len(self.games) / 15))
+        elif key == "more":
+            self.menu_open = not self.menu_open
         elif key == "settings":
             self.draft = dict(self.settings)
             self.navigate("settings")
@@ -202,6 +209,7 @@ class Launcher(QWidget):
         elif key in ("launch", "setIcon", "remove") and self.selected:
             self.send(key, {"id": self.selected["id"]})
         else:
+            self.menu_open = False
             self.send(key)
         self.update()
 
@@ -222,6 +230,11 @@ class Launcher(QWidget):
             return
         self.press_point = self.point(event.position())
         self.pressed = self.hit(self.press_point)
+        if self.menu_open and self.pressed is None:
+            self.menu_open = False
+            self.held = True
+            self.update()
+            return
         self.held = False
         if self.pressed and self.pressed.startswith("game:"):
             self.hold_timer.start()
@@ -240,10 +253,10 @@ class Launcher(QWidget):
         position = self.point(event.position())
         key = self.pressed
         if not self.held:
-            if self.screen == "library" and not self.pending and self.press_point and abs(position.x() - self.press_point.x()) > 60:
+            if self.screen == "library" and not self.menu_open and not self.pending and self.press_point and abs(position.x() - self.press_point.x()) > 60:
                 direction = 1 if position.x() < self.press_point.x() else -1
-                self.page_index = (self.page_index + direction) % max(1, math.ceil(len(self.games) / 15))
-            elif key == self.hit(position):
+                self.move_page(direction)
+            elif self.press_point and (position - self.press_point).manhattanLength() <= 12 and key == self.hit(position):
                 self.activate(key)
         self.pressed, self.press_point = None, None
         self.update()
@@ -251,7 +264,9 @@ class Launcher(QWidget):
     def keyPressEvent(self, event):
         controls = self.controls()
         if event.key() in (Qt.Key_Escape, Qt.Key_Backspace):
-            if self.screen != "library":
+            if self.menu_open:
+                self.menu_open = False
+            elif self.screen != "library":
                 self.activate("back")
         elif event.key() in (Qt.Key_Return, Qt.Key_Enter, Qt.Key_Space):
             self.activate(controls[self.focus_index % len(controls)][0])
@@ -262,10 +277,29 @@ class Launcher(QWidget):
             self.focus_index = (self.focus_index + delta) % len(controls)
         elif event.key() in (Qt.Key_PageDown, Qt.Key_PageUp):
             if self.screen == "library":
-                self.page_index = (self.page_index + (1 if event.key() == Qt.Key_PageDown else -1)) % max(1, math.ceil(len(self.games) / 15))
+                self.move_page(1 if event.key() == Qt.Key_PageDown else -1)
         else:
             super().keyPressEvent(event)
         self.update()
+
+    def move_page(self, direction):
+        if self.pending or self.menu_open or self.screen != "library":
+            return
+        pages = max(1, math.ceil(len(self.games) / self.layout["grid"]["gamesPerPage"]))
+        self.page_index = max(0, min(pages - 1, self.page_index + direction))
+        self.focus_index = 0
+        self.update()
+
+    def wheelEvent(self, event):
+        delta = event.pixelDelta().x() or event.angleDelta().x()
+        if not delta:
+            event.ignore()
+            return
+        self.wheel_distance += delta
+        if abs(self.wheel_distance) >= 60:
+            self.move_page(1 if self.wheel_distance < 0 else -1)
+            self.wheel_distance = 0
+        event.accept()
 
     def text(self, painter, text, rect, size=13, bold=False, color=None, align=Qt.AlignLeft | Qt.AlignVCenter, wrap=False):
         painter.setFont(self.font(size, bold))
@@ -308,19 +342,18 @@ class Launcher(QWidget):
                 width = QFontMetricsF(painter.font()).horizontalAdvance(game["name"])
                 painter.drawText(QPointF(rect.center().x() - width / 2, rect.y() + g["labelBaseline"]), game["name"])
                 painter.restore()
-            rect = self.tile_rect(g["gamesPerPage"])
+            menu = self.layout["menu"]
+            trigger = QRectF(*menu["trigger"])
             painter.setPen(Qt.NoPen)
-            painter.setBrush(QColor(self.layout["tileColor"]))
-            painter.drawRoundedRect(rect, g["radius"], g["radius"])
-            # Reference arrow, independent of platform font substitution.
-            path = QPainterPath()
-            cx, cy = rect.center().x(), rect.center().y() - 0.5
-            path.moveTo(cx - 16, cy - 1); path.lineTo(cx + 10, cy - 1)
-            path.lineTo(cx + 5, cy - 5.5); path.lineTo(cx + 8, cy - 5.5)
-            path.lineTo(cx + 14, cy); path.lineTo(cx + 8, cy + 5.5)
-            path.lineTo(cx + 5, cy + 5.5); path.lineTo(cx + 10, cy + 1)
-            path.lineTo(cx - 16, cy + 1); path.closeSubpath()
-            painter.setBrush(QColor("white")); painter.drawPath(path)
+            painter.setBrush(QColor(self.layout["labelColor"]))
+            for dy in (-5, 0, 5):
+                painter.drawEllipse(QPointF(trigger.center().x(), trigger.center().y() + dy), 1.5, 1.5)
+            pages = max(1, math.ceil(len(self.games) / g["gamesPerPage"]))
+            if pages > 1:
+                dots = self.layout["pageDots"]
+                for i in range(pages):
+                    painter.setBrush(QColor(dots["active"] if i == self.page_index else dots["inactive"]))
+                    painter.drawEllipse(QPointF(160 + (i - (pages - 1) / 2) * dots["spacing"], dots["y"]), dots["radius"], dots["radius"])
             if not self.games:
                 self.text(painter, self.layout["emptyText"], QRectF(24, 136, 272, 90), 15, align=Qt.AlignCenter, wrap=True)
                 self.text(painter, self.layout["emptyHint"], QRectF(10, 240, 300, 50), 12, align=Qt.AlignCenter, wrap=True)
@@ -344,10 +377,19 @@ class Launcher(QWidget):
                 self.text(painter, self.message[:1500], QRectF(10, 56, 300, 388), 12, align=Qt.AlignLeft | Qt.AlignTop, wrap=True)
         controls = self.controls()
         for key, rect, label in controls:
-            if key.startswith("game:") or key == "next":
+            if key.startswith("game:") or key == "more" or (self.screen == "library" and self.menu_open):
                 continue
             painter.fillRect(rect, QColor(self.layout["pressedColor"] if self.pressed == key else self.layout["buttonColor"]))
             self.text(painter, label, rect, self.layout["buttonSize"] if self.screen == "library" else 15, color=self.layout["buttonTextColor"], align=Qt.AlignCenter)
+        if self.screen == "library" and self.menu_open:
+            menu = self.layout["menu"]
+            painter.fillRect(QRectF(*menu["rect"]), QColor(menu["background"]))
+            for key, rect, label in controls:
+                if key == "more":
+                    continue
+                if self.pressed == key:
+                    painter.fillRect(rect, QColor("#444444"))
+                self.text(painter, label, rect.adjusted(12, 0, -8, 0), 15, color=menu["textColor"])
         if self.hasFocus() and self.focus_index and controls:
             painter.setPen(QColor(self.layout["labelColor"]))
             painter.setBrush(Qt.NoBrush)

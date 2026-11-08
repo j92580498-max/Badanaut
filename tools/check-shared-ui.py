@@ -60,6 +60,18 @@ def main():
             scale, x, y = view.transform()
             QTest.mouseClick(view, Qt.LeftButton, pos=QPoint(round(x + rect.center().x() * scale), round(y + rect.center().y() * scale)))
 
+        def swipe(direction):
+            scale, x, y = view.transform()
+            start, end = ((280, 40) if direction > 0 else (40, 280))
+            def position(px): return QPoint(round(x + px * scale), round(y + 184 * scale))
+            QTest.mousePress(view, Qt.LeftButton, pos=position(start))
+            QTest.mouseMove(view, position(end), delay=10)
+            QTest.mouseRelease(view, Qt.LeftButton, pos=position(end))
+
+        def menu(key):
+            click("more"); assert view.menu_open
+            click(key)
+
         def screenshot(name):
             if args.screenshots:
                 args.screenshots.mkdir(parents=True, exist_ok=True)
@@ -68,22 +80,31 @@ def main():
         try:
             view.send("bootstrap"); wait()
             assert len(view.games) == 25 and len(view.images) == 25
-            assert len(view.visible_games()) == 15
+            assert len(view.visible_games()) == 16
             image = view.grab().toImage()
             assert image.size().width() == 320 and image.size().height() == 480
             assert image.pixelColor(0, 0) == QColor("black")
-            assert image.pixelColor(12, 392) == QColor("white"), "Reference file-manager button moved"
-            assert image.pixelColor(250, 330) != QColor("black"), "Reference arrow tile is missing"
+            assert image.pixelColor(12, 392) == QColor("black"), "Removed bottom buttons are still visible"
+            assert not any(key == "next" for key, _, _ in view.controls())
+            assert len([key for key, _, _ in view.controls() if key.startswith("game:")]) == 16
+            assert image.pixelColor(155, 446) == QColor("#aaaaaa"), "Current page indicator is missing"
             screenshot("reference-library.png")
             first = view.visible_games()[0]["id"]
-            click("next"); assert view.page_index == 1 and len(view.visible_games()) == 10
-            click("next"); assert view.page_index == 0 and view.visible_games()[0]["id"] == first
+            swipe(1); assert view.page_index == 1 and len(view.visible_games()) == 9
+            swipe(1); assert view.page_index == 1, "Swiping beyond the last page must stay there"
+            swipe(-1); assert view.page_index == 0 and view.visible_games()[0]["id"] == first
+            swipe(-1); assert view.page_index == 0
+            click("more"); assert view.menu_open
+            assert [key for key, _, _ in view.controls()] == ["more", "importGame", "copyright", "settings"]
+            screenshot("library-menu.png")
+            QTest.mouseClick(view, Qt.LeftButton, pos=QPoint(47, 61))
+            assert not view.menu_open and view.pending is None, "Dismissing the menu must not launch an icon"
             QTest.mouseClick(view, Qt.RightButton, pos=QPoint(47, 61))
             assert view.screen == "details" and view.selected["id"] == first
             screenshot("game-details.png")
             click("removeConfirm"); assert view.screen == "remove"
             click("cancelRemove"); click("back"); assert len(library.list_games()) == 25
-            click("settings"); click("setting:resolution"); click("value:4")
+            menu("settings"); click("setting:resolution"); click("value:4")
             click("setting:filter"); click("value:1")
             assert view.draft["resolution"] == "720x1280" and view.draft["filter"] == "linear"
             screenshot("reference-settings.png")
@@ -93,11 +114,11 @@ def main():
             assert view.screen == "library"
             for w, h, name in ((390, 844, "phone"), (960, 720, "desktop")):
                 window.resize(w, h); QTest.qWait(50)
-                assert len(view.visible_games()) == 15
-                click("next"); assert view.page_index == 1
-                click("next"); assert view.page_index == 0
+                assert len(view.visible_games()) == 16
+                swipe(1); assert view.page_index == 1
+                swipe(-1); assert view.page_index == 0
                 screenshot(name + "-library.png")
-                click("settings"); assert view.screen == "settings"
+                menu("settings"); assert view.screen == "settings"
                 screenshot(name + "-settings.png"); click("back")
             window.resize(320, 480); QTest.qWait(30)
             # Real mouse hold opens details without launching. Cancel/remove then refresh via host.
@@ -106,13 +127,13 @@ def main():
             assert view.screen == "details" and view.pending is None
             click("removeConfirm"); click("remove"); wait()
             assert len(view.games) == 24 and len(library.list_games()) == 24
-            click("copyright"); assert view.screen == "copyright"
+            menu("copyright"); assert view.screen == "copyright"
             screenshot("copyright.png"); click("back")
             # A launch failure must become a readable native message, without hanging the picker.
             click("game:" + view.visible_games()[0]["id"]); wait()
             assert view.screen == "message" and "runtime" in view.message.lower()
             click("back"); assert view.screen == "library"
-            print("Native UI passed: reference geometry, package artwork, paging, scaled hit targets, hold/details, removal, saved settings and launch errors.", flush=True)
+            print("Native UI passed: reference icon geometry, menu/dismissal, 16-game swipe paging, page bounds, dots, scaled hit targets, hold/details, removal, saved settings and launch errors.", flush=True)
         finally:
             host.shutdown(); window.close()
     return 0

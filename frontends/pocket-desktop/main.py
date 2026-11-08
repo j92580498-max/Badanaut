@@ -215,7 +215,7 @@ def main():
             if response.get("ok") and isinstance(response.get("result"), dict) and "games" in response["result"]:
                 def check():
                     image = view.grab().toImage()
-                    valid = view.pending is None and view.layout["grid"]["gamesPerPage"] == 15 and not image.isNull()
+                    valid = view.pending is None and view.layout["grid"]["gamesPerPage"] == 16 and not image.isNull()
                     app.exit(0 if valid else 1)
                 QTimer.singleShot(100, check)
         host.reply.connect(received)

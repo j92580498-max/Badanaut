@@ -39,7 +39,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake ninja-build libsdl2-dev libsdl2-image-dev libgl-dev libegl1 libopengl0 libxcb-cursor0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-render-util0 libxcb-xinerama0 libxkbcommon-x11-0 xvfb xauth
+          sudo apt-get install -y cmake ninja-build libsdl2-dev libsdl2-image-dev libgl-dev libegl1 libopengl0 libxcb-cursor0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-render-util0 libxcb-xinerama0 libxcb-shape0 libxcb-shm0 libxcb-sync1 libxcb-randr0 libxcb-render0 libxcb-xfixes0 libxcb-xkb1 libx11-xcb1 libxkbcommon-x11-0 xvfb xauth
       - name: Set up Windows compiler
         if: runner.os == 'Windows'
         uses: ilammy/msvc-dev-cmd@v1
@@ -51,11 +51,23 @@ jobs:
           "$env:VCPKG_INSTALLATION_ROOT/installed/x64-windows/bin" >> $env:GITHUB_PATH
       - name: Install desktop host and packager
         run: python -m pip install -r frontends/pocket-desktop/requirements.txt
+      - name: Check Linux Qt platform dependencies
+        if: runner.os == 'Linux'
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import subprocess
+          from PySide6.QtCore import QLibraryInfo
+          plugin = Path(QLibraryInfo.path(QLibraryInfo.PluginsPath)) / "platforms/libqxcb.so"
+          report = subprocess.check_output(["ldd", str(plugin)], text=True)
+          print(report)
+          assert "not found" not in report, "Missing Qt X11 runtime dependency"
+          PY
       - name: Test Bada library imports and display settings
         run: python -m unittest discover -s frontends/pocket-desktop/tests -v
       - name: Test native picker at reference, desktop and phone sizes
         if: runner.os == 'Linux'
-        run: xvfb-run -a python tools/check-shared-ui.py --screenshots .build/ui-preview
+        run: xvfb-run -a env QT_DEBUG_PLUGINS=1 python tools/check-shared-ui.py --screenshots .build/ui-preview
       - name: Upload native interface previews
         if: runner.os == 'Linux'
         uses: actions/upload-artifact@v4

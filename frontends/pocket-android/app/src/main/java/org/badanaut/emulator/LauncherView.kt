@@ -32,6 +32,7 @@ class LauncherView(context: Context, private val request: (JSONObject) -> Unit) 
     private var draft = JSONObject()
     private var runtimeReady = false
     private var pageIndex = 0
+    private var menuOpen = false
     private var screen = "library"
     private var selected: JSONObject? = null
     private var choice: JSONObject? = null
@@ -114,16 +115,22 @@ class LauncherView(context: Context, private val request: (JSONObject) -> Unit) 
     private fun options() = spec.getJSONArray("settings").let { a -> (0 until a.length()).map { a.getJSONObject(it) } }
     private fun controls(): List<Control> {
         if (screen == "library") {
+            val menu = spec.getJSONObject("menu")
+            val trigger = menu.getJSONArray("trigger")
+            val more = control("more", trigger.getInt(0), trigger.getInt(1), trigger.getInt(2), trigger.getInt(3), "More options")
+            if (menuOpen) {
+                val rect = menu.getJSONArray("rect")
+                val items = menu.getJSONArray("items")
+                return listOf(more) + (0 until items.length()).map { i ->
+                    val item = items.getJSONObject(i)
+                    control(item.getString("id"), rect.getInt(0), rect.getInt(1) + i * menu.getInt("itemHeight"), rect.getInt(2), menu.getInt("itemHeight"), item.getString("text"))
+                }
+            }
             val result = visibleGames().mapIndexed { i, game ->
                 val r = tileRect(i)
                 Control("game:" + game.getString("id"), RectF(r.left - 8, r.top, r.left + 66, r.top + 76), game.getString("name"))
             }.toMutableList()
-            result.add(Control("next", tileRect(grid.getInt("gamesPerPage")), "Next page"))
-            val buttons = spec.getJSONArray("buttons")
-            for (i in 0 until buttons.length()) {
-                val b = buttons.getJSONObject(i); val r = b.getJSONArray("rect")
-                result.add(control(b.getString("id"), r.getInt(0), r.getInt(1), r.getInt(2), r.getInt(3), b.getString("text")))
-            }
+            result.add(more)
             return result
         }
         val result = mutableListOf(control("back", 10, 10, 72, 28, "Back"))
@@ -156,7 +163,7 @@ class LauncherView(context: Context, private val request: (JSONObject) -> Unit) 
     }
     private fun hit(point: PointF) = controls().firstOrNull { it.rect.contains(point.x, point.y) }?.id
     private fun refresh() { invalidate(); accessibility.invalidateRoot() }
-    private fun navigate(next: String) { screen = next; focusIndex = 0; pressed = null; refresh() }
+    private fun navigate(next: String) { screen = next; menuOpen = false; focusIndex = 0; pressed = null; refresh() }
     fun send(action: String, args: JSONObject = JSONObject()) {
         if (pending != null) return
         sequence += 1
@@ -210,7 +217,7 @@ class LauncherView(context: Context, private val request: (JSONObject) -> Unit) 
         if (pending != null || key == null) return
         when {
             key.startsWith("game:") -> send("launch", JSONObject().put("id", key.substring(5)))
-            key == "next" -> pageIndex = (pageIndex + 1) % pageCount()
+            key == "more" -> menuOpen = !menuOpen
             key == "settings" -> { draft = JSONObject(settings.toString()); navigate("settings") }
             key == "copyright" -> navigate("copyright")
             key == "back" -> navigate(when (screen) { "choices" -> "settings"; "remove" -> "details"; "message" -> returnScreen; else -> "library" })
@@ -220,7 +227,7 @@ class LauncherView(context: Context, private val request: (JSONObject) -> Unit) 
             key == "removeConfirm" -> navigate("remove")
             key == "cancelRemove" -> navigate("details")
             key in listOf("launch", "setIcon", "remove") -> selected?.let { send(key, JSONObject().put("id", it.getString("id"))) }
-            else -> send(key)
+            else -> { menuOpen = false; send(key) }
         }
         refresh()
     }
@@ -229,13 +236,14 @@ class LauncherView(context: Context, private val request: (JSONObject) -> Unit) 
             selected = games.first { it.getString("id") == key.substring(5) }; navigate("details")
         }
     }
-    fun back(): Boolean { if (screen == "library") return false; activate("back"); return true }
+    fun back(): Boolean { if (menuOpen) { menuOpen = false; refresh(); return true }; if (screen == "library") return false; activate("back"); return true }
     override fun dispatchHoverEvent(event: MotionEvent) = accessibility.dispatchHoverEvent(event) || super.dispatchHoverEvent(event)
     override fun onTouchEvent(event: MotionEvent): Boolean {
         val point = point(event.x, event.y)
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
                 pressPoint = point; pressed = hit(point); held = false
+                if (menuOpen && pressed == null) { menuOpen = false; held = true; refresh(); return true }
                 if (pressed?.startsWith("game:") == true) postDelayed(hold, 550)
             }
             MotionEvent.ACTION_MOVE -> pressPoint?.let { if (abs(point.x - it.x) + abs(point.y - it.y) > 12) removeCallbacks(hold) }
@@ -243,16 +251,22 @@ class LauncherView(context: Context, private val request: (JSONObject) -> Unit) 
                 removeCallbacks(hold)
                 if (!held) {
                     val start = pressPoint
-                    if (screen == "library" && start != null && abs(point.x - start.x) > 60 && pending == null) {
+                    if (screen == "library" && !menuOpen && start != null && abs(point.x - start.x) > 60 && pending == null) {
                         val delta = if (point.x < start.x) 1 else -1
-                        pageIndex = (pageIndex + delta + pageCount()) % pageCount()
-                    } else if (pressed == hit(point)) { activate(pressed); performClick() }
+                        movePage(delta)
+                    } else if (start != null && abs(point.x - start.x) + abs(point.y - start.y) <= 12 && pressed == hit(point)) { activate(pressed); performClick() }
                 }
                 pressed = null; pressPoint = null
             }
             MotionEvent.ACTION_CANCEL -> { removeCallbacks(hold); pressed = null; pressPoint = null }
         }
         refresh(); return true
+    }
+    private fun movePage(delta: Int) {
+        if (pending != null || menuOpen || screen != "library") return
+        pageIndex = (pageIndex + delta).coerceIn(0, pageCount() - 1)
+        focusIndex = 0
+        refresh()
     }
     override fun onDetachedFromWindow() { removeCallbacks(hold); super.onDetachedFromWindow() }
     override fun performClick(): Boolean { super.performClick(); return true }
@@ -265,6 +279,8 @@ class LauncherView(context: Context, private val request: (JSONObject) -> Unit) 
                 val delta = when (keyCode) { KeyEvent.KEYCODE_DPAD_LEFT -> -1; KeyEvent.KEYCODE_DPAD_UP -> -4; KeyEvent.KEYCODE_DPAD_DOWN -> 4; else -> 1 }
                 focusIndex = (focusIndex + delta + controls.size) % controls.size
             }
+            KeyEvent.KEYCODE_PAGE_DOWN -> movePage(1)
+            KeyEvent.KEYCODE_PAGE_UP -> movePage(-1)
             KeyEvent.KEYCODE_ESCAPE -> back()
             else -> return super.onKeyDown(keyCode, event)
         }
@@ -330,14 +346,19 @@ class LauncherView(context: Context, private val request: (JSONObject) -> Unit) 
                 canvas.drawText(name, r.centerX() - paint.measureText(name) / 2, r.top + grid.getInt("labelBaseline"), paint)
                 canvas.restore()
             }
-            val r = tileRect(grid.getInt("gamesPerPage")); paint.color = Color.parseColor(spec.getString("tileColor"))
-            canvas.drawRoundRect(r, grid.getDouble("radius").toFloat(), grid.getDouble("radius").toFloat(), paint)
-            val cx = r.centerX(); val cy = r.centerY() - 0.5f
-            val arrow = Path().apply {
-                moveTo(cx - 16, cy - 1); lineTo(cx + 10, cy - 1); lineTo(cx + 5, cy - 5.5f); lineTo(cx + 8, cy - 5.5f)
-                lineTo(cx + 14, cy); lineTo(cx + 8, cy + 5.5f); lineTo(cx + 5, cy + 5.5f); lineTo(cx + 10, cy + 1); lineTo(cx - 16, cy + 1); close()
+            val menu = spec.getJSONObject("menu")
+            val trigger = menu.getJSONArray("trigger")
+            val cx = trigger.getInt(0) + trigger.getInt(2) / 2f
+            val cy = trigger.getInt(1) + trigger.getInt(3) / 2f
+            paint.color = Color.parseColor(spec.getString("labelColor"))
+            for (dy in listOf(-5, 0, 5)) canvas.drawCircle(cx, cy + dy, 1.5f, paint)
+            if (pageCount() > 1) {
+                val dots = spec.getJSONObject("pageDots")
+                for (i in 0 until pageCount()) {
+                    paint.color = Color.parseColor(dots.getString(if (i == pageIndex) "active" else "inactive"))
+                    canvas.drawCircle(160 + (i - (pageCount() - 1) / 2f) * dots.getInt("spacing"), dots.getDouble("y").toFloat(), dots.getDouble("radius").toFloat(), paint)
+                }
             }
-            paint.color = Color.WHITE; canvas.drawPath(arrow, paint)
             if (games.isEmpty()) {
                 text(canvas, spec.getString("emptyText"), RectF(24f, 136f, 296f, 226f), 15, center = true, wrap = true)
                 text(canvas, spec.getString("emptyHint"), RectF(10f, 240f, 310f, 290f), 12, center = true, wrap = true)
@@ -362,9 +383,20 @@ class LauncherView(context: Context, private val request: (JSONObject) -> Unit) 
             }
         }
         val controls = controls()
-        controls.filter { !it.id.startsWith("game:") && it.id != "next" }.forEach {
+        controls.filter { !it.id.startsWith("game:") && it.id != "more" && !(screen == "library" && menuOpen) }.forEach {
             paint.color = Color.parseColor(spec.getString(if (pressed == it.id) "pressedColor" else "buttonColor")); canvas.drawRect(it.rect, paint)
             text(canvas, it.label, it.rect, if (screen == "library") spec.getInt("buttonSize") else 15, color = spec.getString("buttonTextColor"), center = true)
+        }
+        if (screen == "library" && menuOpen) {
+            val menu = spec.getJSONObject("menu")
+            val r = menu.getJSONArray("rect")
+            paint.color = Color.parseColor(menu.getString("background"))
+            canvas.drawRect(r.getInt(0).toFloat(), r.getInt(1).toFloat(), (r.getInt(0) + r.getInt(2)).toFloat(), (r.getInt(1) + r.getInt(3)).toFloat(), paint)
+            controls.filter { it.id != "more" }.forEach {
+                if (pressed == it.id) { paint.color = Color.rgb(68, 68, 68); canvas.drawRect(it.rect, paint) }
+                val rect = RectF(it.rect); rect.left += 12; rect.right -= 8
+                text(canvas, it.label, rect, 15, color = menu.getString("textColor"))
+            }
         }
         if (hasFocus() && focusIndex != 0) {
             paint.style = Paint.Style.STROKE; paint.strokeWidth = 1f; paint.color = Color.parseColor(spec.getString("labelColor"))

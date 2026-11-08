@@ -5,8 +5,9 @@ emulation. The Bada engine is based on [mariotaku/bada-hle](https://github.com/m
 
 The native launcher on **Windows, Linux, and Android** follows the compact
 [touchHLE / HyperHLE-Reborn app picker](https://github.com/KlugKlugTG/HyperHLE-Reborn):
-a black background, four columns of rounded game icons, gray labels, an arrow
-for paging, and plain white buttons. Qt draws the desktop interface; Android
+a black background, four columns of rounded game icons and gray labels. A
+top-right ⋮ menu contains Open file manager, Copyright info and Settings.
+Swipe left/right through pages of 16 games; small dots indicate the current page. Qt draws the desktop interface; Android
 uses Canvas. Both use the same layout and bundled fonts. The browser UI has
 been removed. Package artwork is detected where available; game details let
 you select your own icon.
@@ -29,7 +30,7 @@ on Ubuntu 22.04 and require a compatible glibc and OpenGL driver.
 
 ## Add and play games
 
-1. Choose **Open file manager** and select a Bada ZIP containing one `Bin/*.exe` ARM32
+1. Open the **⋮ menu → Open file manager** and select a Bada ZIP containing one `Bin/*.exe` ARM32
    ELF and `Info/Appinfo.sys` or `Info/manifest.xml`, along with its resources.
    A containing directory inside the ZIP is supported.
 2. Open **Settings → Select Bada runtime** and select an original ARM32 Bada `libstdc++.so.6`

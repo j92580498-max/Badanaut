@@ -4,8 +4,9 @@ The Windows and Linux frontend paints the compact native game picker with
 Qt/QPainter. Android paints the same layout with Canvas. The layout, strings,
 and Liberation Sans fonts come from `../shared-ui/`; no browser is required.
 The library opens in a decorated, resizable 320×480 window. Enlarging it scales
-and centers the reference layout, keeping four columns and 15 games per page.
-The arrow wraps through library pages.
+and centers the reference layout, keeping four columns and 16 games per page.
+Horizontal swipes move between pages, with dots showing the current page.
+The top-right ⋮ menu contains Open file manager, Copyright info and Settings.
 
 PySide6 handles local file selection and starts the Bada SDL/OpenGL engine in a
 separate windowed process. Game windows can be resized; F11 toggles fullscreen.
@@ -16,7 +17,7 @@ Use Python 3.12, CMake 3.22+, a C/C++17 compiler, SDL2, SDL2_image and OpenGL.
 On Ubuntu 22.04 or later:
 
 ```sh
-sudo apt-get install cmake ninja-build libsdl2-dev libsdl2-image-dev libgl-dev libegl1 libopengl0 libxcb-cursor0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-render-util0 libxcb-xinerama0 libxkbcommon-x11-0
+sudo apt-get install cmake ninja-build libsdl2-dev libsdl2-image-dev libgl-dev libegl1 libopengl0 libxcb-cursor0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-render-util0 libxcb-xinerama0 libxcb-shape0 libxcb-shm0 libxcb-sync1 libxcb-randr0 libxcb-render0 libxcb-xfixes0 libxcb-xkb1 libx11-xcb1 libxkbcommon-x11-0
 python3 -m venv .venv
 . .venv/bin/activate
 python -m pip install -r frontends/pocket-desktop/requirements.txt
@@ -53,7 +54,7 @@ Artwork comes from the metadata's `Icon` path, or `icon`, `appicon`, or
 `mainmenuicon` images, or an executable-named image such as `Res/SkyForce.png`. Unsupported/missing
 artwork gets a charcoal tile with white initials. Right-click or hold an icon
 for details and select a local PNG/JPEG/WebP as artwork. Icons are center-cropped
-and rounded without a gloss overlay. Use the arrow, a horizontal swipe or
+and rounded without a gloss overlay. Use a horizontal swipe, trackpad horizontal scrolling or
 Page Up/Down to change pages. Arrow keys/Tab select a control; Enter opens it,
 Menu opens game details, and Escape goes back.
 

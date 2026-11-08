@@ -1,25 +1,142 @@
 {
-  "width": 320, "height": 480, "version": "Badanaut v0.8.0",
-  "background": "#000000", "labelColor": "#aaaaaa", "tileColor": "#292929",
-  "buttonColor": "#ffffff", "buttonTextColor": "#000000", "pressedColor": "#c8c8c8",
-  "regularFont": "fonts/LiberationSans-Regular.ttf", "boldFont": "fonts/LiberationSans-Bold.ttf",
-  "grid": {"x": 18, "y": 32, "columns": 4, "rows": 4, "stepX": 76, "stepY": 88,
-    "iconSize": 58, "radius": 9, "labelBaseline": 71, "labelSize": 11, "labelWidth": 74, "gamesPerPage": 15},
-  "buttons": [
-    {"id": "importGame", "text": "Open file manager", "rect": [10, 390, 300, 30]},
-    {"id": "copyright", "text": "Copyright info", "rect": [10, 428, 145, 30]},
-    {"id": "settings", "text": "Settings", "rect": [165, 428, 145, 30]}
-  ],
-  "buttonSize": 18, "footerSize": 12, "footerBaseline": 472,
-  "emptyText": "Open file manager to add a Bada game ZIP.\nSelect the Bada runtime in Settings.",
+  "width": 320,
+  "height": 480,
+  "version": "Badanaut v0.8.0",
+  "background": "#000000",
+  "labelColor": "#aaaaaa",
+  "tileColor": "#292929",
+  "buttonColor": "#ffffff",
+  "buttonTextColor": "#000000",
+  "pressedColor": "#c8c8c8",
+  "regularFont": "fonts/LiberationSans-Regular.ttf",
+  "boldFont": "fonts/LiberationSans-Bold.ttf",
+  "grid": {
+    "x": 18,
+    "y": 32,
+    "columns": 4,
+    "rows": 4,
+    "stepX": 76,
+    "stepY": 88,
+    "iconSize": 58,
+    "radius": 9,
+    "labelBaseline": 71,
+    "labelSize": 11,
+    "labelWidth": 74,
+    "gamesPerPage": 16
+  },
+  "buttonSize": 18,
+  "footerSize": 12,
+  "footerBaseline": 472,
+  "emptyText": "Open the menu to add a Bada game ZIP.\nSelect the Bada runtime in Settings.",
   "emptyHint": "Right-click or hold a game for details.",
   "settings": [
-    {"key": "resolution", "label": "Screen resolution", "choices": ["native", "240x400", "480x800", "540x960", "720x1280", "1080x1920"], "names": ["Game default", "240 × 400", "480 × 800", "540 × 960", "720 × 1280", "1080 × 1920"]},
-    {"key": "scaling", "label": "Screen scaling", "choices": ["fit", "integer"], "names": ["Fit to window", "Whole pixels"]},
-    {"key": "filter", "label": "Canvas filtering", "choices": ["nearest", "linear"], "names": ["Sharp", "Smooth"]},
-    {"key": "vsync", "label": "Vertical sync", "choices": [true, false], "names": ["On", "Off"]},
-    {"key": "fullscreen", "label": "Start games fullscreen", "choices": [false, true], "names": ["Off", "On"]}
+    {
+      "key": "resolution",
+      "label": "Screen resolution",
+      "choices": [
+        "native",
+        "240x400",
+        "480x800",
+        "540x960",
+        "720x1280",
+        "1080x1920"
+      ],
+      "names": [
+        "Game default",
+        "240 × 400",
+        "480 × 800",
+        "540 × 960",
+        "720 × 1280",
+        "1080 × 1920"
+      ]
+    },
+    {
+      "key": "scaling",
+      "label": "Screen scaling",
+      "choices": [
+        "fit",
+        "integer"
+      ],
+      "names": [
+        "Fit to window",
+        "Whole pixels"
+      ]
+    },
+    {
+      "key": "filter",
+      "label": "Canvas filtering",
+      "choices": [
+        "nearest",
+        "linear"
+      ],
+      "names": [
+        "Sharp",
+        "Smooth"
+      ]
+    },
+    {
+      "key": "vsync",
+      "label": "Vertical sync",
+      "choices": [
+        true,
+        false
+      ],
+      "names": [
+        "On",
+        "Off"
+      ]
+    },
+    {
+      "key": "fullscreen",
+      "label": "Start games fullscreen",
+      "choices": [
+        false,
+        true
+      ],
+      "names": [
+        "Off",
+        "On"
+      ]
+    }
   ],
   "settingsHelp": "Changes apply when a game starts. Resolution sets the output size; the game keeps its original screen dimensions. Desktop games start in a resizable window. F11 toggles fullscreen.",
-  "copyrightText": "Badanaut — Samsung Bada OS emulator\n\nBada HLE engine: mariotaku/bada-hle contributors. See UPSTREAM.md for attribution.\n\nLauncher design inspired by touchHLE and HyperHLE-Reborn. Written for Badanaut; no upstream game artwork is bundled.\n\nDesktop: Qt / PySide6 (LGPL / GPL / commercial), PyInstaller (GPL with bootloader exception).\n\nLiberation Sans: SIL Open Font License 1.1.\n\nSee THIRD_PARTY_NOTICES.md and the bundled license files for component licenses."
+  "copyrightText": "Badanaut — Samsung Bada OS emulator\n\nBada HLE engine: mariotaku/bada-hle contributors. See UPSTREAM.md for attribution.\n\nLauncher design inspired by touchHLE and HyperHLE-Reborn. Written for Badanaut; no upstream game artwork is bundled.\n\nDesktop: Qt / PySide6 (LGPL / GPL / commercial), PyInstaller (GPL with bootloader exception).\n\nLiberation Sans: SIL Open Font License 1.1.\n\nSee THIRD_PARTY_NOTICES.md and the bundled license files for component licenses.",
+  "menu": {
+    "trigger": [
+      280,
+      0,
+      40,
+      28
+    ],
+    "rect": [
+      110,
+      30,
+      200,
+      108
+    ],
+    "itemHeight": 36,
+    "background": "#292929",
+    "textColor": "#ffffff",
+    "items": [
+      {
+        "id": "importGame",
+        "text": "Open file manager"
+      },
+      {
+        "id": "copyright",
+        "text": "Copyright info"
+      },
+      {
+        "id": "settings",
+        "text": "Settings"
+      }
+    ]
+  },
+  "pageDots": {
+    "y": 446,
+    "radius": 2.5,
+    "spacing": 11,
+    "active": "#aaaaaa",
+    "inactive": "#444444"
+  }
 }

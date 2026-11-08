@@ -2,8 +2,9 @@
 
 Android paints the native game picker with Canvas using the same reference
 layout and bundled fonts as Qt on Windows and Linux. `../shared-ui/` is packaged
-by Gradle. The four-column, 15-game grid is scaled and centered within the
-available screen; the arrow or a horizontal swipe changes pages. Tap an icon to
+by Gradle. The four-column, 16-game grid is scaled and centered within the
+available screen; horizontal swipes change pages, with small dots showing the current page.
+The top-right ⋮ menu opens the file picker, copyright info or Settings. Tap an icon to
 launch; hold it for details, custom artwork or removal. TalkBack exposes each
 control, including the long-click details action.
 

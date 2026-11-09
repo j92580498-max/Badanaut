@@ -625,6 +625,7 @@ void register_libc() {
     register_handler("malloc", h_alloc);
     register_handler("calloc", h_calloc);
     register_handler("realloc", h_realloc);
+    register_handler("_Z11Osp_reallocPvj", h_realloc);
     register_handler("_Z11Osp_allocExjPKci", h_alloc);       // Osp_allocEx(size,file,line)
     register_handler("_Z9Osp_allocj", h_alloc);                // Osp_alloc(size)
     register_handler("_Z12Osp_callocExjjPKci", h_calloc);    // Osp_callocEx(n,size,file,line)

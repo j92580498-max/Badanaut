@@ -24,12 +24,14 @@ namespace {
 nk_context* g_ctx = nullptr;
 SDL_Window* g_win = nullptr;
 bool g_input_open = false; // between nk_input_begin/end
+bool g_drawn_in_frame = false;
 
 // What the user did, to be replayed into the guest from the frame loop. draw()
 // runs inside sglSwapBuffers -- already inside uc_emu_start -- and re-entering
 // the guest there would nest uc_emu_start and hang.
 struct Pending {
-    hle::EditField* field = nullptr;
+    uint32_t object = 0;
+    int generation = 0;
     bool set_text = false;
     std::string text;
     int pressed = -1;
@@ -61,6 +63,8 @@ void shutdown() {
         nk_sdl_shutdown();
         g_ctx = nullptr;
     }
+    g_input_open = false;
+    g_pending.clear();
 }
 
 bool active() { return g_ctx && hle::ui_active(); }
@@ -82,7 +86,10 @@ bool handle_event(SDL_Event& e) {
     case SDL_TEXTINPUT:
     case SDL_MOUSEBUTTONDOWN:
     case SDL_MOUSEBUTTONUP:
-    case SDL_MOUSEMOTION: return true;
+    case SDL_MOUSEMOTION:
+    case SDL_FINGERDOWN:
+    case SDL_FINGERUP:
+    case SDL_FINGERMOTION: return true;
     default: return false;
     }
 }
@@ -104,6 +111,7 @@ void draw(SDL_Window* win) {
         }
         return;
     }
+    g_drawn_in_frame = true;
     if (!g_input_open) {
         nk_input_begin(g_ctx);
     }
@@ -143,12 +151,11 @@ void draw(SDL_Window* win) {
             std::string typed(buf, (size_t)len);
             if (typed != f->text) {
                 f->text = typed; // echo now; the guest hears about it next frame
-                g_pending.push_back({f, true, typed, -1});
+                g_pending.push_back({f->obj, f->generation, true, typed, -1});
             }
 
             // Whatever command buttons the app put on the overlay keypad, in the
-            // app's own wording ("Cancel" / "Done"). Enter takes the last one,
-            // which is the confirming button in every layout we have seen.
+            // app's own wording ("Cancel" / "Done"). Enter confirms.
             int n = (f->has_command[0] ? 1 : 0) + (f->has_command[1] ? 1 : 0);
             int confirm = f->has_command[0] ? 0 : 1; // bada puts the confirming action left
             nk_layout_row_dynamic(g_ctx, 26, n ? n : 1);
@@ -166,7 +173,7 @@ void draw(SDL_Window* win) {
             }
             if (pressed >= 0) {
                 f->visible = false; // close now so the overlay stops drawing it
-                g_pending.push_back({f, false, std::string(), pressed});
+                g_pending.push_back({f->obj, f->generation, false, std::string(), pressed});
             }
         }
         nk_end(g_ctx);
@@ -226,18 +233,28 @@ void draw(SDL_Window* win) {
     }
 }
 
+void begin_frame() { g_drawn_in_frame = false; }
+void present_idle(SDL_Window* win) {
+    if (!g_drawn_in_frame && active()) {
+        draw(win);
+        SDL_GL_SwapWindow(win);
+    }
+}
+
 void pump(Cpu& cpu) {
     std::vector<Pending> todo;
     todo.swap(g_pending); // a listener may open another control
     for (const Pending& p : todo) {
-        if (!p.field) {
-            continue;
+        hle::EditField* field = nullptr;
+        for (auto* current : hle::ui_fields()) {
+            if (current->obj == p.object && current->generation == p.generation) { field = current; break; }
         }
+        if (!field) continue;
         if (p.set_text) {
-            p.field->text.clear(); // ui_set_text ignores a no-op change
-            hle::ui_set_text(cpu, *p.field, p.text);
+            field->text.clear(); // ui_set_text ignores a no-op change
+            hle::ui_set_text(cpu, *field, p.text);
         } else {
-            hle::ui_commit(cpu, *p.field, p.pressed);
+            hle::ui_commit(cpu, *field, p.pressed);
         }
     }
 }

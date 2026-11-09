@@ -597,6 +597,82 @@ void compact_canvas_test(Cpu& cpu, SDL_Window* window) {
 #endif
 } // namespace
 
+void egl_test(Cpu& cpu) {
+    const uint32_t configs = cpu.alloc(8), count = cpu.alloc(4), value = cpu.alloc(4);
+    cpu.write_u32(configs, 0xfeed);
+    call(cpu, "sglGetConfigs", {1, 0, 0, count});
+    require(cpu.read_u32(count) == 1, "EGL config count query failed");
+    call(cpu, "sglGetConfigs", {1, configs, 0, count});
+    require(cpu.read_u32(configs) == 0xfeed, "EGL wrote beyond zero config capacity");
+    call(cpu, "sglGetConfigs", {1, configs, 1, count});
+    require(cpu.read_u32(configs) == 1, "EGL config enumeration failed");
+    call(cpu, "sglGetConfigAttrib", {1, 1, 0x3040, value});
+    require(cpu.read_u32(value) == 5, "EGL config cannot select GLES 1 and 2");
+    int selected = 0;
+    hle::gl_set_context_factory([&](int version) { selected = version; return true; });
+    call(cpu, "sglCreateContext", {1, 1, 0, 0});
+    require(selected == 1 && cpu.reg(UC_ARM_REG_R0), "EGL default context did not select GLES 1");
+    const uint32_t attributes[] = {0x3098, 2, 0x3038};
+    call(cpu, "sglCreateContext", {1, 1, 0, copy(cpu, attributes, sizeof attributes)});
+    require(selected == 2 && cpu.reg(UC_ARM_REG_R0), "EGL explicit context did not select GLES 2");
+    hle::gl_set_context_factory([](int) { return false; });
+    call(cpu, "sglCreateContext", {1, 1, 0, 0});
+    require(cpu.reg(UC_ARM_REG_R0) == 0, "EGL context failure was reported as success");
+    hle::gl_set_context_factory({});
+}
+void fixed_test(Cpu& cpu) {
+    call(cpu, "glViewport_1", {0, 0, 64, 64});
+    call(cpu, "glDisable_1", {GL_TEXTURE_2D});
+    call(cpu, "glDisable_1", {GL_BLEND});
+    call(cpu, "glDisable_1", {GL_DEPTH_TEST});
+    call(cpu, "glClearColorx_1", {65536, 0, 0, 65536});
+    call(cpu, "glClear_1", {GL_COLOR_BUFFER_BIT});
+    call(cpu, "glMatrixMode_1", {GL_PROJECTION});
+    const int32_t identity[] = {65536,0,0,0, 0,65536,0,0, 0,0,65536,0, 0,0,0,65536};
+    call(cpu, "glLoadMatrixx_1", {copy(cpu, identity, sizeof identity)});
+    call(cpu, "glMatrixMode_1", {GL_MODELVIEW});
+    call(cpu, "glLoadMatrixx_1", {copy(cpu, identity, sizeof identity)});
+    call(cpu, "glRotatex_1", {180 * 65536, 0, 0, 65536});
+    call(cpu, "glScalex_1", {32768, 32768, 65536});
+    call(cpu, "glColor4x_1", {0, 65536, 0, 65536});
+    const int32_t vertices[] = {-65536,-65536, 65536,-65536, -65536,65536, 65536,65536};
+    call(cpu, "glBindBuffer_1", {GL_ARRAY_BUFFER, 0});
+    call(cpu, "glVertexPointer_1", {2, 0x140C, 0, copy(cpu, vertices, sizeof vertices)});
+    call(cpu, "glEnableClientState_1", {GL_VERTEX_ARRAY});
+    call(cpu, "glDisableClientState_1", {GL_COLOR_ARRAY});
+    call(cpu, "glDrawArrays_1", {GL_TRIANGLE_STRIP, 0, 4});
+    require(glGetError() == GL_NO_ERROR, "fixed-point draw generated a GL error");
+    pixel(32, 32, {0, 255, 0});
+    pixel(2, 2, {255, 0, 0});
+    const uint32_t buffer = cpu.alloc(4);
+    call(cpu, "glGenBuffers_1", {1, buffer});
+    call(cpu, "glBindBuffer_1", {GL_ARRAY_BUFFER, cpu.read_u32(buffer)});
+    call(cpu, "glBufferData_1", {GL_ARRAY_BUFFER, sizeof vertices, copy(cpu, vertices, sizeof vertices), GL_STATIC_DRAW});
+    call(cpu, "glVertexPointer_1", {2, 0x140C, 0, 0});
+    call(cpu, "glDrawArrays_1", {GL_TRIANGLE_STRIP, 0, 4});
+    require(glGetError() == GL_NO_ERROR, "fixed-point VBO generated a GL error");
+    pixel(32, 32, {0, 255, 0});
+    call(cpu, "glBindBuffer_1", {GL_ARRAY_BUFFER, 0});
+}
+
+void orientation_test(Cpu& cpu) {
+    const uint32_t form = cpu.alloc(32), listener = cpu.make_stub_object(16);
+    cpu.write_u32(listener, cpu.make_vtable(3, {{2, [](Cpu& c) { c.write_u32(c.arg32(1) + 20, c.arg32(2)); }}}));
+    call(cpu, "_ZN3Osp2Ui8Controls4Form27AddOrientationEventListenerERKNS0_25IOrientationEventListenerE", {form, listener});
+    call(cpu, "_ZN3Osp2Ui8Controls5Frame14SetOrientationENS0_11OrientationE", {form, 2});
+    require(cpu.reg(UC_ARM_REG_R0) == 0 && cpu.read_u32(form + 20) == 0, "orientation callback ran inside SetOrientation");
+    hle::user_event_pump(cpu);
+    require(cpu.read_u32(form + 20) == 2, "orientation listener was not notified");
+    const uint32_t descriptor = cpu.alloc(32);
+    call(cpu, "_ZN3Osp8Graphics6Canvas4LockERNS0_10BufferInfoEl", {0, descriptor, 0});
+    require(cpu.read_u32(descriptor + 4) == 800 && cpu.read_u32(descriptor + 8) == 480 &&
+            cpu.read_u32(descriptor + 12) == 3200 && cpu.read_u32(descriptor + 16) == 32 &&
+            cpu.read_u32(descriptor + 24) != 0, "Canvas lock did not describe the landscape surface");
+    int x = 0, y = 0;
+    hle::gl_map_touch(200, 100, 800, 480, x, y);
+    require(x == 200 && y == 100, "landscape presentation and touch coordinates disagree");
+}
+
 int main(int argc, char** argv) {
     try {
         require(argc == 3, "expected API version and float ABI");
@@ -646,12 +722,15 @@ int main(int argc, char** argv) {
         // Cpu's idle SP leaves 16 bytes; texture calls pass five stack args.
         cpu.set_reg(UC_ARM_REG_SP, cpu.reg(UC_ARM_REG_SP) - 256);
         cpu.hard_float = std::string(argv[2]) == "hard";
+        egl_test(cpu);
+        if (api == 1) fixed_test(cpu);
         render(cpu, api);
         format_query_test(cpu, api);
         resize_test(cpu, api, window);
 #ifndef BADA_TEST_DESKTOP
         if (api == 2) compact_canvas_test(cpu, window);
 #endif
+        orientation_test(cpu);
         SDL_GL_DeleteContext(context);
         SDL_DestroyWindow(window);
         SDL_Quit();

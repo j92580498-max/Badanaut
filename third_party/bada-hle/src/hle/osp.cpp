@@ -1,5 +1,7 @@
 #include "cpu.h"
 #include "dispatch.h"
+#include "gl_api.h"
+#include "guest.h"
 #include <SDL2/SDL.h>
 #include <algorithm>
 #include <cctype>
@@ -25,20 +27,29 @@ namespace {
 //   +12 __pValue    (mchar* = wchar_t*, 2-byte UTF-16, NUL-terminated)
 // Size 16. mchar is 2 bytes (Tag_ABI_PCS_wchar_t: 2).
 constexpr uint32_t STR_VPTR = 0, STR_CAP = 4, STR_LEN = 8, STR_PVAL = 12;
-constexpr int CANVAS_WIDTH = 480;
-constexpr int CANVAS_HEIGHT = 640;
+int g_canvas_width = 480, g_canvas_height = 640;
+uint32_t g_orientation = 1;
+bool g_frame_oriented = false;
+std::map<uint32_t, uint32_t> g_orientation_listeners;
+struct OrientationEvent { uint32_t source, listener, orientation; };
+std::deque<OrientationEvent> g_orientation_events;
 uint32_t g_canvas_buffer = 0;
 
 void canvas_lock(Cpu& c) {
     if (!g_canvas_buffer) {
-        g_canvas_buffer = c.alloc(CANVAS_WIDTH * CANVAS_HEIGHT * 4, 4);
+        g_canvas_buffer = c.alloc(g_canvas_width * g_canvas_height * 4, 4);
         if (g_canvas_buffer) {
-            std::vector<uint8_t> clear((size_t)CANVAS_WIDTH * CANVAS_HEIGHT * 4, 0);
+            std::vector<uint8_t> clear((size_t)g_canvas_width * g_canvas_height * 4, 0);
             c.write_mem(g_canvas_buffer, clear.data(), (uint32_t)clear.size());
         }
     }
     uint32_t info = c.arg32(1);
     if (info && g_canvas_buffer) {
+        c.write_u32(info + 4, g_canvas_width);
+        c.write_u32(info + 8, g_canvas_height);
+        c.write_u32(info + 12, g_canvas_width * 4);
+        c.write_u32(info + 16, 32);
+        c.write_u32(info + 20, 2); // PIXEL_FORMAT_ARGB8888
         c.write_u32(info + 24, g_canvas_buffer);
     }
     c.set_ret32(g_canvas_buffer ? 0 : 1);
@@ -48,7 +59,7 @@ void canvas_unlock(Cpu& c) { c.set_ret32(0); }
 
 void canvas_show(Cpu& c) {
     if (g_canvas_buffer) {
-        hle::gl_present_canvas(c, g_canvas_buffer, CANVAS_WIDTH, CANVAS_HEIGHT);
+        hle::gl_present_canvas(c, g_canvas_buffer, g_canvas_width, g_canvas_height);
     }
     c.set_ret32(0);
 }
@@ -165,6 +176,10 @@ void str_clear(Cpu& c) {
 }
 void str_getlength(Cpu& c) { c.set_ret32(c.read_u32(c.arg32(0) + STR_LEN)); }
 void str_ispointer(Cpu& c) { c.set_ret32(c.read_u32(c.arg32(0) + STR_PVAL)); } // GetPointer()
+void str_index(Cpu& c) {
+    const uint32_t object = c.arg32(0), index = c.arg32(1);
+    c.set_ret32(index < c.read_u32(object + STR_LEN) ? c.read_u32(object + STR_PVAL) + index * 2 : 0);
+}
 
 // Osp::Base::String::~String()  -- bump allocator: nothing to free
 void str_dtor(Cpu& c) { c.set_ret32(0); }
@@ -366,6 +381,7 @@ void app_getinstance(Cpu& c) { c.set_ret32(c.app_instance); }
 uint32_t g_touch_listener = 0, g_touch_source = 0;
 std::map<uint32_t, bool> g_touch_multipoint;
 std::map<uint32_t, uint32_t> g_touch_event_ids;
+std::map<uint32_t, std::pair<int, int>> g_touch_event_positions;
 void touch_setmultipoint(Cpu& c) {
     g_touch_multipoint[c.arg32(1)] = c.arg32(2) != 0;
     c.set_ret32(0);
@@ -377,6 +393,14 @@ void touch_ismultipoint(Cpu& c) {
 void touch_getpointid(Cpu& c) {
     const auto found = g_touch_event_ids.find(c.arg32(0));
     c.set_ret32(found == g_touch_event_ids.end() ? 0 : found->second);
+}
+void touch_getposition(Cpu& c) {
+    const uint32_t output = c.arg32(0);
+    const auto position = g_touch_event_positions.find(c.arg32(1));
+    c.write_u32(output, c.noop_vtable());
+    c.write_u32(output + 4, position == g_touch_event_positions.end() ? 0 : position->second.first);
+    c.write_u32(output + 8, position == g_touch_event_positions.end() ? 0 : position->second.second);
+    c.set_ret32(output);
 }
 void control_addtouchlistener(Cpu& c) {
     if (!g_touch_listener) {
@@ -425,6 +449,24 @@ void settinginfo_getvalue_bool(Cpu& c) {
     c.write_u32(c.arg32(1), 0);
     c.set_ret32(0);
 }
+void runtimeinfo_getvalue_int(Cpu& c) {
+    const auto units = string_read(c, c.arg32(0));
+    const std::string key(units.begin(), units.end());
+    uint32_t value;
+    if (key == "AllocatedMemory") value = c.allocated_memory();
+    else if (key == "AvailableMemory") value = guest::HEAP_SIZE - c.allocated_memory();
+    else { c.set_ret32(0xa0000000u + 1909); return; }
+    c.write_u32(c.arg32(1), value);
+    c.set_ret32(0);
+}
+void systeminfo_getvalue_string(Cpu& c) {
+    const auto units = string_read(c, c.arg32(0));
+    const std::string key(units.begin(), units.end());
+    if (key != "ModelName") { c.set_ret32(0xa0000000u + 1909); return; }
+    const std::string model = "GT-S8500";
+    string_construct(c, c.arg32(1), std::vector<uint16_t>(model.begin(), model.end()));
+    c.set_ret32(0);
+}
 // LocaleManager::GetSystemLocale() -> returns Locale by value (sret: r0=&ret)
 void locale_get_system(Cpu& c) {
     uint32_t ret = c.arg32(0);
@@ -471,8 +513,24 @@ void timer_cancel(Cpu& c) {
 void control_getbounds(Cpu& c) {
     c.write_u32(c.arg32(1), 0);
     c.write_u32(c.arg32(2), 0); // x, y
-    c.write_u32(c.arg32(3), 480);
-    c.write_u32(c.arg32(4), 800); // width, height
+    c.write_u32(c.arg32(3), g_frame_oriented ? g_canvas_width : 480);
+    c.write_u32(c.arg32(4), g_frame_oriented ? g_canvas_height : 800); // width, height
+    c.set_ret32(0);
+}
+void frame_setorientation(Cpu& c) {
+    const uint32_t orientation = c.arg32(1);
+    if (orientation < 1 || orientation > 4) { c.set_ret32(0xa0000000u + 1909); return; }
+    if (!g_frame_oriented || g_orientation != orientation) {
+        g_frame_oriented = true;
+        g_orientation = orientation;
+        g_canvas_width = orientation == 2 || orientation == 4 ? 800 : 480;
+        g_canvas_height = orientation == 2 || orientation == 4 ? 480 : 800;
+        c.free(g_canvas_buffer);
+        g_canvas_buffer = 0;
+        hle::gl_set_surface_size(g_canvas_width, g_canvas_height);
+        for (const auto& entry : g_orientation_listeners)
+            g_orientation_events.push_back({entry.first, entry.second, orientation});
+    }
     c.set_ret32(0);
 }
 
@@ -480,8 +538,16 @@ void control_getbounds(Cpu& c) {
 
 namespace hle {
 void register_osp() {
+    g_orientation = 1;
+    g_frame_oriented = false;
+    g_canvas_width = 480;
+    g_canvas_height = 640;
+    g_canvas_buffer = 0;
+    g_orientation_events.clear();
+    g_orientation_listeners.clear();
     g_touch_multipoint.clear();
     g_touch_event_ids.clear();
+    g_touch_event_positions.clear();
     g_touch_listener = g_touch_source = 0;
     register_handler("_ZN3Osp4Base6StringC1EPKw", str_ctor_wchar); // String(wchar_t const*)
     register_handler("_ZN3Osp4Base6StringC2EPKw", str_ctor_wchar);
@@ -489,6 +555,8 @@ void register_osp() {
     register_handler("_ZN3Osp4Base6StringC2EPKc", str_ctor_char);
     register_handler("_ZN3Osp4Base6StringC1Ev", str_ctor_empty); // String()
     register_handler("_ZN3Osp4Base6StringC2Ev", str_ctor_empty);
+    register_handler("_ZNK3Osp4Base6StringixEi", str_index);
+    register_handler("_ZNK3Osp4Base6String7IsEmptyEv", [](Cpu& c) { c.set_ret32(c.read_u32(c.arg32(0) + STR_LEN) == 0); });
     register_handler("_ZN3Osp4Base6StringC1ERKS1_", str_ctor_copy); // String(const String&)
     register_handler("_ZN3Osp4Base6StringC2ERKS1_", str_ctor_copy);
     register_handler("_ZN3Osp4Base6String6AppendERKS1_", str_append);
@@ -513,6 +581,8 @@ void register_osp() {
     register_handler("_ZNK3Osp3App11Application11GetAppFrameEv", app_getappframe);
     register_handler("_ZN3Osp3App11Application11GetInstanceEv", app_getinstance);
     register_handler("_ZNK3Osp2Ui7Control13SendUserEventElPKNS_4Base10Collection5IListE",
+                     control_senduserevent);
+    register_handler("_ZN3Osp3App11Application13SendUserEventElPKNS_4Base10Collection5IListE",
                      control_senduserevent);
     register_handler("_ZN3Osp8Graphics9RectangleC1Eiiii", rect_ctor4);
     register_handler("_ZN3Osp8Graphics9RectangleC2Eiiii", rect_ctor4);
@@ -545,6 +615,12 @@ void register_osp() {
     // Form::SetOrientation(Orientation) -- FruitNinja requests LANDSCAPE; the
     // engine does its own rotation, so this only affects input mapping: no-op.
     register_handler("_ZN3Osp2Ui8Controls4Form14SetOrientationENS0_11OrientationE", ret_ok);
+    register_handler("_ZN3Osp2Ui8Controls5Frame14SetOrientationENS0_11OrientationE", frame_setorientation);
+    register_handler("_ZN3Osp2Ui8Controls4Form20GetOrientationStatusEv", [](Cpu& c) { c.set_ret32(g_orientation); });
+    register_handler("_ZN3Osp2Ui8Controls4Form27AddOrientationEventListenerERKNS0_25IOrientationEventListenerE", [](Cpu& c) {
+        g_orientation_listeners[c.arg32(0)] = c.arg32(1);
+        c.set_ret32(0);
+    });
 
     // Osp::Ui::Touch + Control touch-listener APIs (Asphalt 5 registers a Touch
     // listener and requires multipoint; FruitNinja drives touch via the GlesForm
@@ -557,11 +633,40 @@ void register_osp() {
     register_handler("_ZN3Osp2Ui5Touch20SetMultipointEnabledERKNS0_7ControlEb", touch_setmultipoint);
     register_handler("_ZNK3Osp2Ui5Touch19IsMultipointEnabledERKNS0_7ControlE", touch_ismultipoint);
     register_handler("_ZNK3Osp2Ui14TouchEventInfo10GetPointIdEv", touch_getpointid);
+    register_handler("_ZNK3Osp2Ui14TouchEventInfo18GetCurrentPositionEv", touch_getposition);
 
-    // SystemTime ticks (animation/physics clock) and Thread::Sleep (frame pacing
-    // is handled by the host loop, so sleeping is a no-op).
+    // Workers park at Sleep/Yield/Join or a semaphore wait, allowing the host
+    // to deliver UI events before restoring their ARM/VFP context.
     register_handler("_ZN3Osp6System10SystemTime8GetTicksERx", systemtime_getticks);
-    register_handler("_ZN3Osp4Base7Runtime6Thread5SleepEl", ret_ok);
+    register_handler("_ZN3Osp4Base7Runtime6ThreadC1Ev", stub_ctor);
+    register_handler("_ZN3Osp4Base7Runtime6ThreadC2Ev", stub_ctor);
+    register_handler("_ZN3Osp4Base7Runtime6Thread9ConstructERNS1_9IRunnableElNS1_14ThreadPriorityE", [](Cpu& c) {
+        c.set_ret32(c.construct_thread(c.arg32(0), c.arg32(1), c.arg32(2)) ? 0 : 0xa0000000u + 1909);
+    });
+    register_handler("_ZN3Osp4Base7Runtime6Thread5StartEv", [](Cpu& c) {
+        c.set_ret32(c.start_thread(c.arg32(0)) ? 0 : 0xa0000000u + 1926);
+    });
+    register_handler("_ZN3Osp4Base7Runtime6Thread4JoinEv", [](Cpu& c) { c.set_ret32(c.join_thread(c.arg32(0)) ? 0 : 0xa0000000u + 1926); });
+    register_handler("_ZN3Osp4Base7Runtime6ThreadD1Ev", [](Cpu& c) { c.destroy_thread(c.arg32(0)); c.set_ret32(0); });
+    register_handler("_ZN3Osp4Base7Runtime6ThreadD2Ev", [](Cpu& c) { c.destroy_thread(c.arg32(0)); c.set_ret32(0); });
+    register_handler("_ZN3Osp4Base7Runtime6Thread16GetCurrentThreadEv", [](Cpu& c) { c.set_ret32(c.current_thread()); });
+    register_handler("_ZN3Osp4Base7Runtime6Thread5SleepEl", [](Cpu& c) {
+        const int32_t ms = c.arg32(0);
+        c.set_ret32(0);
+        c.sleep_thread(std::max(0, ms));
+    });
+    register_handler("_ZN3Osp4Base7Runtime6Thread5YieldEv", [](Cpu& c) { c.set_ret32(0); c.sleep_thread(0); });
+    register_handler("_ZN3Osp4Base7Runtime6Thread4ExitEi", [](Cpu& c) { c.exit_thread(); });
+    register_handler("_ZN3Osp4Base7Runtime9SemaphoreC1Ev", stub_ctor);
+    register_handler("_ZN3Osp4Base7Runtime9SemaphoreC2Ev", stub_ctor);
+    register_handler("_ZN3Osp4Base7Runtime9Semaphore6CreateEi", [](Cpu& c) {
+        if (static_cast<int32_t>(c.arg32(1)) < 0) { c.set_ret32(0xa0000000u + 1909); return; }
+        c.create_semaphore(c.arg32(0), c.arg32(1)); c.set_ret32(0);
+    });
+    register_handler("_ZNK3Osp4Base7Runtime9Semaphore7AcquireEl", [](Cpu& c) {
+        c.set_ret32(c.acquire_semaphore(c.arg32(0), c.arg32(1)) ? 0 : 0xa0000000u + 3001);
+    });
+    register_handler("_ZNK3Osp4Base7Runtime9Semaphore7ReleaseEv", [](Cpu& c) { c.release_semaphore(c.arg32(0)); c.set_ret32(0); });
 
     // Osp::Media::Player (no-op video that reports a short clip then end-of-clip).
     register_handler("_ZN3Osp5Media6PlayerC1Ev", player_ctor);
@@ -584,6 +689,8 @@ void register_osp() {
     register_handler("_ZN3Osp6System12PowerManager22SetScreenEventListenerERNS_24IScreenEventListenerE", ret_ok);
     register_handler("_ZN3Osp6System12PowerManager17KeepScreenOnStateEbb", ret_ok);
     register_handler("_ZN3Osp6System11SettingInfo8GetValueERKNS_4Base6StringERb", settinginfo_getvalue_bool);
+    register_handler("_ZN3Osp6System11RuntimeInfo8GetValueERKNS_4Base6StringERi", runtimeinfo_getvalue_int);
+    register_handler("_ZN3Osp6System10SystemInfo8GetValueERKNS_4Base6StringERS3_", systeminfo_getvalue_string);
 
     // Locales (report English/US)
     register_handler("_ZN3Osp7Locales13LocaleManagerC1Ev", stub_ctor);
@@ -700,13 +807,21 @@ bool touch_multipoint_enabled(uint32_t source) {
     const auto found = g_touch_multipoint.find(source);
     return found != g_touch_multipoint.end() && found->second;
 }
-void touch_event_set(uint32_t object, uint32_t point_id) {
+void touch_event_set(uint32_t object, uint32_t point_id, int x, int y) {
     g_touch_event_ids[object] = point_id;
+    g_touch_event_positions[object] = {x, y};
 }
 
 // Per frame (main/GL thread): hand queued user events to the app's
 // OnUserEventReceivedN(requestId, pArgs) override.
 void user_event_pump(Cpu& cpu) {
+    while (!g_orientation_events.empty()) {
+        const auto event = g_orientation_events.front();
+        g_orientation_events.pop_front();
+        const uint32_t callback = cpu.read_u32(cpu.read_u32(event.listener) + 8);
+        uint32_t result = 0;
+        if (callback) cpu.run_guest(callback, {event.listener, event.source, event.orientation}, result);
+    }
     if (g_user_events.empty() || !cpu.app_instance) {
         return;
     }

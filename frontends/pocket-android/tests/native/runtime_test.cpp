@@ -110,6 +110,7 @@ void buffer_test(Cpu& cpu) {
     call(cpu, "_ZN3Osp4Base10BufferBase11SetPositionEi", {buffer, 8});
     call(cpu, "_ZN3Osp4Base10BufferBase4FlipENS0_10PositionToE", {buffer, 0});
     require(call(cpu, "_ZNK3Osp4Base10BufferBase8GetLimitEv", {buffer}) == 8, "Flip did not shorten the buffer");
+    require(call(cpu, "_ZNK3Osp4Base10BufferBase11GetCapacityEv", {buffer}) == 16, "Flip changed storage capacity");
     call(cpu, "_ZN3Osp4Base10BufferBase6RewindEv", {buffer});
     require(call(cpu, "_ZNK3Osp4Base10BufferBase8GetLimitEv", {buffer}) == 8, "Rewind changed the limit");
     call(cpu, "_ZN3Osp4Base10BufferBase5ClearEv", {buffer});

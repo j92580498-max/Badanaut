@@ -4,6 +4,10 @@ import android.os.Bundle
 import android.os.Build
 import android.view.WindowManager
 import android.widget.Toast
+import android.widget.EditText
+import android.app.AlertDialog
+import android.text.InputFilter
+import androidx.annotation.Keep
 import java.io.File
 import org.libsdl.app.SDLActivity
 import androidx.core.view.WindowCompat
@@ -18,6 +22,47 @@ class BadaActivity : SDLActivity() {
 
     private var installation: BadaAssets.Installation? = null
     private var nativeLog: File? = null
+    private var textInputDialog: AlertDialog? = null
+
+    @Keep
+    fun showBadaTextInput(session: Long, initial: String, limit: Int) {
+        runOnUiThread {
+            if (isFinishing || isDestroyed) {
+                nativeTextInputResult(session, "", true)
+                return@runOnUiThread
+            }
+            textInputDialog?.dismiss()
+            val input = EditText(this).apply {
+                setSingleLine(true)
+                if (limit > 0) filters = arrayOf(InputFilter.LengthFilter(limit))
+                setText(initial)
+                setSelection(text.length)
+            }
+            textInputDialog = AlertDialog.Builder(this)
+                .setTitle(title)
+                .setView(input)
+                .setPositiveButton(android.R.string.ok) { _, _ ->
+                    nativeTextInputResult(session, input.text.toString(), false)
+                }
+                .setNegativeButton(android.R.string.cancel) { _, _ ->
+                    nativeTextInputResult(session, "", true)
+                }
+                .setOnCancelListener { nativeTextInputResult(session, "", true) }
+                .create().also { dialog ->
+                    dialog.show()
+                    input.requestFocus()
+                    dialog.window?.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_VISIBLE)
+                }
+        }
+    }
+
+    @Keep
+    fun dismissBadaTextInput() {
+        runOnUiThread { textInputDialog?.dismiss(); textInputDialog = null }
+    }
+
+    @Keep
+    private external fun nativeTextInputResult(session: Long, text: String, cancelled: Boolean)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         nativeLog = runCatching {

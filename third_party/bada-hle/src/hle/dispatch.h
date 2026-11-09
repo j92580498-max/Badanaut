@@ -4,6 +4,7 @@
 #include <string>
 
 class Cpu;
+struct ElfImage;
 
 namespace hle {
 
@@ -51,6 +52,7 @@ void set_locale(const std::string& spec); // override reported system locale (--
 // to re-enter the guest, so it's called from the frame loop (not a handler).
 void player_pump(Cpu& cpu);
 void audio_pump(Cpu& cpu); // completed PCM buffers -> guest AudioOut listener
+bool audio_configure_game(Cpu& cpu, const ElfImage& image);
 void audio_pause(bool pause);
 void audio_shutdown();
 bool byte_buffer_view(uint32_t object, uint32_t& data, uint32_t& length);

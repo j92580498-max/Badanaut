@@ -25,6 +25,7 @@
 #include <thread>
 #include <vector>
 #include <cxxopts.hpp>
+#include <cmath>
 #include <pugixml.hpp>
 #include "control.h"
 #include "cpu.h"
@@ -260,8 +261,8 @@ void feed_touch(Cpu& cpu, SDL_Window* win, int kind, int wx, int wy, uint32_t po
     }
     int ww = 800, wh = 480;
     SDL_GetWindowSize(win, &ww, &wh);
-    // Undo presentation scaling and letterboxing. The form applies any guest
-    // rotation itself (Fruit Ninja maps portrait device points to landscape).
+    // Undo host scaling, crop and presentation rotation. The form then applies
+    // its own native input convention (Fruit Ninja expects portrait points).
     int dx = 0, dy = 0;
     hle::gl_map_touch(wx, wy, ww, wh, dx, dy);
     cpu.write_u32(g_pt_obj, 0);
@@ -646,6 +647,33 @@ static std::string read_appid(const std::string& root) {
     return "";
 }
 
+static hle::SurfaceRect read_native_display(const std::string& root) {
+    pugi::xml_document doc;
+    if (!doc.load_file((root + "/Info/manifest.xml").c_str()))
+        return {0, 0, display::device_width, display::device_height};
+    const auto manifest = doc.child("Manifest");
+    const auto profile = manifest.child("DeviceProfile");
+    std::istringstream size(profile.child("ScreenSize").child_value());
+    int width = 0, height = 0;
+    char separator = 0;
+    if (size >> width >> separator >> height && (separator == 'x' || separator == 'X') &&
+        width >= 64 && width <= 4096 && height >= 64 && height <= 4096 && (size >> std::ws).eof()) {
+        display::device_width = width;
+        display::device_height = height;
+    }
+    width = display::device_width;
+    height = display::device_height;
+    auto orientation = manifest.child("Orientation");
+    if (!orientation) orientation = profile.child("Orientation");
+    std::string value;
+    std::istringstream orientation_value(orientation.child_value());
+    orientation_value >> value;
+    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char ch) { return std::tolower(ch); });
+    if ((value == "landscape" && width < height) || (value == "portrait" && width > height))
+        std::swap(width, height);
+    return {0, 0, width, height};
+}
+
 // Walk up from an exe path to the directory containing Signature.xml; if none is
 // found (a bare exe with no package), fall back to the exe's own directory.
 static std::string find_root(const std::string& exe) {
@@ -713,11 +741,7 @@ static std::string find_libstdcxx(const ElfImage& img, const std::string& root,
     return "";
 }
 
-// Bada device screen (Samsung Wave-class): 480x800 portrait. FruitNinja renders
-// 480x320 landscape, rotated 90 deg on-device. We open the real device size.
-static const int DEV_W = 480;
-static const int DEV_H = 800;
-
+// Bootstrap the guest using the native display from package/window metadata.
 int main(int argc, char** argv) {
     setbuf(stdout, nullptr); // unbuffered so piped logs appear immediately
     // CLI: bada-hle <app-dir-or-exe> [AppId] [maxFrames] [--locale xx[_CC]]
@@ -736,7 +760,7 @@ int main(int argc, char** argv) {
          cxxopts::value<std::string>()->default_value(""))   //
         ("libstdcxx", "guest libstdc++.so to map (or env BADA_LIBSTDCXX); found automatically if omitted",
          cxxopts::value<std::string>()->default_value(""))   //
-        ("resolution", "presentation size: native, 240x400, 480x800, 540x960, 720x1280, 1080x1920",
+        ("resolution", "render size: native, 240x400, 480x800, 540x960, 720x1280, 1080x1920",
          cxxopts::value<std::string>()->default_value("native"))
         ("scaling", "fit or integer", cxxopts::value<std::string>()->default_value("fit"))
         ("filter", "Canvas filtering: nearest or linear", cxxopts::value<std::string>()->default_value("nearest"))
@@ -771,6 +795,7 @@ int main(int argc, char** argv) {
         fullscreen = res["fullscreen"].as<bool>();
         vsync = res["vsync"].as<bool>();
         const auto resolution = res["resolution"].as<std::string>();
+        display::selected_resolution = resolution;
         if (resolution != "native") {
             const std::vector<std::string> presets = {"240x400", "480x800", "540x960", "720x1280", "1080x1920"};
             if (std::find(presets.begin(), presets.end(), resolution) == presets.end())
@@ -825,6 +850,7 @@ int main(int argc, char** argv) {
     }
     printf("[boot] exe=%s\n[boot] package=%s AppId=%s frames=%s\n", exe.c_str(), root.c_str(),
            appid.c_str(), max_frames ? std::to_string(max_frames).c_str() : "infinite");
+    const auto native_display = read_native_display(root);
 
     // Read imports before creating the host context: fixed-function games need
     // ES 1 on Android, while shaders and the Canvas presenter need ES 2.
@@ -843,9 +869,9 @@ int main(int argc, char** argv) {
         printf("SDL_Init: %s\n", SDL_GetError());
         return 1;
     }
+    const int gles_version = hle::gles_context_version(img.imports);
 #ifdef __ANDROID__
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_ES);
-    const int gles_version = hle::gles_context_version(img.imports);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, gles_version);
     // EGL selects the ES 1.x API with client version 1.
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
@@ -859,12 +885,11 @@ int main(int argc, char** argv) {
     Uint32 window_flags = SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI;
     if (fullscreen) window_flags |= SDL_WINDOW_FULLSCREEN_DESKTOP;
     SDL_Window* win = SDL_CreateWindow(base_title.c_str(), SDL_WINDOWPOS_CENTERED,
-                                       SDL_WINDOWPOS_CENTERED, DEV_W, DEV_H, window_flags);
+                                       SDL_WINDOWPOS_CENTERED, native_display.width, native_display.height, window_flags);
     if (!win) {
         printf("SDL_CreateWindow: %s\n", SDL_GetError());
         return 1;
     }
-    display::size_window(win, DEV_W, DEV_H);
     SDL_GLContext glctx = SDL_GL_CreateContext(win);
     if (!glctx) {
         printf("SDL_GL_CreateContext: %s\n", SDL_GetError());
@@ -872,8 +897,8 @@ int main(int argc, char** argv) {
     }
     if (SDL_GL_SetSwapInterval(vsync ? 1 : 0) != 0)
         printf("[display] swap interval unavailable: %s\n", SDL_GetError());
-    printf("[display] resolution=%dx%d scaling=%s filter=%s vsync=%d fullscreen=%d\n",
-           display::output_width, display::output_height, display::integer_scaling ? "integer" : "fit",
+    printf("[display] selected=%s scaling=%s filter=%s vsync=%d fullscreen=%d\n",
+           display::selected_resolution.c_str(), display::integer_scaling ? "integer" : "fit",
            display::smooth ? "linear" : "nearest", vsync, fullscreen);
     printf("[gl] vendor=%s renderer=%s\n", glGetString(GL_VENDOR), glGetString(GL_RENDERER));
     printf("[gl] version=%s\n", glGetString(GL_VERSION));
@@ -888,6 +913,7 @@ int main(int argc, char** argv) {
                                                                                                                               : "es/other");
     }
     hle::gl_set_window(win); // sglSwapBuffers -> SDL_GL_SwapWindow
+    hle::gl_set_surface_size(native_display.width, native_display.height, "manifest");
     overlay::init(win);
     // The app owns the swap, so the overlay draws from inside sglSwapBuffers.
     hle::gl_set_preswap([win](Cpu&) { overlay::draw(win); });
@@ -1091,6 +1117,8 @@ int main(int argc, char** argv) {
         }
     }
 
+    hle::audio_configure_game(cpu, img);
+
     // ---- Run static constructors ----
     printf("\n[boot] running %zu init_array constructors...\n", img.init_array.size());
     cpu.run_init_array();
@@ -1134,6 +1162,26 @@ int main(int argc, char** argv) {
             printf("[boot] init faulted; not entering frame loop\n");
             hle::dump_stats();
             return 0;
+        }
+
+        // Older ES1 SDKs keep a portrait GL viewport and rotate the game into
+        // it. Query their logical window dimensions without changing guest
+        // device bounds or input conventions (Fruit Ninja uses this path).
+        const uint32_t logical_width = img.resolve("_Z22GetApparentWindowWidthv");
+        const uint32_t logical_height = img.resolve("_Z23GetApparentWindowHeightv");
+        if (gles_version == 1 && logical_width && logical_height) {
+            auto window_dimension = [&](uint32_t address, float& value) {
+                uint32_t bits = 0;
+                if (!cpu.run_guest(address, {}, bits, 1'000'000)) return false;
+                if (cpu.hard_float) uc_reg_read(cpu.uc, UC_ARM_REG_S0, &value);
+                else memcpy(&value, &bits, sizeof value);
+                return std::isfinite(value) && value >= 64 && value <= 4096;
+            };
+            float width = 0, height = 0;
+            if (window_dimension(logical_width, width) && window_dimension(logical_height, height) && width != height) {
+                printf("[display] SDK logical window=%.0fx%.0f\n", width, height);
+                hle::gl_set_window_orientation(width > height);
+            }
         }
 
         // ---- Timer-driven frame loop: each frame = one OnTimerExpired -> Draw ----

@@ -8,6 +8,7 @@
 #endif
 #include "cpu.h"
 #include "hle/gl_api.h"
+#include "display.h"
 #include "pixel_accel.h"
 #include "arm_pixel_fixture.h"
 #include <array>
@@ -532,6 +533,87 @@ void resize_test(Cpu& cpu, int api, SDL_Window* window) {
     SDL_DestroyWindow(resized);
 }
 
+void rotated_window_test(Cpu& cpu, SDL_Window* window) {
+    const auto context = SDL_GL_GetCurrentContext();
+    auto* target = SDL_CreateWindow("Landscape SDK window", 0, 0, 128, 64, SDL_WINDOW_OPENGL | SDL_WINDOW_HIDDEN);
+    require(target != nullptr, SDL_GetError());
+    require(SDL_GL_MakeCurrent(target, context) == 0, SDL_GetError());
+    hle::gl_set_window(target);
+    hle::gl_set_surface_size(64, 128, "test portrait framebuffer");
+    hle::gl_set_window_orientation(true);
+    call(cpu, "glViewport_1", {0, 0, 64, 128});
+    call(cpu, "glMatrixMode_1", {GL_PROJECTION});
+    call(cpu, "glLoadIdentity_1");
+    call(cpu, "glPushMatrix_1");
+    floats(cpu, "glScalef_1", {0.5f, 0.5f, 1});
+    call(cpu, "glPopMatrix_1");
+    call(cpu, "glMatrixMode_1", {GL_MODELVIEW});
+    call(cpu, "glLoadIdentity_1");
+    const uint32_t state = cpu.alloc(64);
+    call(cpu, "glGenTextures_1", {1, state});
+    const uint32_t texture = cpu.read_u32(state);
+    call(cpu, "glBindTexture_1", {GL_TEXTURE_2D, texture});
+    call(cpu, "glTexParameteri_1", {GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST});
+    call(cpu, "glTexParameteri_1", {GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST});
+    const uint8_t texels[] = {0,255,0,255, 0,0,255,255, 255,255,0,255, 255,0,255,255};
+    call(cpu, "glTexImage2D_1", {GL_TEXTURE_2D, 0, GL_RGBA, 2, 2, 0, GL_RGBA, GL_UNSIGNED_BYTE,
+                                copy(cpu, texels, sizeof texels)});
+    const float vertices[] = {-1,-1,0,0, 1,-1,1,0, -1,1,0,1, 1,1,1,1};
+    const uint32_t points = copy(cpu, vertices, sizeof vertices);
+    call(cpu, "glVertexPointer_1", {2, GL_FLOAT, 16, points});
+    call(cpu, "glTexCoordPointer_1", {2, GL_FLOAT, 16, points + 8});
+    floats(cpu, "glColor4f_1", {1, 1, 1, 1});
+    call(cpu, "glDrawArrays_1", {GL_TRIANGLE_STRIP, 0, 4});
+    pixel(16, 8, {255, 255, 0}); pixel(112, 8, {0, 255, 0});
+    pixel(16, 56, {255, 0, 255}); pixel(112, 56, {0, 0, 255});
+    // Indexed draws must receive the same correction.
+    const uint8_t indices[] = {0, 1, 2, 3};
+    call(cpu, "glDrawElements_1", {GL_TRIANGLE_STRIP, 4, GL_UNSIGNED_BYTE, copy(cpu, indices, sizeof indices)});
+    pixel(16, 56, {255, 0, 255});
+    call(cpu, "glGetFloatv_1", {GL_PROJECTION_MATRIX, state});
+    for (int i = 0; i < 16; ++i)
+        require(cpu.read_u32(state + i * 4) == (i % 5 == 0 ? 0x3f800000u : 0u),
+                "presentation rotation changed the guest projection or matrix stack");
+    GLint mode = 0; glGetIntegerv(GL_MATRIX_MODE, &mode);
+    require(mode == GL_MODELVIEW, "presentation rotation changed the matrix mode");
+    int x = 0, y = 0;
+    hle::gl_map_touch(0, 0, 128, 64, x, y);
+    require(x == 63 && y == 0, "rotated top-left touch missed the portrait framebuffer");
+    hle::gl_map_touch(127, 63, 128, 64, x, y);
+    require(x == 0 && y == 127, "rotated bottom-right touch missed the portrait framebuffer");
+    call(cpu, "glScissor_1", {0, 0, 32, 128});
+    call(cpu, "glEnable_1", {GL_SCISSOR_TEST});
+    floats(cpu, "glClearColor_1", {1, 0, 0, 1});
+    call(cpu, "glClear_1", {GL_COLOR_BUFFER_BIT});
+    pixel(112, 8, {255, 0, 0}); pixel(112, 56, {0, 0, 255});
+    call(cpu, "glDisable_1", {GL_SCISSOR_TEST});
+    call(cpu, "glViewport_1", {0, 0, 32, 128});
+    GLint viewport[4]{}; glGetIntegerv(GL_VIEWPORT, viewport);
+    require(viewport[0] == 0 && viewport[1] == 0 && viewport[2] == 128 && viewport[3] == 32,
+            "sub-viewport did not follow the presentation rotation");
+    // Drawing to a guest FBO retains the original projection and pixel order.
+    call(cpu, "glGenTextures_1", {1, state});
+    const uint32_t offscreen_texture = cpu.read_u32(state);
+    call(cpu, "glBindTexture_1", {GL_TEXTURE_2D, offscreen_texture});
+    call(cpu, "glTexImage2D_1", {GL_TEXTURE_2D, 0, GL_RGBA, 2, 2, 0, GL_RGBA, GL_UNSIGNED_BYTE, 0});
+    call(cpu, "glGenFramebuffersOES_1", {1, state});
+    const uint32_t framebuffer = cpu.read_u32(state);
+    call(cpu, "glBindFramebufferOES_1", {GL_FRAMEBUFFER, framebuffer});
+    call(cpu, "glFramebufferTexture2DOES_1", {GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, offscreen_texture, 0});
+    call(cpu, "glBindTexture_1", {GL_TEXTURE_2D, texture});
+    call(cpu, "glViewport_1", {0, 0, 2, 2});
+    call(cpu, "glDrawArrays_1", {GL_TRIANGLE_STRIP, 0, 4});
+    pixel(0, 0, {0, 255, 0}); pixel(1, 1, {255, 0, 255});
+    cpu.write_u32(state, framebuffer);
+    call(cpu, "glDeleteFramebuffersOES_1", {1, state});
+    require(glGetError() == GL_NO_ERROR, "rotated window/FBO rendering generated a GL error");
+    hle::gl_set_window_orientation(false);
+    hle::gl_set_surface_size(64, 64, "test reset");
+    require(SDL_GL_MakeCurrent(window, context) == 0, SDL_GetError());
+    hle::gl_set_window(window);
+    SDL_DestroyWindow(target);
+}
+
 #ifndef BADA_TEST_DESKTOP
 void compact_canvas_test(Cpu& cpu, SDL_Window* window) {
     const uint32_t kernel = 0x100100;
@@ -649,6 +731,7 @@ int main(int argc, char** argv) {
         render(cpu, api);
         format_query_test(cpu, api);
         resize_test(cpu, api, window);
+        if (api == 1) rotated_window_test(cpu, window);
 #ifndef BADA_TEST_DESKTOP
         if (api == 2) compact_canvas_test(cpu, window);
 #endif

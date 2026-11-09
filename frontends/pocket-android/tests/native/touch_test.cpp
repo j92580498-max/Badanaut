@@ -2,6 +2,7 @@
 #include <SDL2/SDL.h>
 #include "cpu.h"
 #include "touch_input.h"
+#include "display.h"
 #include <cstdio>
 #include <set>
 #include <stdexcept>
@@ -124,6 +125,28 @@ void touch_test(Cpu& cpu) {
             received[1].point_id == received[2].point_id && received[1].kind == input::TouchKind::moved,
             "single-point apps lost their primary contact when a second finger lifted");
 }
+
+void display_touch_test(Cpu& cpu) {
+    constexpr const char* form_orientation = "_ZN3Osp2Ui8Controls4Form14SetOrientationENS0_11OrientationE";
+    constexpr const char* frame_orientation = "_ZN3Osp2Ui8Controls5Frame14SetOrientationENS0_11OrientationE";
+    display::fill_screen = true;
+    call(cpu, form_orientation, {cpu.alloc(16), 2}); // N.O.V.A. requests landscape.
+    int x = 0, y = 0;
+    hle::gl_map_touch(960, 540, 1920, 1080, x, y);
+    require(x == 400 && y == 240, "landscape center touch was rotated or scaled incorrectly");
+    hle::gl_map_touch(0, 0, 1920, 1080, x, y);
+    require(x == 0 && y == 15, "landscape crop was not included in touch coordinates");
+    hle::gl_map_touch(200, 120, 400, 240, x, y);
+    require(x == 400 && y == 240, "low-resolution landscape buffer changed guest coordinates");
+
+    // Rotating the Form refreshes coordinates without restarting the engine.
+    call(cpu, frame_orientation, {cpu.alloc(16), 0});
+    hle::gl_map_touch(540, 960, 1080, 1920, x, y);
+    require(x == 240 && y == 400, "portrait touch still used landscape dimensions");
+    hle::gl_map_touch(0, 0, 1080, 1920, x, y);
+    require(x == 15 && y == 0, "portrait crop was not included in touch coordinates");
+    display::fill_screen = false;
+}
 } // namespace
 
 int main() {
@@ -139,6 +162,7 @@ int main() {
         std::string error;
         require(cpu.init(image, error), error.c_str());
         touch_test(cpu);
+        display_touch_test(cpu);
         SDL_Quit();
         puts("Simultaneous SDL fingers, Bada IDs, mouse isolation and focus cancellation passed");
         return 0;

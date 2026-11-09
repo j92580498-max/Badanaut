@@ -45,6 +45,7 @@ add_library(bada-android SHARED
     "${REPO_ROOT}/third_party/pvr/PVRTDecompress.cpp"
     "${REPO_ROOT}/third_party/tlsf/tlsf.c"
     "${CMAKE_CURRENT_LIST_DIR}/gl_android.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/display_android.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/diagnostic_log.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/ui_overlay_android.cpp"
 )

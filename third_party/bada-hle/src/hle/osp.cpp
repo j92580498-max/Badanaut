@@ -1,5 +1,6 @@
 #include "cpu.h"
 #include "dispatch.h"
+#include "display.h"
 #include <SDL2/SDL.h>
 #include <algorithm>
 #include <cctype>
@@ -471,8 +472,13 @@ void timer_cancel(Cpu& c) {
 void control_getbounds(Cpu& c) {
     c.write_u32(c.arg32(1), 0);
     c.write_u32(c.arg32(2), 0); // x, y
-    c.write_u32(c.arg32(3), 480);
-    c.write_u32(c.arg32(4), 800); // width, height
+    c.write_u32(c.arg32(3), display::device_width);
+    c.write_u32(c.arg32(4), display::device_height); // native panel width, height
+    c.set_ret32(0);
+}
+
+void form_setorientation(Cpu& c) {
+    hle::gl_set_orientation(c.arg32(1));
     c.set_ret32(0);
 }
 
@@ -542,9 +548,8 @@ void register_osp() {
 
     // Control::GetBounds(int&,int&,int&,int&) const -- viewport size for Draw()
     register_handler("_ZNK3Osp2Ui7Control9GetBoundsERiS2_S2_S2_", control_getbounds);
-    // Form::SetOrientation(Orientation) -- FruitNinja requests LANDSCAPE; the
-    // engine does its own rotation, so this only affects input mapping: no-op.
-    register_handler("_ZN3Osp2Ui8Controls4Form14SetOrientationENS0_11OrientationE", ret_ok);
+    register_handler("_ZN3Osp2Ui8Controls4Form14SetOrientationENS0_11OrientationE", form_setorientation);
+    register_handler("_ZN3Osp2Ui8Controls5Frame14SetOrientationENS0_11OrientationE", form_setorientation);
 
     // Osp::Ui::Touch + Control touch-listener APIs (Asphalt 5 registers a Touch
     // listener and requires multipoint; FruitNinja drives touch via the GlesForm

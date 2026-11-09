@@ -31,12 +31,28 @@ Import a Bada ZIP and select the ARM32 firmware C++ runtime separately. The
 package/runtime formats and hard/soft-float requirements are documented in the
 [root README](../../README.md). Packages use `filesDir/bada/games/<id>` inside the new application storage. New optional metadata fields are `icon` and `last_played`.
 
-Resolution limits the presentation area in physical pixels without changing
-native device resolution or guest screen dimensions. Larger choices fit the
-available screen. Scaling and touches share the same rectangle. Canvas filtering,
+Screen resolution selects the EGL render buffer size. Hold a game, open
+**Screen resolution** in Game details and choose a preset to save it for that
+game. Settings supplies the default for games without their own choice.
+**Game default** uses the native size from the manifest and Bada Form/Frame or
+first full-surface GL viewport. Older ES1 SDK logical window dimensions also
+resolve games that rotate landscape content inside a portrait framebuffer.
+Landscape games swap the preset's width and
+height. The activity locks to the game's orientation, and the surface fills
+the available screen with uniform scaling and cropped edges. Both scaling
+modes fill the screen; whole-pixel scaling rounds up. Touches are mapped through
+the surface scale and the native crop, including each simultaneous pointer.
+The inverse presentation rotation preserves the game's own touch conventions.
+Launch logs report the selected, native, requested and actually applied sizes.
+Canvas filtering,
 vsync and fullscreen options are passed to the native engine at launch. Fullscreen
 is optional; the app uses normal system bars otherwise. The launch log remains
 available from the shared Settings screen.
 
+Game volume buttons control Android's media stream. The recognized Megal/Bada
+audio path used by N.O.V.A. compensates for its native master-volume attenuation
+before the guest mixes its sounds. Its saved volume sliders and mute still work;
+the PCM output for other games keeps unity gain. The applied master gain is logged.
+
 The native probes cover GLES pixels, timers, audio, ABI helpers, acceleration,
-logging, desktop scaling and Android output limits. See `tests/native/`.
+logging, rotation, desktop scaling and Android buffer sizes. See `tests/native/`.

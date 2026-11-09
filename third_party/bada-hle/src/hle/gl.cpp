@@ -40,6 +40,48 @@ GLuint g_framebuffer = 0;
 GLint g_viewport[4] = {0, 0, 480, 800};
 GLint g_scissor[4] = {};
 bool g_scissor_set = false;
+int g_logical_landscape = -1;
+
+void rotate_matrix(GLfloat* matrix, int turns) {
+    for (int turn = 0; turn < (turns & 3); ++turn) {
+        for (int column = 0; column < 4; ++column) {
+            const GLfloat x = matrix[column * 4], y = matrix[column * 4 + 1];
+            matrix[column * 4] = -y;
+            matrix[column * 4 + 1] = x;
+        }
+    }
+}
+
+// Correct only default-framebuffer draws. Restoring the projection immediately
+// preserves guest matrix queries/stacks and offscreen framebuffer rendering.
+struct PresentationProjection {
+    bool active = !g_framebuffer && display::rotation != 0;
+    GLint mode = GL_MODELVIEW;
+    GLfloat original[16]{};
+    PresentationProjection() {
+        if (!active) return;
+        GLfloat rotated[16];
+        glGetIntegerv(GL_MATRIX_MODE, &mode);
+        glGetFloatv(GL_PROJECTION_MATRIX, original);
+        std::copy(original, original + 16, rotated);
+        rotate_matrix(rotated, display::rotation);
+        glMatrixMode(GL_PROJECTION);
+        glLoadMatrixf(rotated);
+        glMatrixMode(mode);
+    }
+    ~PresentationProjection() {
+        if (!active) return;
+        glMatrixMode(GL_PROJECTION);
+        glLoadMatrixf(original);
+        glMatrixMode(mode);
+    }
+};
+
+hle::SurfaceRect logical_surface() {
+    const bool swap = display::rotation & 1;
+    return {0, 0, swap ? g_surface_height : g_surface_width,
+                  swap ? g_surface_width : g_surface_height};
+}
 #ifdef BADA_GLES_BACKEND
 // ES 1.1 only accepts STATIC_DRAW and DYNAMIC_DRAW buffer usage.
 constexpr GLenum client_buffer_usage = GL_DYNAMIC_DRAW;
@@ -57,15 +99,24 @@ hle::SurfaceRect host_rect(const GLint* rectangle) {
     if (g_framebuffer || !g_window) return {rectangle[0], rectangle[1], rectangle[2], rectangle[3]};
     int width = 0, height = 0;
     SDL_GL_GetDrawableSize(g_window, &width, &height);
-    const auto area = display::content_rect(g_surface_width, g_surface_height, width, height);
+    const bool swap = display::rotation & 1;
+    const int native_width = swap ? g_surface_height : g_surface_width;
+    const int native_height = swap ? g_surface_width : g_surface_height;
+    const auto area = display::content_rect(native_width, native_height, width, height);
     if (!area.width || !area.height) return {rectangle[0], rectangle[1], rectangle[2], rectangle[3]};
-    const double sx = static_cast<double>(area.width) / g_surface_width;
-    const double sy = static_cast<double>(area.height) / g_surface_height;
-    const int left = static_cast<int>(std::lround(rectangle[0] * sx));
-    const int bottom = static_cast<int>(std::lround(rectangle[1] * sy));
+    hle::SurfaceRect rotated{rectangle[0], rectangle[1], rectangle[2], rectangle[3]};
+    int source_height = g_surface_height, source_width = g_surface_width;
+    for (int turn = 0; turn < display::rotation; ++turn) {
+        rotated = {source_height - rotated.y - rotated.height, rotated.x, rotated.height, rotated.width};
+        std::swap(source_width, source_height);
+    }
+    const double sx = static_cast<double>(area.width) / native_width;
+    const double sy = static_cast<double>(area.height) / native_height;
+    const int left = static_cast<int>(std::lround(rotated.x * sx));
+    const int bottom = static_cast<int>(std::lround(rotated.y * sy));
     return {area.x + left, area.y + bottom,
-        static_cast<int>(std::lround((static_cast<double>(rectangle[0]) + rectangle[2]) * sx)) - left,
-        static_cast<int>(std::lround((static_cast<double>(rectangle[1]) + rectangle[3]) * sy)) - bottom};
+        static_cast<int>(std::lround((static_cast<double>(rotated.x) + rotated.width) * sx)) - left,
+        static_cast<int>(std::lround((static_cast<double>(rotated.y) + rotated.height) * sy)) - bottom};
 }
 
 void apply_viewport() {
@@ -552,20 +603,16 @@ void g1_getpointerv(Cpu& c) {
     c.write_u32(c.arg32(1), pointer);
 }
 void g1_shademodel(Cpu& c) { glShadeModel(c.arg32(0)); }
-// Fit the window to the game's first full-surface viewport, so orientation +
-// resolution follow the binary. FruitNinja's InitGL reads portrait bounds
-// (480x800) but swaps them into glViewport(0,0,800,480) -> landscape; GlesCube
-// uses glViewport(0,0,480,800) -> portrait. We size the window to whatever the
-// binary actually sets, so both come out upright with no extra rotation.
+// The first full-surface viewport reveals the guest framebuffer dimensions.
+// Some ES1 SDKs rotate their landscape window inside a portrait framebuffer;
+// their logical window orientation is resolved separately after initialization.
 bool g_window_fit = false;
 void fit_window(GLint x, GLint y, GLsizei w, GLsizei h) {
     if (g_window_fit || !g_window || x || y || w < 64 || h < 64) {
         return;
     }
     g_window_fit = true;
-    g_surface_width = w;
-    g_surface_height = h;
-    display::size_window(g_window, w, h);
+    hle::gl_set_surface_size(w, h, "GL viewport");
 }
 void g1_viewport(Cpu& c) {
     gl_viewport(c);
@@ -952,7 +999,10 @@ void g1_drawarrays(Cpu& c) {
     GLint save_abuf = 0;
     glGetIntegerv(GL_ARRAY_BUFFER_BINDING, &save_abuf);
     ff_bind_all(c, f + n);
-    glDrawArrays(m, f, n);
+    {
+        PresentationProjection projection;
+        glDrawArrays(m, f, n);
+    }
     host<bindfn>("glBindBuffer")(GL_ARRAY_BUFFER, (GLuint)save_abuf); // restore guest binding
 }
 void g1_drawelements(Cpu& c) {
@@ -991,7 +1041,10 @@ void g1_drawelements(Cpu& c) {
         host<bindfn>("glBindBuffer")(GL_ELEMENT_ARRAY_BUFFER, 0);
         host_idx = idx.data();
     }
-    glDrawElements(m, n, t, host_idx);
+    {
+        PresentationProjection projection;
+        glDrawElements(m, n, t, host_idx);
+    }
     // Restore the guest's buffer bindings (ff_bind/our client path mutate them).
     host<bindfn>("glBindBuffer")(GL_ARRAY_BUFFER, (GLuint)save_abuf);
     host<bindfn>("glBindBuffer")(GL_ELEMENT_ARRAY_BUFFER, (GLuint)guest_ebo);
@@ -1043,6 +1096,16 @@ void egl_swapbuffers(Cpu& c) {
         g_preswap(c); // the app owns the swap, so this is the only seam for it
     }
     if (g_window) {
+        int width = 0, height = 0;
+        SDL_GL_GetDrawableSize(g_window, &width, &height);
+        static int applied_width = 0, applied_height = 0;
+        if (width != applied_width || height != applied_height) {
+            applied_width = width; applied_height = height;
+            const auto native = logical_surface();
+            printf("[display] selected=%s native=%dx%d render=%dx%d applied=%dx%d rotation=%d\n",
+                display::selected_resolution.c_str(), native.width, native.height,
+                g_surface_width, g_surface_height, width, height, display::rotation * 90);
+        }
         SDL_GL_SwapWindow(g_window); // present to the live window (eyeball)
     }
     c.set_ret32(EGL_TRUE_);
@@ -1052,16 +1115,55 @@ void egl_swapbuffers(Cpu& c) {
 
 namespace hle {
 void gl_set_window(void* w) { g_window = (SDL_Window*)w; }
+void gl_set_surface_size(int width, int height, const char* source) {
+    if (width < 64 || height < 64 || width > 4096 || height > 4096) return;
+    g_surface_width = width;
+    g_surface_height = height;
+    if (g_logical_landscape >= 0)
+        display::rotation = width == height || (width > height) == static_cast<bool>(g_logical_landscape) ? 0 : (width < height ? 1 : 3);
+    const auto native = logical_surface();
+    const auto buffer = display::buffer_size(native.width, native.height);
+    printf("[display] source=%s native=%dx%d render=%dx%d selected=%s requested=%dx%d orientation=%s rotation=%d\n",
+        source, native.width, native.height, width, height, display::selected_resolution.c_str(),
+        buffer.width, buffer.height, native.width > native.height ? "landscape" : "portrait", display::rotation * 90);
+    display::size_window(g_window, native.width, native.height);
+    if (g_window) gl_resize();
+}
+
+void gl_set_window_orientation(bool landscape) {
+    g_logical_landscape = landscape;
+    gl_set_surface_size(g_surface_width, g_surface_height, "SDK logical window");
+}
+
+void gl_set_orientation(uint32_t orientation) {
+    printf("[display] Bada orientation=%u\n", orientation);
+    // Bada groups portrait/reverse portrait (0/1), then landscape/reverse
+    // landscape (2/3). Automatic (4) is resolved by the first viewport.
+    if (orientation > 3) return;
+    const int short_side = std::min(display::device_width, display::device_height);
+    const int long_side = std::max(display::device_width, display::device_height);
+    const bool landscape = orientation >= 2;
+    g_window_fit = false;
+    gl_set_surface_size(landscape ? long_side : short_side, landscape ? short_side : long_side, "Bada Form/Frame");
+}
 SurfaceRect gl_content_rect(int width, int height) {
-    return display::content_rect(g_surface_width, g_surface_height, width, height);
+    const auto native = logical_surface();
+    return display::content_rect(native.width, native.height, width, height);
 }
 void gl_map_touch(int x, int y, int width, int height, int& guest_x, int& guest_y) {
+    const auto native = logical_surface();
     const auto area = gl_content_rect(width, height);
     const int top = height - area.y - area.height; // SDL input starts at the top
-    guest_x = area.width ? std::clamp(static_cast<int>(
-        static_cast<int64_t>(x - area.x) * g_surface_width / area.width), 0, g_surface_width - 1) : 0;
-    guest_y = area.height ? std::clamp(static_cast<int>(
-        static_cast<int64_t>(y - top) * g_surface_height / area.height), 0, g_surface_height - 1) : 0;
+    const int logical_x = area.width ? std::clamp(static_cast<int>(
+        static_cast<int64_t>(x - area.x) * native.width / area.width), 0, native.width - 1) : 0;
+    const int logical_y = area.height ? std::clamp(static_cast<int>(
+        static_cast<int64_t>(y - top) * native.height / area.height), 0, native.height - 1) : 0;
+    switch (display::rotation & 3) {
+    case 1: guest_x = g_surface_width - 1 - logical_y; guest_y = logical_x; break;
+    case 2: guest_x = g_surface_width - 1 - logical_x; guest_y = g_surface_height - 1 - logical_y; break;
+    case 3: guest_x = logical_y; guest_y = g_surface_height - 1 - logical_x; break;
+    default: guest_x = logical_x; guest_y = logical_y; break;
+    }
 }
 void gl_resize() { apply_viewport(); apply_scissor(); }
 void gl_set_preswap(std::function<void(Cpu&)> fn) { g_preswap = std::move(fn); }

@@ -36,6 +36,7 @@ class LauncherView(context: Context, private val request: (JSONObject) -> Unit) 
     private var screen = "library"
     private var selected: JSONObject? = null
     private var choice: JSONObject? = null
+    private var gameResolutionChoice = false
     private var message = ""
     private var returnScreen = "library"
     private var sequence = 0
@@ -153,6 +154,12 @@ class LauncherView(context: Context, private val request: (JSONObject) -> Unit) 
                 result.add(control("launch", 10, 246, 300, 30, "Open game"))
                 result.add(control("setIcon", 10, 288, 300, 30, "Choose game icon"))
                 result.add(control("removeConfirm", 10, 330, 300, 30, "Remove game"))
+                val resolution = options().first { it.getString("key") == "resolution" }
+                val values = resolution.getJSONArray("choices")
+                val selectedValue = selected?.optString("resolution", "native") ?: "native"
+                val index = (0 until values.length()).firstOrNull { values.getString(it) == selectedValue } ?: 0
+                result.add(control("gameResolution", 10, 372, 300, 30,
+                    "Screen resolution: " + resolution.getJSONArray("names").getString(index)))
             }
             "remove" -> {
                 result.add(control("remove", 10, 246, 300, 30, "Remove game"))
@@ -205,6 +212,7 @@ class LauncherView(context: Context, private val request: (JSONObject) -> Unit) 
             send("bootstrap")
         } else {
             if (action in listOf("remove", "saveSettings")) navigate("library")
+            if (action == "saveGameResolution") navigate("details")
             if (action != "diagnostics") send("bootstrap")
         }
         refresh()
@@ -220,9 +228,25 @@ class LauncherView(context: Context, private val request: (JSONObject) -> Unit) 
             key == "more" -> menuOpen = !menuOpen
             key == "settings" -> { draft = JSONObject(settings.toString()); navigate("settings") }
             key == "copyright" -> navigate("copyright")
-            key == "back" -> navigate(when (screen) { "choices" -> "settings"; "remove" -> "details"; "message" -> returnScreen; else -> "library" })
-            key.startsWith("setting:") -> { choice = options().first { it.getString("key") == key.substring(8) }; navigate("choices") }
-            key.startsWith("value:") -> { draft.put(choice!!.getString("key"), choice!!.getJSONArray("choices").get(key.substring(6).toInt())); navigate("settings") }
+            key == "back" -> navigate(when (screen) { "choices" -> if (gameResolutionChoice) "details" else "settings"; "remove" -> "details"; "message" -> returnScreen; else -> "library" })
+            key == "gameResolution" -> {
+                choice = options().first { it.getString("key") == "resolution" }
+                gameResolutionChoice = true
+                navigate("choices")
+            }
+            key.startsWith("setting:") -> {
+                choice = options().first { it.getString("key") == key.substring(8) }
+                gameResolutionChoice = false
+                navigate("choices")
+            }
+            key.startsWith("value:") -> {
+                val value = choice!!.getJSONArray("choices").get(key.substring(6).toInt())
+                if (gameResolutionChoice) selected?.let {
+                    send("saveGameResolution", JSONObject().put("id", it.getString("id")).put("resolution", value))
+                } else {
+                    draft.put(choice!!.getString("key"), value); navigate("settings")
+                }
+            }
             key == "saveSettings" -> send(key, draft)
             key == "removeConfirm" -> navigate("remove")
             key == "cancelRemove" -> navigate("details")
@@ -289,12 +313,14 @@ class LauncherView(context: Context, private val request: (JSONObject) -> Unit) 
     fun saveState(): String = JSONObject().apply {
         put("screen", screen); put("pageIndex", pageIndex); put("draft", draft); put("selected", selected?.let { JSONObject(it.toString()).apply { remove("icon") } })
         put("choice", choice); put("message", message); put("returnScreen", returnScreen); put("sequence", sequence)
+        put("gameResolutionChoice", gameResolutionChoice)
     }.toString()
     fun restoreState(raw: String?, pickerCall: JSONObject?) {
         raw?.let { runCatching {
             val state = JSONObject(it)
             screen = state.getString("screen"); pageIndex = state.getInt("pageIndex")
             draft = state.getJSONObject("draft"); selected = state.optJSONObject("selected"); choice = state.optJSONObject("choice")
+            gameResolutionChoice = state.optBoolean("gameResolutionChoice", false)
             message = state.getString("message"); returnScreen = state.getString("returnScreen"); sequence = state.getInt("sequence")
         } }
         pickerCall?.let { pending = it.getInt("id") to it.getString("action") }
@@ -370,7 +396,7 @@ class LauncherView(context: Context, private val request: (JSONObject) -> Unit) 
                 "settings" -> {
                     options().forEachIndexed { i, o -> text(canvas, o.getString("label"), RectF(10f, (56 + 42 * i).toFloat(), 154f, (86 + 42 * i).toFloat()), 12, true, wrap = true) }
                     text(canvas, if (runtimeReady) "Runtime installed" else "Bada runtime needed", RectF(10f, 261f, 310f, 277f), 11, true)
-                    text(canvas, spec.getString("settingsHelp"), RectF(10f, 360f, 310f, 422f), 11, wrap = true)
+                    text(canvas, "Changes apply when a game starts. Resolution sets the render size. Hold a game to choose its own resolution. The picture fills the screen and keeps its aspect ratio.", RectF(10f, 360f, 310f, 422f), 11, wrap = true)
                 }
                 "copyright" -> text(canvas, spec.getString("copyrightText"), RectF(10f, 56f, 310f, 444f), 13, wrap = true, top = true)
                 "details", "remove" -> selected?.let { game ->

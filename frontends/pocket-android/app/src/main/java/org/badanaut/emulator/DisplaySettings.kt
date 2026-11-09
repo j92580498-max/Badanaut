@@ -17,7 +17,15 @@ object DisplaySettings {
         for (key in listOf("vsync", "fullscreen")) require(get(key) is Boolean) { "Display switches must be true or false" }
     }
 
-    fun load(context: Context): JSONObject = runCatching {
+    fun load(context: Context, gameId: String? = null): JSONObject = loadDefaults(context).apply {
+        if (gameId != null) runCatching {
+            val resolution = JSONObject(gameFile(context, gameId).readText()).getString("resolution")
+            require(resolution in choices.getValue("resolution")) { "Unsupported resolution" }
+            put("resolution", resolution)
+        }
+    }
+
+    private fun loadDefaults(context: Context): JSONObject = runCatching {
         validate(JSONObject(File(context.filesDir, "bada/display.json").readText()))
     }.getOrElse { JSONObject(defaults.toString()) }
 
@@ -30,7 +38,24 @@ object DisplaySettings {
         check(temporary.renameTo(file)) { "Could not save display settings" }
     }
 
-    fun arguments(context: Context): Array<String> = load(context).let {
+    /** Store only the game's resolution; other display preferences stay global. */
+    fun saveGameResolution(context: Context, gameId: String, resolution: String) {
+        require(resolution in choices.getValue("resolution")) { "Unsupported resolution" }
+        val file = gameFile(context, gameId)
+        require(file.parentFile!!.isDirectory) { "Bada game is not installed" }
+        val temporary = File(file.parentFile, file.name + ".tmp")
+        temporary.writeText(JSONObject().put("resolution", resolution).toString())
+        check(temporary.renameTo(file)) { "Could not save game resolution" }
+    }
+
+    private fun gameFile(context: Context, gameId: String): File {
+        require(gameId.matches(Regex("[A-Za-z0-9_-]+"))) { "Invalid game ID" }
+        return File(context.filesDir, "bada/games/$gameId/.badanaut-display.json")
+    }
+
+    fun arguments(context: Context, gameId: String? = null): Array<String> = arguments(load(context, gameId))
+
+    fun arguments(values: JSONObject): Array<String> = validate(values).let {
         arrayOf("--resolution", it.getString("resolution"), "--scaling", it.getString("scaling"),
             "--filter", it.getString("filter"), "--vsync=${it.getBoolean("vsync")}") +
             if (it.getBoolean("fullscreen")) arrayOf("--fullscreen") else emptyArray()

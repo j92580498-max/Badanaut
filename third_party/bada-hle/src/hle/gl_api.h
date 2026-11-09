@@ -20,8 +20,21 @@ inline SurfaceRect fit_surface(int width, int height, int output_width, int outp
 }
 
 SurfaceRect gl_content_rect(int output_width, int output_height);
+inline SurfaceRect fill_surface(int width, int height, int output_width, int output_height) {
+    if (width <= 0 || height <= 0 || output_width <= 0 || output_height <= 0) return {0, 0, 0, 0};
+    int w = output_width, h = output_height;
+    if (static_cast<int64_t>(output_width) * height >= static_cast<int64_t>(output_height) * width)
+        h = static_cast<int>((static_cast<int64_t>(output_width) * height + width - 1) / width);
+    else
+        w = static_cast<int>((static_cast<int64_t>(output_height) * width + height - 1) / height);
+    return {(output_width - w) / 2, (output_height - h) / 2, w, h};
+}
+
 void gl_map_touch(int x, int y, int width, int height, int& guest_x, int& guest_y);
 void gl_resize();
+void gl_set_surface_size(int width, int height, const char* source);
+void gl_set_orientation(uint32_t orientation);
+void gl_set_window_orientation(bool landscape);
 struct CanvasUploadInfo { uint32_t bytes = 0; bool compact = false; };
 CanvasUploadInfo gl_canvas_upload_info(); // payload of the last Canvas presentation
 

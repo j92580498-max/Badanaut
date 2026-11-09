@@ -13,7 +13,8 @@ object BadaPackage {
     const val MAX_RUNTIME_BYTES = 32L * 1024L * 1024L
     private const val MAX_ENTRIES = 20_000
 
-    data class Details(val directory: File, val executable: File, val appId: String, val name: String, val icon: String = "")
+    data class Details(val directory: File, val executable: File, val appId: String, val name: String, val icon: String = "",
+                       val nativeSize: GameDisplay.Size = GameDisplay.Size(480, 800))
 
     fun extract(input: InputStream, destination: File) {
         checkDirectory(destination)
@@ -74,6 +75,7 @@ object BadaPackage {
         var appId = ""
         var name = ""
         var icon = ""
+        var nativeSize = GameDisplay.Size(480, 800)
         for (filename in listOf("Appinfo.sys", "manifest.xml")) {
             val file = File(root, "Info/$filename")
             if (!file.isFile || file.length() > 1024 * 1024) continue
@@ -97,10 +99,13 @@ object BadaPackage {
                 if (appId.isBlank()) appId = element.getElementsByTagName("Id").item(0)?.textContent.orEmpty().trim()
                 if (name.isBlank()) name = element.getElementsByTagName("Name").item(0)?.textContent.orEmpty().trim()
                 if (icon.isBlank()) icon = element.getElementsByTagName("Icon").item(0)?.textContent.orEmpty().trim()
+                GameDisplay.parseSize(element.getElementsByTagName("ScreenSize").item(0)?.textContent.orEmpty())?.let { nativeSize = it }
+                val orientation = element.getElementsByTagName("Orientation").item(0)?.textContent.orEmpty().trim().lowercase(Locale.ROOT)
+                if (orientation in listOf("landscape", "portrait")) nativeSize = GameDisplay.orient(nativeSize, orientation == "landscape")
             }
         }
         if (appId.isBlank()) throw IOException("No AppId found in the Bada package metadata")
-        return Details(root, executables.single(), appId, name.ifBlank { executables.single().nameWithoutExtension }, icon)
+        return Details(root, executables.single(), appId, name.ifBlank { executables.single().nameWithoutExtension }, icon, nativeSize)
     }
 
     fun iconFile(root: File, hint: String = "", executable: String = ""): File? {

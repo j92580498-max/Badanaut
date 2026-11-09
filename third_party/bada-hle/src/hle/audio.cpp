@@ -2,8 +2,10 @@
 #include "dispatch.h"
 #include <SDL2/SDL.h>
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <deque>
 #include <map>
 #include <vector>
@@ -36,6 +38,19 @@ SDL_AudioDeviceID device = 0;
 SDL_AudioSpec device_spec{};
 bool suspended = false;
 uint64_t next_generation = 0;
+float master_gain = 1.0f;
+
+bool normalize_master_volume(Cpu& cpu) {
+    // The Megal Bada port stores a deliberately attenuated master level in
+    // its settings. Undo that port-specific attenuation before its own mixer,
+    // retaining the user's slider, mute, voice gains and saturation behavior.
+    const float level = cpu.argf32(0);
+    if (std::isfinite(level)) {
+        const float normalized = std::clamp(level * master_gain, 0.0f, 1.0f);
+        uc_reg_write(cpu.uc, UC_ARM_REG_S0, &normalized);
+    }
+    return false; // continue through the original guest mixer-volume setter
+}
 
 struct AudioLock {
     AudioLock() { if (device) SDL_LockAudioDevice(device); }
@@ -222,6 +237,26 @@ void minimum_buffer(Cpu& cpu) { cpu.set_ret32(2048); }
 } // namespace
 
 namespace hle {
+bool audio_configure_game(Cpu& cpu, const ElfImage& image) {
+    master_gain = 1.0f;
+    const uint32_t settings = image.resolve("_ZN13CGameSettings15SetMasterVolumeEf");
+    const uint32_t mixer = image.resolve("_ZN16BaseSoundManager15setGlobalVolumeEf");
+    if (!cpu.hard_float || !settings || (settings & 1) || !mixer || !image.resolve("megalMixMono16")) return false;
+    // Match the scaled float setter, including its load of a literal native
+    // master limit. Other games and changed binaries keep unity gain.
+    const uint32_t pattern[] = {0xeddf7a02, 0xee607a27, 0xedc07a0c, 0xe12fff1e};
+    uint32_t instructions[4]{};
+    cpu.read_mem(settings, instructions, sizeof instructions);
+    if (memcmp(pattern, instructions, sizeof pattern) != 0) return false;
+    float native_limit = 0;
+    cpu.read_mem(settings + sizeof pattern, &native_limit, sizeof native_limit);
+    if (!std::isfinite(native_limit) || native_limit < 0.01f || native_limit >= 1.0f) return false;
+    master_gain = 1.0f / native_limit;
+    cpu.patch(mixer, normalize_master_volume);
+    printf("[audio] master gain=%.3f native master limit=%.3f (Megal/Bada compatibility)\n", master_gain, native_limit);
+    return true;
+}
+
 void register_audio() {
     register_handler("_ZN3Osp5Media8AudioOutC1Ev", audio_ctor);
     register_handler("_ZN3Osp5Media8AudioOutC2Ev", audio_ctor);
@@ -290,5 +325,6 @@ void audio_shutdown() {
     device = 0;
     outputs.clear();
     suspended = false;
+    master_gain = 1.0f;
 }
 } // namespace hle

@@ -78,6 +78,22 @@ class BadaPackageTest {
         assertEquals("Test Game", details.name)
     }
 
+    @Test fun readsNativeScreenSizeAndOptionalOrientation() {
+        for ((size, orientation, expected) in listOf(
+            Triple("480x800", "", GameDisplay.Size(480, 800)), // Fruit Ninja / N.O.V.A. device profile
+            Triple("240x400", "landscape", GameDisplay.Size(400, 240)),
+            Triple("960x540", "portrait", GameDisplay.Size(540, 960)),
+            Triple("invalid", "", GameDisplay.Size(480, 800)),
+        )) {
+            val directory = extract(
+                "Bin/Test.exe" to elf(),
+                "Info/manifest.xml" to ("<Manifest><Id>test</Id><DeviceProfile><ScreenSize>$size</ScreenSize>" +
+                    "<Orientation>$orientation</Orientation></DeviceProfile></Manifest>").toByteArray(),
+            )
+            assertEquals(expected, BadaPackage.inspect(directory).nativeSize)
+        }
+    }
+
     @Test fun rejectsTraversalAndAbsolutePaths() {
         for (path in listOf("../escape", "Bin/../../escape", "/absolute", "C:/absolute", "Bin\\..\\escape")) {
             assertThrows(IOException::class.java) { extract(path to byteArrayOf(1)) }

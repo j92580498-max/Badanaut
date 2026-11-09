@@ -170,6 +170,40 @@ void wide_string_test(Cpu& cpu) {
             "wide comparison treated a zero low byte as the terminator");
 }
 
+void master_volume_test(Cpu& cpu) {
+    // A synthetic scaled settings setter and mixer entry, with no game input.
+    const uint32_t settings = 0x100220, mixer = 0x100260;
+    const uint32_t setter[] = {0xeddf7a02, 0xee607a27, 0xedc07a0c, 0xe12fff1e, 0x3df5c28f};
+    cpu.write_mem(settings, setter, sizeof setter);
+    cpu.write_u32(mixer, 0xe12fff1e); // bx lr
+    ElfImage compatibility;
+    compatibility.dynsyms = {
+        {"_ZN13CGameSettings15SetMasterVolumeEf", settings, 1, 2},
+        {"_ZN16BaseSoundManager15setGlobalVolumeEf", mixer, 1, 2},
+        {"megalMixMono16", 0x100000, 1, 2},
+    };
+    require(hle::audio_configure_game(cpu, compatibility), "scaled Bada master-volume path was not recognized");
+    for (const auto& probe : {std::pair<float, float>{0.0f, 0.0f}, {0.04277228f, 0.35643567f},
+                              {0.12f, 1.0f}, {0.5f, 1.0f}, {-0.1f, 0.0f}}) {
+        uc_reg_write(cpu.uc, UC_ARM_REG_S0, &probe.first);
+        uint32_t result = 0;
+        require(cpu.run_guest(mixer, {}, result), "master-volume compatibility callback faulted");
+        float actual = 0;
+        uc_reg_read(cpu.uc, UC_ARM_REG_S0, &actual);
+        require(std::fabs(actual - probe.second) < 0.00001f, "master slider/mute was not normalized correctly");
+    }
+    cpu.write_u32(settings + 4, 0xe12fff1e); // a different implementation must keep unity gain
+    require(!hle::audio_configure_game(cpu, compatibility), "changed settings code enabled a compatibility patch");
+    const float unity = 0.5f;
+    uc_reg_write(cpu.uc, UC_ARM_REG_S0, &unity);
+    uint32_t result = 0;
+    require(cpu.run_guest(mixer, {}, result), "unity-gain callback faulted");
+    float actual = 0; uc_reg_read(cpu.uc, UC_ARM_REG_S0, &actual);
+    require(actual == unity, "ordinary audio inherited the Bada port's gain");
+    require(!hle::audio_configure_game(cpu, ElfImage{}), "ordinary game enabled master-volume compatibility");
+    puts("Bada master-volume gain, slider/mute preservation and binary guards passed");
+}
+
 uint32_t queue(Cpu& cpu, uint32_t output, int frames, int channels, int16_t left, int16_t right) {
     std::vector<int16_t> samples(frames * channels);
     for (int frame = 0; frame < frames; ++frame) {
@@ -320,6 +354,7 @@ int main() {
         buffer_test(cpu);
         memory_transfer_test(cpu);
         wide_string_test(cpu);
+        master_volume_test(cpu);
         audio_test(cpu, recording);
         SDL_Quit();
         std::filesystem::remove(recording);

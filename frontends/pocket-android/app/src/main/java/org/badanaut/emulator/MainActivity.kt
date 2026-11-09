@@ -80,6 +80,7 @@ class MainActivity : AppCompatActivity() {
                                     put("id", game.id); put("name", game.displayName); put("appId", game.appId)
                                     put("source", game.sourcePackage); put("importedAt", game.importedAt)
                                     put("lastPlayed", game.lastPlayed); put("icon", game.icon ?: JSONObject.NULL)
+                                    put("resolution", DisplaySettings.load(this@MainActivity, game.id).getString("resolution"))
                                 }) } })
                                 put("settings", DisplaySettings.load(this@MainActivity)); put("runtimeReady", BadaAssets.hasRuntime(this@MainActivity)); put("platform", "android")
                             }
@@ -89,6 +90,9 @@ class MainActivity : AppCompatActivity() {
                         "setIcon" -> { BadaAssets.setIcon(this@MainActivity, args.getString("id"), uri!!); true }
                         "remove" -> { BadaAssets.removeGame(this@MainActivity, args.getString("id")); true }
                         "saveSettings" -> { DisplaySettings.save(this@MainActivity, args); true }
+                        "saveGameResolution" -> {
+                            DisplaySettings.saveGameResolution(this@MainActivity, args.getString("id"), args.getString("resolution")); true
+                        }
                         "launch" -> { BadaAssets.prepare(this@MainActivity, args.getString("id")); true }
                         "diagnostics" -> BadaDiagnostics.snapshot(this@MainActivity)
                         else -> error("Unknown library action")

@@ -1,7 +1,7 @@
 # Badanaut — Samsung bada emulator
 
 Badanaut runs original 32-bit ARM Samsung bada applications through high-level
-emulation. 
+emulation with a C++17 engine.
 
 ## Download builds
 
@@ -55,8 +55,18 @@ Vsync depends on driver support. Changes apply at the next game launch.
 
 ## Build
 
-**Desktop:** Python 3.12, CMake 3.22+, SDL2, SDL2_image, OpenGL and a C/C++17
-compiler. Windows uses Visual Studio and vcpkg. See
+Clone the repository and its pinned native dependencies:
+
+```sh
+git clone --recurse-submodules https://github.com/j92580498-max/Badanaut.git
+cd Badanaut
+```
+
+For an existing clone, run `git submodule update --init --recursive`.
+
+**Desktop:** Python 3.12, CMake 3.22+, OpenGL and a C/C++17 compiler.
+Windows uses Visual Studio; SDL2, SDL2_image and the CPU engine build from
+the submodules. See
 [desktop build instructions](frontends/pocket-desktop/README.md).
 
 **Android:** JDK 17, Android SDK Platform/Build Tools 34, NDK `26.1.10909125`
@@ -66,9 +76,9 @@ and CMake `3.22.1`. Set `ANDROID_SDK_ROOT`, then run:
 ./frontends/pocket-android/build-android.sh
 ```
 
-The APK is written to `dist/Badanaut-Android.apk`. Native builds download the
-pinned Unicorn 2.1.4 source archive and verify its SHA-256. Rust is not required
-for either Bada frontend.
+The APK is written to `dist/Badanaut-Android.apk`. Native builds use the pinned
+Unicorn 2.1.4 submodule and enable ARM32 guests for both Android host ABIs.
+See [native dependency versions](third_party/README.md).
 
 ## Source map and attribution
 
@@ -76,10 +86,9 @@ for either Bada frontend.
 - `frontends/pocket-desktop/` — Python/Qt desktop host and packaging.
 - `frontends/pocket-android/` — Android host, package management and SDL activity.
 - `third_party/bada-hle/` — Bada HLE engine and upstream notice.
-- `third_party/unicorn/` — pinned ARM CPU build.
+- `cmake/Dependencies.cmake` — shared native dependency configuration.
+- `third_party/` — pinned upstream library submodules and dependency notices.
 - `.github/workflows/` — Windows, Linux and Android builds and validation.
-- `crates/` and `frontends/pocket-cli/` — retained legacy PocketHLE headless code;
-  it is not part of the new Bada launchers.
 
 The new app picker is an original adaptation of HyperHLE-Reborn's visual approach;
 no code or graphics from that picker are copied. The Bada HLE source is published

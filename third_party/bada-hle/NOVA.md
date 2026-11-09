@@ -83,9 +83,10 @@ read before adapting the corresponding boundaries:
 - Cocos2d-x's [Bada touch implementation](https://github.com/cocos2d-x/cocos2dx-webos/blob/293ca322978533729a7ef99d49d7705cf90ae34b/cocos2dx/platform/bada/CCEGLView_bada.cpp),
   which enables multi-point input and uses `GetPointId` for per-contact
   press/release dispatch. These sources were found with `gh search code`.
-- [PowerVR decoder](../pvr/UPSTREAM.md), commit
-  `63f0098acdc11ec9a072c30000d2fa670a955bee` (MIT, unmodified).
-- [TLSF pool allocator](../tlsf/UPSTREAM.md), commit
+- [PowerVR decoder](https://github.com/powervr-graphics/Native_SDK/tree/2b1bf2f14d3365d0bb801e2a6a131a319d3a2e48/framework/PVRCore/texture), commit
+  `2b1bf2f14d3365d0bb801e2a6a131a319d3a2e48` (MIT, unmodified; the decoder
+  matches the previously vendored `63f0098` snapshot).
+- [TLSF pool allocator](https://github.com/mattconte/tlsf/tree/deff9ab509341f264addbd3c8ada533678591905), commit
   `deff9ab509341f264addbd3c8ada533678591905` (BSD 3-Clause, unmodified).
 - [Itanium C++ ABI, virtual destructor entries](https://github.com/itanium-cxx-abi/cxx-abi/blob/fae5e46c86147a457a057c6372fa95ec38209fe8/abi.html).
 - Khronos [glGetPointerv](https://github.com/KhronosGroup/OpenGL-Refpages/blob/4bdf67a73d040f79bd7b087f5c1e588809e1f329/es1.1/glGetPointerv.xml) and

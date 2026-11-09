@@ -1,0 +1,17 @@
+THIRD_PARTY_NOTICES.md
+LICENSE
+LICENSE-MIT
+LICENSE-APACHE
+third_party/README.md
+third_party/bada-hle/UPSTREAM.md
+third_party/SDL2/LICENSE.txt
+third_party/SDL2_image/LICENSE.txt
+third_party/cxxopts/LICENSE
+third_party/pugixml/LICENSE.md
+third_party/pvr/LICENSE.md
+third_party/tlsf/tlsf.h
+third_party/unicorn/COPYING
+third_party/unicorn/COPYING.LGPL2
+third_party/unicorn/COPYING_GLIB
+third_party/nuklear/LICENSE
+third_party/nuklear/nuklear.h

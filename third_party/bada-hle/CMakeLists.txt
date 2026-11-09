@@ -8,26 +8,21 @@ get_filename_component(REPO_ROOT "${CMAKE_CURRENT_LIST_DIR}/../.." ABSOLUTE)
 set(OpenGL_GL_PREFERENCE GLVND)
 find_package(Threads REQUIRED)
 find_package(OpenGL REQUIRED)
-find_package(SDL2 CONFIG REQUIRED)
-find_package(SDL2_image CONFIG REQUIRED)
-add_subdirectory("${REPO_ROOT}/third_party/unicorn" "${CMAKE_CURRENT_BINARY_DIR}/unicorn")
-add_library(bada-pugixml STATIC "${REPO_ROOT}/third_party/pugixml/pugixml.cpp")
-target_include_directories(bada-pugixml PUBLIC "${REPO_ROOT}/third_party/pugixml")
+include("${REPO_ROOT}/cmake/Dependencies.cmake")
+badanaut_add_sdl()
+badanaut_add_unicorn()
+badanaut_add_support_libraries()
+badanaut_add_sdl_image()
+badanaut_add_nuklear()
 
 add_executable(bada-hle
     src/main.cpp src/control.cpp src/elf_loader.cpp src/cpu.cpp src/pixel_accel.cpp
     src/hle/dispatch.cpp src/hle/libc.cpp src/hle/gl.cpp src/hle/osp.cpp
     src/hle/io.cpp src/hle/audio.cpp src/hle/ui.cpp src/ui_overlay.cpp
-    "${REPO_ROOT}/third_party/pvr/PVRTDecompress.cpp"
-    "${REPO_ROOT}/third_party/tlsf/tlsf.c"
 )
-# Source includes use SDL2/SDL.h on all hosts. vcpkg exports SDL2's leaf include
-# directory, so provide a consistently named include prefix from vendored SDL.
-file(COPY "${REPO_ROOT}/third_party/SDL2/include/" DESTINATION "${CMAKE_CURRENT_BINARY_DIR}/include_compat/SDL2")
-target_include_directories(bada-hle PRIVATE src "${CMAKE_CURRENT_BINARY_DIR}/include_compat"
-    "${REPO_ROOT}/third_party/cxxopts/include" "${REPO_ROOT}/third_party/pvr"
-    "${REPO_ROOT}/third_party/tlsf")
-target_link_libraries(bada-hle PRIVATE SDL2::SDL2 SDL2_image::SDL2_image unicorn bada-pugixml OpenGL::GL Threads::Threads)
+target_include_directories(bada-hle PRIVATE src)
+target_link_libraries(bada-hle PRIVATE bada-sdl SDL2_image::SDL2_image unicorn
+    bada-pugixml bada-cxxopts bada-pvr bada-tlsf bada-nuklear OpenGL::GL Threads::Threads)
 set_target_properties(bada-hle PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/native"
     RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_BINARY_DIR}/native"
@@ -43,17 +38,12 @@ else()
     target_compile_options(bada-hle PRIVATE -O2 -Wall -Wno-unused-parameter)
 endif()
 
-# Put the CPU DLL/SONAME alongside the engine for portable packaging. PyInstaller
-# follows the rest of the native executable's dependencies when it builds a bundle.
-add_custom_command(TARGET bada-hle POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different "$<TARGET_FILE:unicorn>" "$<TARGET_FILE_DIR:bada-hle>"
-)
-if(UNIX AND NOT APPLE)
+# Keep built runtime libraries beside the engine for standalone runs and packaging.
+foreach(runtime_target unicorn SDL2::SDL2 SDL2_image::SDL2_image)
     add_custom_command(TARGET bada-hle POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different "$<TARGET_SONAME_FILE:unicorn>" "$<TARGET_FILE_DIR:bada-hle>")
-endif()
-if(WIN32)
-    add_custom_command(TARGET bada-hle POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different "$<TARGET_FILE:SDL2::SDL2>" "$<TARGET_FILE_DIR:bada-hle>"
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different "$<TARGET_FILE:SDL2_image::SDL2_image>" "$<TARGET_FILE_DIR:bada-hle>")
-endif()
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different "$<TARGET_FILE:${runtime_target}>" "$<TARGET_FILE_DIR:bada-hle>")
+    if(UNIX AND NOT APPLE)
+        add_custom_command(TARGET bada-hle POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different "$<TARGET_SONAME_FILE:${runtime_target}>" "$<TARGET_FILE_DIR:bada-hle>")
+    endif()
+endforeach()

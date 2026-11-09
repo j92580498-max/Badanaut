@@ -86,18 +86,25 @@ multiple-inheritance thunk handling.
 
 ## Build
 
-C++17. Dependencies: **SDL2**, **Unicorn**, and a desktop **OpenGL** driver.
+C++17. SDL2, SDL2_image, Unicorn and the support libraries are pinned Git
+submodules in the parent Badanaut repository. A desktop OpenGL driver is
+required. From the Badanaut repository root:
 
 ```
-cmake -S . -B build && cmake --build build -j
+git submodule update --init --recursive
+cmake -S . -B build
+cmake --build build --config Release --parallel 2
 ```
 
-- **Linux / MSYS2**: install `libsdl2-dev` + `libunicorn-dev` (found via pkg-config).
-- **Windows / MSVC**: provide SDL2 + Unicorn via vcpkg
-  (`-DCMAKE_TOOLCHAIN_FILE=<vcpkg>/scripts/buildsystems/vcpkg.cmake`).
+- **Linux**: install a C/C++ compiler, CMake and OpenGL/audio/window development
+  headers; see `../../frontends/pocket-desktop/README.md`.
+- **Windows / MSVC**: use Visual Studio's C++ tools. Native libraries build
+  from the submodules and are copied beside `build/native/bada-hle.exe`.
 
-The source is portable (`std::filesystem`, no POSIX-only calls); only the Linux
-build is regularly tested.
+The source is portable (`std::filesystem`, no POSIX-only calls). Badanaut's CI
+builds and packages the engine on Windows and Linux. The Android host builds
+the same HLE sources with its GLES presenter; see
+`../../frontends/pocket-android/README.md`.
 
 ## Run
 

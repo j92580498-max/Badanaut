@@ -13,11 +13,13 @@ separate windowed process. Game windows can be resized; F11 toggles fullscreen.
 
 ## Build and run
 
-Use Python 3.12, CMake 3.22+, a C/C++17 compiler, SDL2, SDL2_image and OpenGL.
+Use Python 3.12, CMake 3.22+, a C/C++17 compiler and OpenGL. SDL2, SDL2_image
+and the other native libraries build from pinned submodules.
 On Ubuntu 22.04 or later:
 
 ```sh
-sudo apt-get install cmake ninja-build libsdl2-dev libsdl2-image-dev libgl-dev libegl1 libopengl0 libxcb-cursor0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-render-util0 libxcb-xinerama0 libxcb-shape0 libxcb-shm0 libxcb-sync1 libxcb-randr0 libxcb-render0 libxcb-xfixes0 libxcb-xkb1 libx11-xcb1 libxkbcommon-x11-0
+git submodule update --init --recursive
+sudo apt-get install cmake ninja-build libgl-dev libegl1 libopengl0 libasound2-dev libpulse-dev libudev-dev libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev libxss-dev libxinerama-dev libxxf86vm-dev libxcb-cursor0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-render-util0 libxcb-xinerama0 libxcb-shape0 libxcb-shm0 libxcb-sync1 libxcb-randr0 libxcb-render0 libxcb-xfixes0 libxcb-xkb1 libx11-xcb1 libxkbcommon-x11-0
 python3 -m venv .venv
 . .venv/bin/activate
 python -m pip install -r frontends/pocket-desktop/requirements.txt
@@ -26,14 +28,20 @@ cmake --build .build/desktop --parallel 2
 python frontends/pocket-desktop/main.py
 ```
 
-On Windows, use a Visual Studio developer shell and install `sdl2:x64-windows`
-and `sdl2-image:x64-windows` with vcpkg. Configure with
-`-DCMAKE_TOOLCHAIN_FILE=<vcpkg>/scripts/buildsystems/vcpkg.cmake` in addition to
-the options above. Add `<vcpkg>/installed/x64-windows/bin` to PATH before running
-or packaging. Activate the virtual environment with `.venv\Scripts\Activate.ps1`.
+On Windows with Visual Studio 2022:
 
-Unicorn 2.1.4 is downloaded at configure time using a pinned commit and verified
-SHA-256. Rust is not required to build the new Bada frontends.
+```powershell
+git submodule update --init --recursive
+py -3.12 -m venv .venv
+.venv\Scripts\Activate.ps1
+python -m pip install -r frontends/pocket-desktop/requirements.txt
+cmake -S . -B .build/desktop -G "Visual Studio 17 2022" -A x64
+cmake --build .build/desktop --config Release --parallel 2
+python frontends/pocket-desktop/main.py
+```
+
+The same pinned Unicorn 2.1.4, SDL2 and support libraries are used by desktop
+and Android. See [native dependencies](../../third_party/README.md).
 
 Run `python frontends/pocket-desktop/package.py` to bundle the application, shared
 layout/fonts, engine, CPU library, Qt Essentials and native dependencies into `dist/Badanaut/`.

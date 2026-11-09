@@ -30,6 +30,8 @@ jobs:
             artifact: Badanaut-Windows-x64.zip
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
@@ -39,16 +41,10 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake ninja-build libsdl2-dev libsdl2-image-dev libgl-dev libegl1 libopengl0 libxcb-cursor0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-render-util0 libxcb-xinerama0 libxcb-shape0 libxcb-shm0 libxcb-sync1 libxcb-randr0 libxcb-render0 libxcb-xfixes0 libxcb-xkb1 libx11-xcb1 libxkbcommon-x11-0 xvfb xauth
+          sudo apt-get install -y cmake ninja-build libgl-dev libegl1 libopengl0 libasound2-dev libpulse-dev libudev-dev libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev libxss-dev libxinerama-dev libxxf86vm-dev libxcb-cursor0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-render-util0 libxcb-xinerama0 libxcb-shape0 libxcb-shm0 libxcb-sync1 libxcb-randr0 libxcb-render0 libxcb-xfixes0 libxcb-xkb1 libx11-xcb1 libxkbcommon-x11-0 xvfb xauth
       - name: Set up Windows compiler
         if: runner.os == 'Windows'
         uses: ilammy/msvc-dev-cmd@v1
-      - name: Install Windows dependencies
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          & "$env:VCPKG_INSTALLATION_ROOT/vcpkg.exe" install sdl2:x64-windows sdl2-image:x64-windows
-          "$env:VCPKG_INSTALLATION_ROOT/installed/x64-windows/bin" >> $env:GITHUB_PATH
       - name: Install desktop host and packager
         run: python -m pip install -r frontends/pocket-desktop/requirements.txt
       - name: Check Linux Qt platform dependencies
@@ -81,7 +77,7 @@ jobs:
       - name: Configure Windows engine
         if: runner.os == 'Windows'
         shell: pwsh
-        run: cmake -S . -B .build/desktop -G Ninja -DCMAKE_BUILD_TYPE=Release "-DCMAKE_TOOLCHAIN_FILE=$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake"
+        run: cmake -S . -B .build/desktop -G Ninja -DCMAKE_BUILD_TYPE=Release
       - name: Build native Bada engine
         run: cmake --build .build/desktop --parallel 2
       - name: Check engine display options
@@ -96,7 +92,7 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $process = Start-Process -FilePath "dist/Badanaut/Badanaut.exe" -ArgumentList "--library", ".build/smoke-library", "--smoke-test" -Wait -PassThru
+          $process = Start-Process -FilePath "dist/Badanaut/Badanaut.exe" -ArgumentList "--library", ".build/smoke-library", "--smoke-test" -WindowStyle Hidden -Wait -PassThru
           if ($process.ExitCode -ne 0) { throw "Desktop interface smoke test failed ($($process.ExitCode))" }
       - uses: actions/upload-artifact@v4
         with:

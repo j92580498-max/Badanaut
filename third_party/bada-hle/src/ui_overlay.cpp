@@ -6,7 +6,7 @@
 #include <cstring>
 
 // Nuklear draws the stand-ins for the native bada controls (see hle/ui.h).
-// Single-header, vendored -- the GL2 backend matches the compatibility context
+// The upstream GL2 backend matches the compatibility context
 // we already ask SDL for.
 #define NK_INCLUDE_FIXED_TYPES
 #define NK_INCLUDE_STANDARD_IO
@@ -17,8 +17,8 @@
 #define NK_INCLUDE_DEFAULT_FONT
 #define NK_IMPLEMENTATION
 #define NK_SDL_GL2_IMPLEMENTATION
-#include "third_party/nuklear.h"
-#include "third_party/nuklear_sdl_gl2.h"
+#include <nuklear.h>
+#include <nuklear_sdl_gl2.h>
 
 namespace {
 nk_context* g_ctx = nullptr;

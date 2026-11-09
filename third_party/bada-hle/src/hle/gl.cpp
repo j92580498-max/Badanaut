@@ -2,6 +2,7 @@
 #include "dispatch.h"
 #include "gl_api.h"
 #include "display.h"
+#include "PVRTDecompress.h"
 #include <SDL2/SDL.h>
 #ifdef BADA_GLES_BACKEND
 #include <GLES/gl.h>
@@ -49,6 +50,8 @@ GLuint g_canvas_texture = 0;
 bool g_canvas_window_sized = false;
 hle::CanvasUploadInfo g_canvas_upload_info;
 void fit_window(GLint x, GLint y, GLsizei w, GLsizei h); // defined in the ES1 section
+bool ff_query(GLenum pname, GLint& value); // guest client-array state, before VBO staging
+int getiv_count(GLenum pname);
 
 hle::SurfaceRect host_rect(const GLint* rectangle) {
     if (g_framebuffer || !g_window) return {rectangle[0], rectangle[1], rectangle[2], rectangle[3]};
@@ -155,14 +158,35 @@ void gl_finish(Cpu&) { glFinish(); }
 void gl_getbooleanv(Cpu& c) {
     GLenum pn = c.arg32(0);
     uint32_t out = c.arg32(1);
-    GLboolean values[4] = {};
+    const int count = getiv_count(pn);
+    std::vector<GLboolean> values(std::max(16, count), GL_FALSE);
+    GLint client_value = 0;
     if (pn == GL_SHADER_COMPILER) values[0] = GL_TRUE;
-    else glGetBooleanv(pn, values);
-    c.write_mem(out, values, pn == GL_COLOR_WRITEMASK ? 4 : 1);
+    else if (ff_query(pn, client_value)) values[0] = client_value != 0;
+    else if (pn == GL_VIEWPORT || (pn == GL_SCISSOR_BOX && g_scissor_set)) {
+        const GLint* rectangle = pn == GL_VIEWPORT ? g_viewport : g_scissor;
+        for (int i = 0; i < 4; ++i) values[i] = rectangle[i] != 0;
+    } else glGetBooleanv(pn, values.data());
+    c.write_mem(out, values.data(), count);
 }
 // Number of values glGetIntegerv writes for a pname (most are 1; some are 2/4).
 int getiv_count(GLenum pn) {
     switch (pn) {
+    case 0x86A3: { // COMPRESSED_TEXTURE_FORMATS is an implementation-sized list.
+        GLint count = 0;
+        glGetIntegerv(0x86A2 /* NUM_COMPRESSED_TEXTURE_FORMATS */, &count);
+        return std::max(0, count);
+    }
+    case 0x0BA6:
+    case 0x0BA7:
+    case 0x0BA8: return 16; // MODELVIEW, PROJECTION, TEXTURE matrices
+    case 0x0B02: return 3; // CURRENT_NORMAL
+    case 0x0B00:
+    case 0x0B03:
+    case 0x0B53:
+    case 0x0B66:
+    case 0x0C22:
+    case 0x0C23:
     case 0x0BA2:
     case 0x0C10: return 4; // VIEWPORT, SCISSOR_BOX
     case 0x0D3A:
@@ -173,6 +197,11 @@ int getiv_count(GLenum pn) {
     }
 }
 void getiv_into_guest(Cpu& c, GLenum pn, uint32_t out) {
+    GLint client_value = 0;
+    if (ff_query(pn, client_value)) {
+        c.write_u32(out, static_cast<uint32_t>(client_value));
+        return;
+    }
     if (pn == GL_VIEWPORT || (pn == GL_SCISSOR_BOX && g_scissor_set)) {
         c.write_mem(out, pn == GL_VIEWPORT ? g_viewport : g_scissor, 4 * sizeof(GLint));
         return;
@@ -398,12 +427,56 @@ struct FFArray {
     GLsizei stride = 0;
     GLuint vbo = 0; // guest's GL_ARRAY_BUFFER bound when the pointer was set (0 = client array)
 };
-FFArray g_ff_vertex, g_ff_color, g_ff_texcoord, g_ff_normal;
+FFArray g_ff_vertex, g_ff_color;
+FFArray g_ff_normal{false, 0, 3};
+std::map<GLenum, FFArray> g_ff_texcoords{{GL_TEXTURE0, {}}};
+FFArray& ff_texcoord() {
+    GLint unit = GL_TEXTURE0;
+    glGetIntegerv(GL_CLIENT_ACTIVE_TEXTURE, &unit);
+    return g_ff_texcoords[static_cast<GLenum>(unit)];
+}
+bool ff_query(GLenum pname, GLint& value) {
+    // glGetPointerv/GetIntegerv must describe the guest arrays, not the host
+    // VBOs used to stage them. Khronos ES 1.1 assigns texture-coordinate state
+    // to the active client unit; touchHLE preserves the same distinction.
+    const FFArray* array = nullptr;
+    enum Field { enabled, size, type, stride, buffer } field = enabled;
+    switch (pname) {
+    case GL_VERTEX_ARRAY: array = &g_ff_vertex; break;
+    case GL_VERTEX_ARRAY_SIZE: array = &g_ff_vertex; field = size; break;
+    case GL_VERTEX_ARRAY_TYPE: array = &g_ff_vertex; field = type; break;
+    case GL_VERTEX_ARRAY_STRIDE: array = &g_ff_vertex; field = stride; break;
+    case GL_VERTEX_ARRAY_BUFFER_BINDING: array = &g_ff_vertex; field = buffer; break;
+    case GL_COLOR_ARRAY: array = &g_ff_color; break;
+    case GL_COLOR_ARRAY_SIZE: array = &g_ff_color; field = size; break;
+    case GL_COLOR_ARRAY_TYPE: array = &g_ff_color; field = type; break;
+    case GL_COLOR_ARRAY_STRIDE: array = &g_ff_color; field = stride; break;
+    case GL_COLOR_ARRAY_BUFFER_BINDING: array = &g_ff_color; field = buffer; break;
+    case GL_NORMAL_ARRAY: array = &g_ff_normal; break;
+    case GL_NORMAL_ARRAY_TYPE: array = &g_ff_normal; field = type; break;
+    case GL_NORMAL_ARRAY_STRIDE: array = &g_ff_normal; field = stride; break;
+    case GL_NORMAL_ARRAY_BUFFER_BINDING: array = &g_ff_normal; field = buffer; break;
+    case GL_TEXTURE_COORD_ARRAY: array = &ff_texcoord(); break;
+    case GL_TEXTURE_COORD_ARRAY_SIZE: array = &ff_texcoord(); field = size; break;
+    case GL_TEXTURE_COORD_ARRAY_TYPE: array = &ff_texcoord(); field = type; break;
+    case GL_TEXTURE_COORD_ARRAY_STRIDE: array = &ff_texcoord(); field = stride; break;
+    case GL_TEXTURE_COORD_ARRAY_BUFFER_BINDING: array = &ff_texcoord(); field = buffer; break;
+    default: return false;
+    }
+    switch (field) {
+    case enabled: value = array->enabled; break;
+    case size: value = array->size; break;
+    case type: value = array->type; break;
+    case stride: value = array->stride; break;
+    case buffer: value = array->vbo; break;
+    }
+    return true;
+}
 struct FFStream {
     GLuint buffer = 0;
     std::vector<uint8_t> staging;
 };
-std::array<FFStream, 4> g_ff_streams;
+std::map<size_t, FFStream> g_ff_streams;
 std::vector<uint8_t> g_ff_indices;
 
 // state forwards
@@ -422,6 +495,62 @@ void g1_depthfunc(Cpu& c) { glDepthFunc(c.arg32(0)); }
 void g1_depthmask(Cpu& c) { glDepthMask(c.arg32(0)); }
 void g1_cullface(Cpu& c) { glCullFace(c.arg32(0)); }
 void g1_blendfunc(Cpu& c) { glBlendFunc(c.arg32(0), c.arg32(1)); }
+// These forwards follow touchHLE's gles_guest.rs. Scalar float arguments use
+// independent VFP registers in the hard ABI and follow integer args in soft.
+void g1_colormask(Cpu& c) { glColorMask(c.arg32(0), c.arg32(1), c.arg32(2), c.arg32(3)); }
+void g1_color4f(Cpu& c) { glColor4f(c.argf32(0), c.argf32(1), c.argf32(2), c.argf32(3)); }
+void g1_frontface(Cpu& c) { glFrontFace(c.arg32(0)); }
+void g1_hint(Cpu& c) { glHint(c.arg32(0), c.arg32(1)); }
+void g1_linewidth(Cpu& c) { glLineWidth(c.argf32(0)); }
+void g1_pointsize(Cpu& c) { glPointSize(c.argf32(0)); }
+void g1_alphafunc(Cpu& c) { glAlphaFunc(c.arg32(0), c.argf32(c.hard_float ? 0 : 1)); }
+void g1_fogf(Cpu& c) { glFogf(c.arg32(0), c.argf32(c.hard_float ? 0 : 1)); }
+void g1_fogfv(Cpu& c) {
+    GLfloat values[4] = {};
+    c.read_mem(c.arg32(1), values, (c.arg32(0) == GL_FOG_COLOR ? 4 : 1) * sizeof(GLfloat));
+    glFogfv(c.arg32(0), values);
+}
+void g1_lightmodelfv(Cpu& c) {
+    GLfloat values[4] = {};
+    c.read_mem(c.arg32(1), values, (c.arg32(0) == GL_LIGHT_MODEL_AMBIENT ? 4 : 1) * sizeof(GLfloat));
+    glLightModelfv(c.arg32(0), values);
+}
+void g1_materialfv(Cpu& c) {
+    GLfloat values[4] = {};
+    c.read_mem(c.arg32(2), values, (c.arg32(1) == GL_SHININESS ? 1 : 4) * sizeof(GLfloat));
+    glMaterialfv(c.arg32(0), c.arg32(1), values);
+}
+void g1_isenabled(Cpu& c) {
+    GLint value = 0;
+    c.set_ret32(ff_query(c.arg32(0), value) ? value != 0 : glIsEnabled(c.arg32(0)));
+}
+void g1_getfloatv(Cpu& c) {
+    const GLenum pname = c.arg32(0);
+    const int count = getiv_count(pname);
+    std::vector<GLfloat> values(std::max(16, count), 0);
+    GLint client_value = 0;
+    if (ff_query(pname, client_value)) values[0] = static_cast<GLfloat>(client_value);
+    else if (pname == GL_VIEWPORT || (pname == GL_SCISSOR_BOX && g_scissor_set)) {
+        const GLint* rectangle = pname == GL_VIEWPORT ? g_viewport : g_scissor;
+        for (int i = 0; i < 4; ++i) values[i] = static_cast<GLfloat>(rectangle[i]);
+    } else glGetFloatv(pname, values.data());
+    c.write_mem(c.arg32(1), values.data(), count * sizeof(GLfloat));
+}
+void g1_getpointerv(Cpu& c) {
+    uint32_t pointer = 0;
+    switch (c.arg32(0)) {
+    case GL_VERTEX_ARRAY_POINTER: pointer = g_ff_vertex.ptr; break;
+    case GL_COLOR_ARRAY_POINTER: pointer = g_ff_color.ptr; break;
+    case GL_NORMAL_ARRAY_POINTER: pointer = g_ff_normal.ptr; break;
+    case GL_TEXTURE_COORD_ARRAY_POINTER: pointer = ff_texcoord().ptr; break;
+    default: {
+        void* ignored = nullptr;
+        glGetPointerv(c.arg32(0), &ignored); // preserve the host's invalid-enum error
+        return;
+    }
+    }
+    c.write_u32(c.arg32(1), pointer);
+}
 void g1_shademodel(Cpu& c) { glShadeModel(c.arg32(0)); }
 // Fit the window to the game's first full-surface viewport, so orientation +
 // resolution follow the binary. FruitNinja's InitGL reads portrait bounds
@@ -517,7 +646,9 @@ uint32_t pixel_bytes(GLenum fmt, GLenum type) {
         break;
     }
     // Unpacked: one byte per channel (GL_UNSIGNED_BYTE).
-    int ch = (fmt == GL_RGBA) ? 4 : (fmt == GL_RGB)           ? 3
+    // touchHLE's gles_guest.rs image_size_estimate treats BGRA_EXT as four
+    // bytes too. Nova uses it for its title, font and sprite textures.
+    int ch = (fmt == GL_RGBA || fmt == 0x80E1 /*GL_BGRA_EXT*/) ? 4 : (fmt == GL_RGB) ? 3
                                 : (fmt == GL_LUMINANCE_ALPHA) ? 2
                                                               : 1;
     return ch;
@@ -536,6 +667,12 @@ void g1_teximage2d(Cpu& c) {
         c.read_mem(px, data.data(), data.size());
         p = data.data();
     }
+#ifdef BADA_GLES_BACKEND
+    // As in touchHLE's gles1_native.rs, EXT_texture_format_BGRA8888 requires
+    // matching BGRA internal/external formats on native OpenGL ES. Desktop GL
+    // accepts Nova's original RGBA internal format with BGRA source pixels.
+    if (fmt == 0x80E1 /*GL_BGRA_EXT*/) ifmt = fmt;
+#endif
     glTexImage2D(tgt, lvl, ifmt, w, h, bd, fmt, type, p);
 }
 void g1_texsubimage2d(Cpu& c) {
@@ -552,6 +689,41 @@ void g1_texsubimage2d(Cpu& c) {
         p = data.data();
     }
     glTexSubImage2D(tgt, lvl, x, y, w, h, fmt, type, p);
+}
+void g1_compressedteximage2d(Cpu& c) {
+    GLenum target = c.arg32(0), format = c.arg32(2);
+    GLint level = c.arg32(1), border = c.arg32(5);
+    GLsizei width = c.arg32(3), height = c.arg32(4), size = c.arg32(6);
+    uint32_t source = c.arg32(7);
+    std::vector<uint8_t> data(size > 0 && source ? static_cast<size_t>(size) : 0);
+    if (!data.empty()) c.read_mem(source, data.data(), static_cast<uint32_t>(data.size()));
+
+    // touchHLE's try_decode_pvrtc uses the PowerVR decoder and uploads RGBA
+    // when the host cannot consume the original PVRTC texture. Decode on both
+    // backends so Nova also works on Android GPUs without this extension.
+    bool pvrtc = format >= 0x8C00 && format <= 0x8C03;
+    bool two_bit = format == 0x8C01 || format == 0x8C03;
+    bool valid_dimensions = width > 0 && height > 0 &&
+        !(width & (width - 1)) && !(height & (height - 1));
+    if (pvrtc && valid_dimensions && level >= 0 && !border && source) {
+        const uint64_t required = static_cast<uint64_t>(std::max(width, two_bit ? 16 : 8)) *
+            std::max(height, 8) / (two_bit ? 4 : 2);
+        const uint64_t decoded = static_cast<uint64_t>(width) * height * 4;
+        if (data.size() == required && decoded <= UINT32_MAX) {
+            std::vector<uint8_t> pixels(static_cast<size_t>(decoded));
+            pvr::PVRTDecompressPVRTC(data.data(), two_bit, width, height, pixels.data());
+            if (format == 0x8C00 || format == 0x8C01) {
+                // RGB formats ignore the encoded alpha, as ordinary GL_RGB does.
+                for (size_t i = 3; i < pixels.size(); i += 4) pixels[i] = 255;
+            }
+            glTexImage2D(target, level, GL_RGBA, width, height, border,
+                         GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
+            return;
+        }
+    }
+    host<void (*)(GLenum, GLint, GLenum, GLsizei, GLsizei, GLint, GLsizei, const void*)>(
+        "glCompressedTexImage2D")(target, level, format, width, height, border, size,
+                                 data.empty() ? nullptr : data.data());
 }
 void g1_pixelstorei(Cpu& c) { glPixelStorei(c.arg32(0), c.arg32(1)); }
 void g1_geterror(Cpu& c) {
@@ -643,7 +815,7 @@ void g1_enableclientstate(Cpu& c) {
     } else if (a == GL_COLOR_ARRAY) {
         g_ff_color.enabled = true;
     } else if (a == GL_TEXTURE_COORD_ARRAY) {
-        g_ff_texcoord.enabled = true;
+        ff_texcoord().enabled = true;
     } else if (a == GL_NORMAL_ARRAY) {
         g_ff_normal.enabled = true;
     }
@@ -655,7 +827,7 @@ void g1_disableclientstate(Cpu& c) {
     } else if (a == GL_COLOR_ARRAY) {
         g_ff_color.enabled = false;
     } else if (a == GL_TEXTURE_COORD_ARRAY) {
-        g_ff_texcoord.enabled = false;
+        ff_texcoord().enabled = false;
     } else if (a == GL_NORMAL_ARRAY) {
         g_ff_normal.enabled = false;
     }
@@ -667,19 +839,31 @@ GLuint cur_array_buffer() {
 }
 void g1_vertexpointer(Cpu& c) { g_ff_vertex = {g_ff_vertex.enabled, c.arg32(3), (GLint)c.arg32(0), c.arg32(1), (GLsizei)c.arg32(2), cur_array_buffer()}; }
 void g1_colorpointer(Cpu& c) { g_ff_color = {g_ff_color.enabled, c.arg32(3), (GLint)c.arg32(0), c.arg32(1), (GLsizei)c.arg32(2), cur_array_buffer()}; }
-void g1_texcoordpointer(Cpu& c) { g_ff_texcoord = {g_ff_texcoord.enabled, c.arg32(3), (GLint)c.arg32(0), c.arg32(1), (GLsizei)c.arg32(2), cur_array_buffer()}; }
+void g1_texcoordpointer(Cpu& c) {
+    auto& array = ff_texcoord();
+    array = {array.enabled, c.arg32(3), (GLint)c.arg32(0), c.arg32(1), (GLsizei)c.arg32(2), cur_array_buffer()};
+}
 void g1_normalpointer(Cpu& c) { g_ff_normal = {g_ff_normal.enabled, c.arg32(2), 3, c.arg32(0), (GLsizei)c.arg32(1), cur_array_buffer()}; }
 void ff_bind_all(Cpu& c, uint32_t vcount) {
-    struct Binding { FFArray* array; GLenum state; void (*set)(const FFArray&, uint32_t); };
-    const std::array<Binding, 4> bindings = {{
+    struct Binding { FFArray* array; GLenum state; void (*set)(const FFArray&, uint32_t); GLenum texture_unit = 0; };
+    std::vector<Binding> bindings = {
         {&g_ff_vertex, GL_VERTEX_ARRAY, [](const FFArray& a, uint32_t off) { glVertexPointer(a.size, a.type, a.stride, (const void*)(uintptr_t)off); }},
         {&g_ff_color, GL_COLOR_ARRAY, [](const FFArray& a, uint32_t off) { glColorPointer(a.size, a.type, a.stride, (const void*)(uintptr_t)off); }},
-        {&g_ff_texcoord, GL_TEXTURE_COORD_ARRAY, [](const FFArray& a, uint32_t off) { glTexCoordPointer(a.size, a.type, a.stride, (const void*)(uintptr_t)off); }},
         {&g_ff_normal, GL_NORMAL_ARRAY, [](const FFArray& a, uint32_t off) { glNormalPointer(a.type, a.stride, (const void*)(uintptr_t)off); }},
-    }};
+    };
+    for (auto& entry : g_ff_texcoords) {
+        bindings.push_back({&entry.second, GL_TEXTURE_COORD_ARRAY,
+            [](const FFArray& a, uint32_t off) { glTexCoordPointer(a.size, a.type, a.stride, (const void*)(uintptr_t)off); }, entry.first});
+    }
+    GLint saved_client_unit = GL_TEXTURE0;
+    glGetIntegerv(GL_CLIENT_ACTIVE_TEXTURE, &saved_client_unit);
+    const auto activate = [](const Binding& binding) {
+        if (binding.texture_unit) host<void (*)(GLenum)>("glClientActiveTexture")(binding.texture_unit);
+    };
     const auto stride_of = [](const FFArray& a) { return a.stride ? a.stride : a.size * type_size(a.type); };
-    std::array<bool, 4> uploaded{};
+    std::vector<bool> uploaded(bindings.size());
     for (const auto& binding : bindings) {
+        activate(binding);
         const auto& a = *binding.array;
         if (a.enabled && (a.vbo || a.ptr)) glEnableClientState(binding.state);
         else glDisableClientState(binding.state);
@@ -692,6 +876,7 @@ void ff_bind_all(Cpu& c, uint32_t vcount) {
             // Guest VBOs stay on the GPU; pointers are offsets into the data
             // already uploaded by glBufferData (Fruit Ninja's static models).
             host<bindfn>("glBindBuffer")(GL_ARRAY_BUFFER, a.vbo);
+            activate(binding);
             binding.set(a, a.ptr);
             continue;
         }
@@ -702,7 +887,7 @@ void ff_bind_all(Cpu& c, uint32_t vcount) {
         const uint32_t stride = stride_of(a);
         uint32_t base = a.ptr, last = a.ptr;
         uint64_t end = static_cast<uint64_t>(a.ptr) + a.size * type_size(a.type);
-        std::array<bool, 4> members{};
+        std::vector<bool> members(bindings.size());
         members[slot] = true;
         for (size_t next = slot + 1; next < bindings.size(); ++next) {
             const auto& other = *bindings[next].array;
@@ -716,20 +901,29 @@ void ff_bind_all(Cpu& c, uint32_t vcount) {
         }
         const size_t bytes = vcount ? static_cast<size_t>(stride) * (vcount - 1) + end - base : 0;
         auto& stream = g_ff_streams[slot];
-        if (stream.staging.size() < bytes) stream.staging.resize(bytes);
-        if (bytes) c.read_mem(base, stream.staging.data(), bytes);
+        // Like touchHLE's GL marshalling, use an immediate view of mapped
+        // guest memory when available. BufferData consumes it before returning;
+        // other regions keep the staging path, and guest writes stay coherent.
+        const uint8_t* data = bytes <= UINT32_MAX ? c.memory_ptr(base, bytes) : nullptr;
+        if (bytes && !data) {
+            if (stream.staging.size() < bytes) stream.staging.resize(bytes);
+            c.read_mem(base, stream.staging.data(), bytes);
+            data = stream.staging.data();
+        }
         if (!stream.buffer) host<genfn>("glGenBuffers")(1, &stream.buffer);
         host<bindfn>("glBindBuffer")(GL_ARRAY_BUFFER, stream.buffer);
         // BufferData lets the driver orphan in-flight storage. Updating the
         // same live storage with BufferSubData can stall a mobile GPU.
-        host<datafn>("glBufferData")(GL_ARRAY_BUFFER, bytes, bytes ? stream.staging.data() : nullptr, client_buffer_usage);
+        host<datafn>("glBufferData")(GL_ARRAY_BUFFER, bytes, data, client_buffer_usage);
         for (size_t member = slot; member < bindings.size(); ++member) {
             if (!members[member]) continue;
             const auto& view = *bindings[member].array;
+            activate(bindings[member]);
             bindings[member].set(view, view.ptr - base);
             uploaded[member] = true;
         }
     }
+    host<void (*)(GLenum)>("glClientActiveTexture")(saved_client_unit);
 }
 void g1_drawarrays(Cpu& c) {
     GLenum m = c.arg32(0);
@@ -998,6 +1192,11 @@ void register_gl() {
     register_handler("glDepthMask_2", g1_depthmask);
     register_handler("glCullFace_2", g1_cullface);
     register_handler("glBlendFunc_2", g1_blendfunc);
+    register_handler("glColorMask_2", g1_colormask);
+    register_handler("glFrontFace_2", g1_frontface);
+    register_handler("glHint_2", g1_hint);
+    register_handler("glLineWidth_2", g1_linewidth);
+    register_handler("glIsEnabled_2", g1_isenabled);
     register_handler("glFlush_2", g1_flush);
     register_handler("glActiveTexture_2", g1_activetexture);
     register_handler("glBindTexture_2", g1_bindtexture);
@@ -1006,6 +1205,7 @@ void register_gl() {
     register_handler("glDeleteTextures_2", g1_deletetextures);
     register_handler("glTexImage2D_2", g1_teximage2d);
     register_handler("glTexSubImage2D_2", g1_texsubimage2d);
+    register_handler("glCompressedTexImage2D_2", g1_compressedteximage2d);
     register_handler("glPixelStorei_2", g1_pixelstorei);
     register_handler("glBindBuffer_2", g1_bindbuffer);
     register_handler("glGenBuffers_2", g1_genbuffers);
@@ -1026,6 +1226,21 @@ void register_gl() {
     register_handler("glDepthMask_1", g1_depthmask);
     register_handler("glCullFace_1", g1_cullface);
     register_handler("glBlendFunc_1", g1_blendfunc);
+    register_handler("glColorMask_1", g1_colormask);
+    register_handler("glColor4f_1", g1_color4f);
+    register_handler("glFrontFace_1", g1_frontface);
+    register_handler("glHint_1", g1_hint);
+    register_handler("glLineWidth_1", g1_linewidth);
+    register_handler("glPointSize_1", g1_pointsize);
+    register_handler("glAlphaFunc_1", g1_alphafunc);
+    register_handler("glFogf_1", g1_fogf);
+    register_handler("glFogfv_1", g1_fogfv);
+    register_handler("glLightModelfv_1", g1_lightmodelfv);
+    register_handler("glMaterialfv_1", g1_materialfv);
+    register_handler("glIsEnabled_1", g1_isenabled);
+    register_handler("glGetBooleanv_1", gl_getbooleanv);
+    register_handler("glGetFloatv_1", g1_getfloatv);
+    register_handler("glGetPointerv_1", g1_getpointerv);
     register_handler("glShadeModel_1", g1_shademodel);
     register_handler("glViewport_1", g1_viewport);
     register_handler("glScissor_1", gl_scissor);
@@ -1053,6 +1268,7 @@ void register_gl() {
     register_handler("glDeleteTextures_1", g1_deletetextures);
     register_handler("glTexImage2D_1", g1_teximage2d);
     register_handler("glTexSubImage2D_1", g1_texsubimage2d);
+    register_handler("glCompressedTexImage2D_1", g1_compressedteximage2d);
     register_handler("glPixelStorei_1", g1_pixelstorei);
     register_handler("glGetError_1", g1_geterror);
     register_handler("glBindFramebufferOES_1", g1_bindframebuffer);

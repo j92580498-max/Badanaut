@@ -364,6 +364,20 @@ void app_getinstance(Cpu& c) { c.set_ret32(c.app_instance); }
 //   0 ~D1, 1 ~D0, 2 OnTouchPressed, 3 OnTouchLongPressed, 4 OnTouchReleased,
 //   5 OnTouchMoved, 6 OnTouchDoublePressed, 7 OnTouchFocusIn, 8 OnTouchFocusOut
 uint32_t g_touch_listener = 0, g_touch_source = 0;
+std::map<uint32_t, bool> g_touch_multipoint;
+std::map<uint32_t, uint32_t> g_touch_event_ids;
+void touch_setmultipoint(Cpu& c) {
+    g_touch_multipoint[c.arg32(1)] = c.arg32(2) != 0;
+    c.set_ret32(0);
+}
+void touch_ismultipoint(Cpu& c) {
+    const auto found = g_touch_multipoint.find(c.arg32(1));
+    c.set_ret32(found != g_touch_multipoint.end() && found->second);
+}
+void touch_getpointid(Cpu& c) {
+    const auto found = g_touch_event_ids.find(c.arg32(0));
+    c.set_ret32(found == g_touch_event_ids.end() ? 0 : found->second);
+}
 void control_addtouchlistener(Cpu& c) {
     if (!g_touch_listener) {
         g_touch_source = c.arg32(0);
@@ -466,6 +480,9 @@ void control_getbounds(Cpu& c) {
 
 namespace hle {
 void register_osp() {
+    g_touch_multipoint.clear();
+    g_touch_event_ids.clear();
+    g_touch_listener = g_touch_source = 0;
     register_handler("_ZN3Osp4Base6StringC1EPKw", str_ctor_wchar); // String(wchar_t const*)
     register_handler("_ZN3Osp4Base6StringC2EPKw", str_ctor_wchar);
     register_handler("_ZN3Osp4Base6StringC1EPKc", str_ctor_char); // String(char const*)
@@ -531,14 +548,15 @@ void register_osp() {
 
     // Osp::Ui::Touch + Control touch-listener APIs (Asphalt 5 registers a Touch
     // listener and requires multipoint; FruitNinja drives touch via the GlesForm
-    // listener instead, so these went unimplemented). Report multipoint enabled
-    // so apps that check it don't bail out of init.
+    // listener instead). Preserve the control's setting and return each
+    // callback's contact ID instead of unconditional success/zero stubs.
     register_handler("_ZN3Osp2Ui5TouchC1Ev", stub_ctor); // Touch()
     register_handler("_ZN3Osp2Ui5TouchC2Ev", stub_ctor);
     register_handler("_ZN3Osp2Ui7Control21AddTouchEventListenerERKNS0_19ITouchEventListenerE",
                      control_addtouchlistener);
-    register_handler("_ZN3Osp2Ui5Touch20SetMultipointEnabledERKNS0_7ControlEb", ret_ok);
-    register_handler("_ZNK3Osp2Ui5Touch19IsMultipointEnabledERKNS0_7ControlE", ret_true);
+    register_handler("_ZN3Osp2Ui5Touch20SetMultipointEnabledERKNS0_7ControlEb", touch_setmultipoint);
+    register_handler("_ZNK3Osp2Ui5Touch19IsMultipointEnabledERKNS0_7ControlE", touch_ismultipoint);
+    register_handler("_ZNK3Osp2Ui14TouchEventInfo10GetPointIdEv", touch_getpointid);
 
     // SystemTime ticks (animation/physics clock) and Thread::Sleep (frame pacing
     // is handled by the host loop, so sleeping is a no-op).
@@ -677,6 +695,13 @@ bool touch_listener(uint32_t& listener, uint32_t& source) {
     listener = g_touch_listener;
     source = g_touch_source;
     return g_touch_listener != 0;
+}
+bool touch_multipoint_enabled(uint32_t source) {
+    const auto found = g_touch_multipoint.find(source);
+    return found != g_touch_multipoint.end() && found->second;
+}
+void touch_event_set(uint32_t object, uint32_t point_id) {
+    g_touch_event_ids[object] = point_id;
 }
 
 // Per frame (main/GL thread): hand queued user events to the app's

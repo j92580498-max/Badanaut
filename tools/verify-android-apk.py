@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Verify the bada engine for both Android ABIs and reject Pocket PC libraries."""
+"""Verify launcher JSON and the Bada engine for both Android ABIs."""
 
 import argparse
+import json
 import struct
 import zipfile
 
@@ -20,6 +21,12 @@ def verify_apk(path):
                 raise ValueError(f"APK is missing {name}")
         if any(name in names for name in ("assets/index.html", "assets/style.css", "assets/app.js")):
             raise ValueError("APK still contains the browser interface")
+        try:
+            launcher = json.loads(apk.read("assets/launcher.json"))
+        except (json.JSONDecodeError, UnicodeDecodeError) as error:
+            raise ValueError(f"APK launcher.json is invalid: {error}") from error
+        if not isinstance(launcher, dict) or not isinstance(launcher.get("menu"), dict):
+            raise ValueError("APK launcher.json is missing the menu object")
         for abi, (elf_class, machine) in architectures.items():
             for library in libraries:
                 name = f"lib/{abi}/{library}"

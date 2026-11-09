@@ -3,6 +3,7 @@
 #include "hle/dispatch.h" // hle::Handler
 #include <cstdint>
 #include <initializer_list>
+#include <memory>
 #include <string>
 #include <unicorn/unicorn.h>
 #include <unordered_map>
@@ -13,6 +14,10 @@
 // VFP enabled, plus host<->guest calling-convention helpers used by HLE handlers.
 class Cpu {
   public:
+    Cpu();
+    ~Cpu();
+    Cpu(const Cpu&) = delete;
+    Cpu& operator=(const Cpu&) = delete;
     uc_engine* uc = nullptr;
     ElfImage* img = nullptr;             // the app image
     std::vector<ElfImage*> images;       // every mapped image, load order
@@ -24,7 +29,8 @@ class Cpu {
 
     // --- Boot ---
     void run_init_array(); // run DT_INIT_ARRAY constructors
-    bool run_guest(uint32_t addr, const std::vector<uint32_t>& args, uint32_t& ret);
+    bool run_guest(uint32_t addr, const std::vector<uint32_t>& args, uint32_t& ret,
+                   uint64_t timeout_us = 120'000'000);
 
     // --- Calling-convention accessors (for HLE handlers) ---
     uint32_t arg32(int i); // i-th integer/pointer arg (r0-r3, then stack)
@@ -41,9 +47,14 @@ class Cpu {
     void read_mem(uint32_t a, void* dst, uint32_t n);
     void write_mem(uint32_t a, const void* src, uint32_t n);
     std::string read_cstr(uint32_t a, uint32_t max = 4096);
+    // Read-only view of the owned heap, for immediate HLE/GL transfers.
+    // Writes still go through Unicorn to retain its code-cache invalidation.
+    const uint8_t* memory_ptr(uint32_t a, uint32_t n) const;
 
-    // --- Guest heap (bump allocator) ---
+    // --- Guest heap (TLSF pool, shared with Unicorn) ---
     uint32_t alloc(uint32_t size, uint32_t align = 8);
+    void free(uint32_t address);
+    uint32_t allocation_size(uint32_t address) const;
 
     // --- Synthetic trampolines / vtables for HLE-built guest objects ---
     // The guest dispatches virtual calls through an object's vtable, so HLE
@@ -82,7 +93,21 @@ class Cpu {
     bool hard_float = true; // VFP float args (FruitNinja) vs soft-float (GlesCube)
 
   private:
-    uint32_t heap_next_ = 0;
+    struct Watchdog;
+    std::unique_ptr<Watchdog> watchdog_;
+    void* heap_storage_ = nullptr;
+    void* heap_pool_ = nullptr;
+    struct Allocation {
+        uint32_t size;
+        void* block;
+    };
+    std::unordered_map<uint32_t, Allocation> allocations_;
+    struct VTable {
+        int slots;
+        std::vector<std::pair<int, hle::Handler>> overrides;
+        uint32_t address;
+    };
+    std::vector<VTable> vtables_;
     // Trampoline slots are keyed by symbol name and shared by all images, so the
     // same import in two images lands on one slot and one HLE handler.
     std::vector<std::string> slots_;

@@ -36,6 +36,18 @@ guest page inside Unicorn's JIT. This avoids host dispatch for frequent integer
 arithmetic. `BADA_NO_NATIVE_ABI=1` restores the host handlers for comparisons;
 `BADA_TRACE` also uses them so import tracing includes arithmetic calls.
 
+The guest heap uses the unmodified TLSF pool allocator in host-owned memory
+shared with Unicorn. Recycled payloads retain the original cleared-allocation
+behavior used by Fruit Ninja. Freed temporary buffers can be reused, and
+immediate GL uploads can read the heap directly. A persistent watchdog waits until each
+guest callback's deadline or cancellation; it retains the 120-second boot
+guard without Unicorn's per-call thread creation and two-microsecond polling.
+See [NOVA.md](NOVA.md) for the Nova-specific causes, sources and validation.
+
+SDL multi-touch is forwarded through the Bada listener with a stable point ID
+for each finger. Mouse input stays independent, and focus loss releases held
+contacts. `Touch::SetMultipointEnabled` controls delivery of additional fingers.
+
 Verified pixel-copy kernels can also use native acceleration (`src/pixel_accel.cpp`).
 The supported RGB565-to-XRGB8888 2x expansion preserves the full guest framebuffer,
 pointer advances, saved registers and flags. It checks every instruction in the

@@ -1,5 +1,6 @@
 #include "cpu.h"
 #include "dispatch.h"
+#include <algorithm>
 #include <cctype>
 #include <cmath>
 #include <cstdlib>
@@ -17,39 +18,68 @@ namespace {
 // ---- heap ----
 void h_alloc(Cpu& c) { c.set_ret32(c.alloc(c.arg32(0))); } // malloc/Osp_allocEx(size,...)
 void h_calloc(Cpu& c) {                                    // Osp_callocEx(n,size,...)
-    uint32_t n = c.arg32(0), sz = c.arg32(1), total = n * sz;
+    uint64_t total64 = static_cast<uint64_t>(c.arg32(0)) * c.arg32(1);
+    if (total64 > UINT32_MAX) { c.set_ret32(0); return; }
+    uint32_t total = static_cast<uint32_t>(total64);
     uint32_t p = c.alloc(total);
-    std::vector<uint8_t> z(total, 0);
-    if (total) {
-        c.write_mem(p, z.data(), total);
-    }
+    // Cpu::alloc clears recycled payloads as well as fresh storage.
     c.set_ret32(p);
 }
 void h_realloc(Cpu& c) { // Osp_reallocEx(ptr,size,...)
     uint32_t old = c.arg32(0), sz = c.arg32(1);
+    if (!sz) { c.free(old); c.set_ret32(0); return; }
     uint32_t p = c.alloc(sz);
-    if (old && sz) {
-        std::vector<uint8_t> b(sz);
-        c.read_mem(old, b.data(), sz);
-        c.write_mem(p, b.data(), sz);
+    if (p && old) {
+        const uint32_t bytes = std::min(sz, c.allocation_size(old));
+        std::vector<uint8_t> b(bytes);
+        c.read_mem(old, b.data(), bytes);
+        c.write_mem(p, b.data(), bytes);
     }
+    if (p) c.free(old); // allocation failure leaves the old object intact
     c.set_ret32(p);
 }
 void h_new(Cpu& c) { c.set_ret32(c.alloc(c.arg32(0))); }
-void h_free(Cpu& c) { /* bump allocator: no-op */
-}
+void h_free(Cpu& c) { c.free(c.arg32(0)); }
 
 // ---- mem* ----
 void h_memcpy(Cpu& c) {
     uint32_t d = c.arg32(0), s = c.arg32(1), n = c.arg32(2);
     if (n) {
-        std::vector<uint8_t> b(n);
-        c.read_mem(s, b.data(), n);
-        c.write_mem(d, b.data(), n);
+        // As in touchHLE's guest-memory transfers, use a checked host view
+        // when the source is directly mapped. Nova copies small mesh/string
+        // buffers thousands of times per frame; staging each one allocates
+        // another buffer and copies it twice. Keep writes through Unicorn.
+        const bool separate = static_cast<uint64_t>(d) + n <= s ||
+                              static_cast<uint64_t>(s) + n <= d;
+        const uint8_t* source = separate ? c.memory_ptr(s, n) : nullptr;
+        if (source) {
+            c.write_mem(d, source, n);
+        } else {
+            // Also preserves memmove's overlapping-buffer semantics.
+            std::vector<uint8_t> b(n);
+            c.read_mem(s, b.data(), n);
+            c.write_mem(d, b.data(), n);
+        }
     }
     c.set_ret32(d);
 }
 void h_memmove(Cpu& c) { h_memcpy(c); }
+void h_wcscmp(Cpu& c) {
+    // touchHLE's GenericChar::strcmp compares guest code units, stopping at
+    // their null terminator. Nova's Tag_ABI_PCS_wchar_t is 2 (UTF-16), so the
+    // host wchar_t layout cannot be used, especially on Linux where it is 4.
+    uint32_t a = c.arg32(0), b = c.arg32(1);
+    for (;; a += 2, b += 2) {
+        uint16_t left = 0, right = 0;
+        c.read_mem(a, &left, sizeof left);
+        c.read_mem(b, &right, sizeof right);
+        if (left != right) {
+            c.set_ret32(left < right ? uint32_t(-1) : 1);
+            return;
+        }
+        if (!left) { c.set_ret32(0); return; }
+    }
+}
 void h_memset(Cpu& c) {
     uint32_t d = c.arg32(0), v = c.arg32(1), n = c.arg32(2);
     if (n) {
@@ -570,7 +600,7 @@ void h_srand(Cpu& c) {
     srand(c.arg32(0));
     c.set_ret32(0);
 }
-// wide ctype: the guest's wchar_t is 4 bytes, the host's is 2 on Windows, so
+// Wide ctype receives a code point by value (Nova's wchar_t storage is UTF-16), so
 // classify the code point directly instead of calling the host isw* on it.
 void h_iswspace(Cpu& c) {
     uint32_t w = c.arg32(0);
@@ -593,6 +623,8 @@ std::string format_args(Cpu& c, const std::string& fmt, int first_arg) {
 
 void register_libc() {
     register_handler("malloc", h_alloc);
+    register_handler("calloc", h_calloc);
+    register_handler("realloc", h_realloc);
     register_handler("_Z11Osp_allocExjPKci", h_alloc);       // Osp_allocEx(size,file,line)
     register_handler("_Z9Osp_allocj", h_alloc);                // Osp_alloc(size)
     register_handler("_Z12Osp_callocExjjPKci", h_calloc);    // Osp_callocEx(n,size,file,line)
@@ -606,6 +638,7 @@ void register_libc() {
 
     register_handler("memcpy", h_memcpy);
     register_handler("memmove", h_memmove);
+    register_handler("wcscmp", h_wcscmp);
     register_handler("memset", h_memset);
     register_handler("memcmp", h_memcmp);
     register_handler("strlen", h_strlen);

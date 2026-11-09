@@ -20,7 +20,20 @@ Unicorn and its bundled components retain their respective upstream terms. See `
 
 pugixml is distributed under the MIT license. See `third_party/pugixml/LICENSE.md`.
 
+## PowerVR texture decoder
+
+The unmodified decoder in `third_party/pvr/` comes from the PowerVR Native SDK,
+copyright (c) Imagination Technologies Ltd., under the MIT license. See
+`third_party/pvr/LICENSE.md` and `third_party/pvr/UPSTREAM.md`.
+
 The Bada game archive and firmware libraries are not included in this repository.
+
+## TLSF guest heap allocator
+
+The unmodified TLSF allocator in `third_party/tlsf/` is copyright (c) 2006-2016
+Matthew Conte, under the BSD 3-Clause license. See `third_party/tlsf/LICENSE.md`
+and `third_party/tlsf/UPSTREAM.md`.
+
 ## New desktop UI dependencies
 
 The desktop application uses dynamically linked Qt/PySide6 through

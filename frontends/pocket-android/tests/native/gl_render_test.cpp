@@ -11,6 +11,7 @@
 #include "pixel_accel.h"
 #include "arm_pixel_fixture.h"
 #include <array>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -83,6 +84,58 @@ void pixel(int x, int y, std::array<uint8_t, 3> expected) {
     }
 }
 
+void compressed_texture_test(Cpu& cpu, int api) {
+    const std::string suffix = "_" + std::to_string(api);
+    const std::string fbo_suffix = (api == 1 ? "OES" : "") + suffix;
+    GLint previous_texture = 0;
+    glGetIntegerv(GL_TEXTURE_BINDING_2D, &previous_texture);
+    const uint32_t out = cpu.alloc(4);
+    call(cpu, "glGenTextures" + suffix, {1, out});
+    const uint32_t texture = cpu.read_u32(out);
+    call(cpu, "glBindTexture" + suffix, {GL_TEXTURE_2D, texture});
+    call(cpu, "glTexParameteri" + suffix, {GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST});
+    call(cpu, "glGenFramebuffers" + fbo_suffix, {1, out});
+    const uint32_t framebuffer = cpu.read_u32(out);
+    call(cpu, "glBindFramebuffer" + fbo_suffix, {GL_FRAMEBUFFER, framebuffer});
+
+    // Four PVRTC words with identical white endpoints, using the upstream
+    // PowerVR decoder's opaque color encoding. Both 2/4 bpp occupy at least
+    // 32 bytes, even for the tiny mip levels Nova uploads.
+    const uint32_t white[] = {0,0xffffffff, 0,0xffffffff, 0,0xffffffff, 0,0xffffffff};
+    const uint32_t empty[8] = {};
+    const uint32_t white_data = copy(cpu, white, sizeof white);
+    const uint32_t empty_data = copy(cpu, empty, sizeof empty);
+    struct Probe { GLenum format; uint32_t width, height, data; bool opaque; };
+    const Probe probes[] = {
+        {0x8C01, 16, 8, white_data, true}, // RGB PVRTC2
+        {0x8C02, 8, 8, white_data, true}, // RGBA PVRTC4
+        {0x8C03, 1, 1, empty_data, false}, // RGBA PVRTC2 tiny mip
+        {0x8C00, 1, 1, empty_data, true}, // RGB ignores encoded alpha
+    };
+    for (const auto& probe : probes) {
+        call(cpu, "glCompressedTexImage2D" + suffix,
+             {GL_TEXTURE_2D, 0, probe.format, probe.width, probe.height, 0, 32, probe.data});
+        require(glGetError() == GL_NO_ERROR, "PVRTC upload generated a GL error");
+        call(cpu, "glFramebufferTexture2D" + fbo_suffix,
+             {GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, texture, 0});
+        call(cpu, "glCheckFramebufferStatus" + fbo_suffix, {GL_FRAMEBUFFER});
+        require(cpu.reg(UC_ARM_REG_R0) == GL_FRAMEBUFFER_COMPLETE,
+                "PVRTC texture did not produce a decoded image");
+        const uint8_t expected = probe.data == white_data ? 255 : 0;
+        pixel(probe.width - 1, probe.height - 1, {expected, expected, expected});
+        uint8_t rgba[4] = {};
+        glReadPixels(0, 0, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
+        require(rgba[3] == (probe.opaque ? 255 : 0), "PVRTC RGB/RGBA alpha semantics changed");
+    }
+    call(cpu, "glBindFramebuffer" + fbo_suffix, {GL_FRAMEBUFFER, 0});
+    cpu.write_u32(out, framebuffer);
+    call(cpu, "glDeleteFramebuffers" + fbo_suffix, {1, out});
+    call(cpu, "glBindTexture" + suffix, {GL_TEXTURE_2D, static_cast<uint32_t>(previous_texture)});
+    cpu.write_u32(out, texture);
+    call(cpu, "glDeleteTextures" + suffix, {1, out});
+    require(glGetError() == GL_NO_ERROR, "compressed texture probe left a GL error");
+}
+
 void render(Cpu& cpu, int api) {
     const std::string suffix = "_" + std::to_string(api);
     call(cpu, "glViewport" + suffix, {0, 0, 64, 64});
@@ -90,6 +143,17 @@ void render(Cpu& cpu, int api) {
     call(cpu, "glClear" + suffix, {GL_COLOR_BUFFER_BIT});
 
     uint32_t out = cpu.alloc(4);
+    // Nova changes color write masks while clearing/drawing individual passes.
+    // The query returns four bytes, not four guest integers.
+    call(cpu, "glColorMask" + suffix, {0, 1, 0, 0});
+    floats(cpu, "glClearColor" + suffix, {0, 1, 1, 0});
+    call(cpu, "glClear" + suffix, {GL_COLOR_BUFFER_BIT});
+    pixel(2, 2, {255, 255, 0});
+    call(cpu, "glGetBooleanv" + suffix, {GL_COLOR_WRITEMASK, out});
+    require(cpu.read_u32(out) == 0x00000100, "guest color-mask query used the wrong byte layout");
+    call(cpu, "glColorMask" + suffix, {1, 1, 1, 1});
+    floats(cpu, "glClearColor" + suffix, {1, 0, 0, 1});
+    call(cpu, "glClear" + suffix, {GL_COLOR_BUFFER_BIT});
     call(cpu, "glGenTextures" + suffix, {1, out});
     require(cpu.read_u32(out) != 0, "guest texture creation failed");
     call(cpu, "glBindTexture" + suffix, {GL_TEXTURE_2D, cpu.read_u32(out)});
@@ -111,6 +175,8 @@ void render(Cpu& cpu, int api) {
     pixel(0, 0, {0, 255, 0});
     pixel(1, 1, {255, 0, 255});
     call(cpu, "glBindFramebuffer" + fbo_suffix, {GL_FRAMEBUFFER, 0});
+
+    compressed_texture_test(cpu, api);
 
     const float vertices[] = {-0.75f,-0.75f,0,0, 0.75f,-0.75f,1,0,
                               -0.75f,0.75f,0,1, 0.75f,0.75f,1,1};
@@ -159,6 +225,34 @@ void render(Cpu& cpu, int api) {
         call(cpu, "glVertexAttribPointer_2", {0, 2, GL_FLOAT, GL_FALSE, 16, points});
         call(cpu, "glVertexAttribPointer_2", {1, 2, GL_FLOAT, GL_FALSE, 16, points + 8});
     }
+
+    // Nova's Irrlicht renderer uploads BGRA8888 images. All four channels and
+    // both rows must reach the host; treating BGRA as one byte per pixel leaves
+    // the driver reading past the staging buffer and corrupts fonts/sprites.
+    constexpr GLenum bgra = 0x80E1; // GL_BGRA_EXT (also supported by desktop GL)
+    const uint8_t bgra_image[] = {0,0,255,255, 0,255,255,255,
+                                  255,0,255,255, 255,0,0,255};
+    call(cpu, "glTexImage2D" + suffix,
+         {GL_TEXTURE_2D, 0, GL_RGBA, 2, 2, 0, bgra, GL_UNSIGNED_BYTE,
+          copy(cpu, bgra_image, sizeof bgra_image)});
+    require(glGetError() == GL_NO_ERROR, "BGRA image upload generated a GL error");
+    call(cpu, "glDrawArrays" + suffix, {GL_TRIANGLE_STRIP, 0, 4});
+    pixel(20, 20, {255, 0, 0});
+    pixel(44, 44, {0, 0, 255});
+    const uint8_t bgra_update[] = {0,255,0,255, 255,0,0,255,
+                                   0,255,255,255, 255,0,255,255};
+    call(cpu, "glTexSubImage2D" + suffix,
+         {GL_TEXTURE_2D, 0, 0, 0, 2, 2, bgra, GL_UNSIGNED_BYTE,
+          copy(cpu, bgra_update, sizeof bgra_update)});
+    require(glGetError() == GL_NO_ERROR, "BGRA subimage upload generated a GL error");
+    call(cpu, "glDrawArrays" + suffix, {GL_TRIANGLE_STRIP, 0, 4});
+    pixel(20, 20, {0, 255, 0});
+    pixel(44, 44, {255, 0, 255});
+    // BGRA is texture-filterable in ES 1; renderability is only guaranteed
+    // from ES 2. Test it on textured quads, then restore the RGBA fixture.
+    call(cpu, "glTexImage2D" + suffix,
+         {GL_TEXTURE_2D, 0, GL_RGBA, 2, 2, 0, GL_RGBA, GL_UNSIGNED_BYTE, copy(cpu, texels, sizeof texels)});
+    call(cpu, "glClear" + suffix, {GL_COLOR_BUFFER_BIT});
 
     // Check both array and indexed draws, and the real guest->host swap path.
     bool swapped = false;
@@ -237,6 +331,121 @@ void render(Cpu& cpu, int api) {
         call(cpu, "glVertexAttribPointer_2", {1, 2, GL_FLOAT, GL_FALSE, 16, points + 8});
     }
     require(glGetError() == GL_NO_ERROR, "dynamic interleaved uploads generated a GL error");
+
+    if (api == 1) {
+        // Nova saves/restores array pointers around texture uploads. Queries
+        // must retain guest addresses and bindings after host VBO staging.
+        call(cpu, "glGetPointerv_1", {GL_VERTEX_ARRAY_POINTER, out});
+        require(cpu.read_u32(out) == points, "vertex pointer query leaked a host staging offset");
+        call(cpu, "glGetIntegerv_1", {GL_VERTEX_ARRAY_BUFFER_BINDING, out});
+        require(cpu.read_u32(out) == 0, "client array query leaked an internal host VBO");
+        call(cpu, "glIsEnabled_1", {GL_VERTEX_ARRAY});
+        require(cpu.reg(UC_ARM_REG_R0) == GL_TRUE, "deferred vertex array appears disabled to the guest");
+
+        // Each client texture unit owns its UV pointer. Using opposite corners
+        // of the same texture on two modulated units makes the quad black.
+        const float reversed_uvs[] = {1,1, 0,1, 1,0, 0,0};
+        const uint32_t second_uvs = copy(cpu, reversed_uvs, sizeof reversed_uvs);
+        call(cpu, "glActiveTexture_1", {GL_TEXTURE1});
+        call(cpu, "glBindTexture_1", {GL_TEXTURE_2D, texture_id});
+        call(cpu, "glTexEnvi_1", {GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE});
+        call(cpu, "glEnable_1", {GL_TEXTURE_2D});
+        call(cpu, "glClientActiveTexture_1", {GL_TEXTURE1});
+        call(cpu, "glTexCoordPointer_1", {2, GL_FLOAT, 0, second_uvs});
+        call(cpu, "glEnableClientState_1", {GL_TEXTURE_COORD_ARRAY});
+        call(cpu, "glClientActiveTexture_1", {GL_TEXTURE0});
+        call(cpu, "glGetPointerv_1", {GL_TEXTURE_COORD_ARRAY_POINTER, out});
+        require(cpu.read_u32(out) == points + 8, "second texture unit overwrote the first UV pointer");
+        floats(cpu, "glColor4f_1", {1, 1, 1, 1});
+        call(cpu, "glClear_1", {GL_COLOR_BUFFER_BIT});
+        call(cpu, "glDrawArrays_1", {GL_TRIANGLE_STRIP, 0, 4});
+        pixel(20, 20, {0, 0, 0});
+        pixel(44, 44, {0, 0, 0});
+        call(cpu, "glGetIntegerv_1", {GL_CLIENT_ACTIVE_TEXTURE, out});
+        require(cpu.read_u32(out) == GL_TEXTURE0, "array staging changed the guest client texture unit");
+        call(cpu, "glClientActiveTexture_1", {GL_TEXTURE1});
+        call(cpu, "glGetPointerv_1", {GL_TEXTURE_COORD_ARRAY_POINTER, out});
+        require(cpu.read_u32(out) == second_uvs, "second UV pointer was not retained after drawing");
+        call(cpu, "glDisableClientState_1", {GL_TEXTURE_COORD_ARRAY});
+        call(cpu, "glDisable_1", {GL_TEXTURE_2D});
+        call(cpu, "glActiveTexture_1", {GL_TEXTURE0});
+        call(cpu, "glClientActiveTexture_1", {GL_TEXTURE0});
+
+        // The mixed GLenum/float alpha-test ABI must discard transparent font
+        // texels rather than covering previously rendered pixels.
+        const float reference = 0.5f;
+        uint32_t reference_bits;
+        memcpy(&reference_bits, &reference, sizeof reference_bits);
+        if (cpu.hard_float) uc_reg_write(cpu.uc, UC_ARM_REG_S0, &reference);
+        call(cpu, "glAlphaFunc_1", {GL_GREATER, reference_bits});
+        const uint8_t transparent[] = {0, 255, 0, 0};
+        call(cpu, "glTexSubImage2D_1",
+             {GL_TEXTURE_2D, 0, 0, 0, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, copy(cpu, transparent, 4)});
+        call(cpu, "glEnable_1", {GL_ALPHA_TEST});
+        call(cpu, "glClear_1", {GL_COLOR_BUFFER_BIT});
+        call(cpu, "glDrawArrays_1", {GL_TRIANGLE_STRIP, 0, 4});
+        pixel(20, 20, {255, 0, 0});
+        pixel(44, 44, {255, 0, 255});
+        call(cpu, "glDisable_1", {GL_ALPHA_TEST});
+        call(cpu, "glTexSubImage2D_1",
+             {GL_TEXTURE_2D, 0, 0, 0, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, copy(cpu, texels, 4)});
+
+        const uint32_t matrix = cpu.alloc(80);
+        cpu.write_u32(matrix + 64, 0xdeadbeef);
+        call(cpu, "glGetFloatv_1", {GL_PROJECTION_MATRIX, matrix});
+        for (int i = 0; i < 16; ++i)
+            require(cpu.read_u32(matrix + i * 4) == (i % 5 == 0 ? 0x3f800000u : 0u),
+                    "matrix query omitted projection values");
+        require(cpu.read_u32(matrix + 64) == 0xdeadbeef, "matrix query overran the guest buffer");
+
+        const float density = 0.375f;
+        uint32_t density_bits;
+        memcpy(&density_bits, &density, sizeof density_bits);
+        if (cpu.hard_float) uc_reg_write(cpu.uc, UC_ARM_REG_S0, &density);
+        call(cpu, "glFogf_1", {GL_FOG_DENSITY, density_bits});
+        GLfloat actual_density = 0;
+        glGetFloatv(GL_FOG_DENSITY, &actual_density);
+        require(std::fabs(actual_density - density) < 0.001f, "mixed GLenum/float fog ABI failed");
+        call(cpu, "glClear_1", {GL_COLOR_BUFFER_BIT});
+        call(cpu, "glDrawArrays_1", {GL_TRIANGLE_STRIP, 0, 4});
+        pixel(20, 20, {0, 255, 0});
+        pixel(44, 44, {255, 0, 255});
+        require(glGetError() == GL_NO_ERROR, "Nova graphics-state regression generated a GL error");
+    }
+}
+
+void format_query_test(Cpu& cpu, int api) {
+    GLint count = 0;
+    glGetIntegerv(GL_NUM_COMPRESSED_TEXTURE_FORMATS, &count);
+    require(count >= 0, "host reported a negative texture-format count");
+    std::vector<GLint> expected(count);
+    glGetIntegerv(GL_COMPRESSED_TEXTURE_FORMATS, expected.data());
+    const uint32_t output = cpu.alloc(count * 4 + 8) + 4;
+    cpu.write_u32(output - 4, 0xdeadbeef);
+    cpu.write_u32(output + count * 4, 0xdeadbeef);
+    call(cpu, "glGetIntegerv_" + std::to_string(api), {GL_COMPRESSED_TEXTURE_FORMATS, output});
+    for (int i = 0; i < count; ++i)
+        require(cpu.read_u32(output + i * 4) == static_cast<uint32_t>(expected[i]),
+                "compressed-format integer query omitted list entries");
+    require(cpu.read_u32(output - 4) == 0xdeadbeef && cpu.read_u32(output + count * 4) == 0xdeadbeef,
+            "compressed-format query overran its guest buffer");
+    cpu.write_u32(output + count, 0xdeadbeef);
+    call(cpu, "glGetBooleanv_" + std::to_string(api), {GL_COMPRESSED_TEXTURE_FORMATS, output});
+    std::vector<GLboolean> booleans(count);
+    cpu.read_mem(output, booleans.data(), count);
+    for (int i = 0; i < count; ++i)
+        require(booleans[i] == (expected[i] != 0), "boolean texture-format query truncated its list");
+    require(cpu.read_u32(output + count) == 0xdeadbeef, "boolean texture-format query overran its guest buffer");
+    if (api == 1) {
+        cpu.write_u32(output + count * 4, 0xdeadbeef);
+        call(cpu, "glGetFloatv_1", {GL_COMPRESSED_TEXTURE_FORMATS, output});
+        std::vector<GLfloat> values(count);
+        cpu.read_mem(output, values.data(), count * sizeof(GLfloat));
+        for (int i = 0; i < count; ++i)
+            require(values[i] == static_cast<GLfloat>(expected[i]), "float texture-format query truncated its list");
+        require(cpu.read_u32(output + count * 4) == 0xdeadbeef, "float texture-format query overran its guest buffer");
+    }
+    require(glGetError() == GL_NO_ERROR, "texture-format queries generated a GL error");
 }
 
 void resize_test(Cpu& cpu, int api, SDL_Window* window) {
@@ -260,6 +469,15 @@ void resize_test(Cpu& cpu, int api, SDL_Window* window) {
     call(cpu, "glGetIntegerv" + suffix, {GL_VIEWPORT, state});
     require(cpu.read_u32(state + 8) == 64 && cpu.read_u32(state + 12) == 64,
             "guest viewport query leaked native display dimensions");
+    if (api == 1) {
+        call(cpu, "glGetFloatv_1", {GL_VIEWPORT, state});
+        require(cpu.read_u32(state) == 0 && cpu.read_u32(state + 4) == 0 &&
+                cpu.read_u32(state + 8) == 0x42800000u && cpu.read_u32(state + 12) == 0x42800000u,
+                "float viewport query leaked the scaled host rectangle");
+        call(cpu, "glGetBooleanv_1", {GL_VIEWPORT, state});
+        require(cpu.read_u32(state) == 0x01010000u,
+                "boolean viewport query exposed the host letterbox origin");
+    }
     int x = -1, y = -1;
     hle::gl_map_touch(80, 48, 160, 96, x, y);
     require(x == 32 && y == 32, "fullscreen input missed the center");
@@ -429,11 +647,11 @@ int main(int argc, char** argv) {
         cpu.set_reg(UC_ARM_REG_SP, cpu.reg(UC_ARM_REG_SP) - 256);
         cpu.hard_float = std::string(argv[2]) == "hard";
         render(cpu, api);
+        format_query_test(cpu, api);
         resize_test(cpu, api, window);
 #ifndef BADA_TEST_DESKTOP
         if (api == 2) compact_canvas_test(cpu, window);
 #endif
-        uc_close(cpu.uc);
         SDL_GL_DeleteContext(context);
         SDL_DestroyWindow(window);
         SDL_Quit();

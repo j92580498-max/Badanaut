@@ -3,6 +3,7 @@
 import contextlib
 import importlib.util
 import io
+import json
 from pathlib import Path
 import struct
 import tempfile
@@ -17,6 +18,7 @@ spec.loader.exec_module(verifier)
 class ApkVerificationTest(unittest.TestCase):
     def entries(self):
         entries = {name: b"fixture" for name in ("AndroidManifest.xml", "classes.dex", "resources.arsc", "assets/launcher.json", "assets/fonts/LiberationSans-Regular.ttf", "assets/fonts/LiberationSans-Bold.ttf", "assets/fonts/LICENSE.txt")}
+        entries["assets/launcher.json"] = (Path(__file__).resolve().parents[1] / "frontends/shared-ui/launcher.json").read_bytes()
         for abi, elf_class, machine in (("arm64-v8a", 2, 183), ("armeabi-v7a", 1, 40)):
             header = bytearray(64)
             header[:6] = b"\x7fELF" + bytes((elf_class, 1))
@@ -47,6 +49,20 @@ class ApkVerificationTest(unittest.TestCase):
         entries = self.entries()
         entries["assets/index.html"] = b"old interface"
         with self.assertRaisesRegex(ValueError, "browser interface"):
+            self.verify(entries)
+
+    def test_rejects_the_truncated_copyright_string(self):
+        entries = self.entries()
+        entries["assets/launcher.json"] = b'{"copyrightText": "Bada HLE engine\n    "trigger": [280, 0, 40, 28]}}'
+        with self.assertRaisesRegex(ValueError, "launcher.json is invalid"):
+            self.verify(entries)
+
+    def test_rejects_a_missing_menu_even_with_valid_json(self):
+        entries = self.entries()
+        launcher = json.loads(entries["assets/launcher.json"])
+        del launcher["menu"]
+        entries["assets/launcher.json"] = json.dumps(launcher).encode()
+        with self.assertRaisesRegex(ValueError, "missing the menu object"):
             self.verify(entries)
 
     def test_rejects_retained_pocket_pc_engine(self):

@@ -100,7 +100,8 @@
     }
   ],
   "settingsHelp": "Changes apply when a game starts. Resolution sets the output size; the game keeps its original screen dimensions. Desktop games start in a resizable window. F11 toggles fullscreen.",
-  "copyrightText": "Badanaut — Samsung Bada OS emulator\n\nBada HLE engine
+  "copyrightText": "Badanaut — Samsung Bada OS emulator\n\nBada HLE engine: mariotaku/bada-hle contributors. See UPSTREAM.md for attribution.\n\nLauncher design inspired by touchHLE and HyperHLE-Reborn. Written for Badanaut; no upstream game artwork is bundled.\n\nDesktop: Qt / PySide6 (LGPL / GPL / commercial), PyInstaller (GPL with bootloader exception).\n\nLiberation Sans: SIL Open Font License 1.1.\n\nSee THIRD_PARTY_NOTICES.md and the bundled license files for component licenses.",
+  "menu": {
     "trigger": [
       280,
       0,

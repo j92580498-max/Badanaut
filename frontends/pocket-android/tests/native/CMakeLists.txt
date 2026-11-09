@@ -1,20 +1,22 @@
-cmake_minimum_required(VERSION 3.16)
+cmake_minimum_required(VERSION 3.22)
 project(bada_gles_tests LANGUAGES C CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 find_package(PkgConfig REQUIRED)
 find_package(Threads REQUIRED)
-pkg_check_modules(SDL2 REQUIRED IMPORTED_TARGET sdl2)
 pkg_check_modules(GLES1 REQUIRED IMPORTED_TARGET glesv1_cm)
 pkg_check_modules(GLES2 REQUIRED IMPORTED_TARGET glesv2)
 pkg_check_modules(DESKTOP_GL REQUIRED IMPORTED_TARGET gl)
 
 get_filename_component(REPO_ROOT "${CMAKE_CURRENT_LIST_DIR}/../../../.." ABSOLUTE)
 set(BADA_ROOT "${REPO_ROOT}/third_party/bada-hle/src")
+include("${REPO_ROOT}/cmake/Dependencies.cmake")
+badanaut_add_sdl()
+badanaut_add_support_libraries()
 option(BADA_BUILD_UNICORN "Build the pinned ARM32 CPU engine" ON)
 if(BADA_BUILD_UNICORN)
-    add_subdirectory("${REPO_ROOT}/third_party/unicorn" "${CMAKE_CURRENT_BINARY_DIR}/unicorn")
+    badanaut_add_unicorn()
     set(BADA_CPU_TARGET unicorn)
 else()
     pkg_check_modules(UNICORN REQUIRED IMPORTED_TARGET unicorn)
@@ -31,28 +33,25 @@ set(BADA_TEST_SOURCES
     "${BADA_ROOT}/hle/io.cpp"
     "${BADA_ROOT}/hle/audio.cpp"
     "${BADA_ROOT}/hle/ui.cpp"
-    "${REPO_ROOT}/third_party/pvr/PVRTDecompress.cpp"
-    "${REPO_ROOT}/third_party/tlsf/tlsf.c"
 )
 add_library(bada-test-engine STATIC ${BADA_TEST_SOURCES}
     "${REPO_ROOT}/frontends/pocket-android/app/src/main/cpp/gl_android.cpp"
 )
 target_compile_definitions(bada-test-engine PRIVATE BADA_GLES_BACKEND=1)
 target_include_directories(bada-test-engine PUBLIC "${BADA_ROOT}")
-target_include_directories(bada-test-engine PRIVATE "${REPO_ROOT}/third_party/pvr" "${REPO_ROOT}/third_party/tlsf")
 target_link_libraries(bada-test-engine PUBLIC
-    PkgConfig::SDL2 ${BADA_CPU_TARGET} PkgConfig::GLES1 PkgConfig::GLES2 Threads::Threads
+    bada-sdl ${BADA_CPU_TARGET} bada-pvr bada-tlsf PkgConfig::GLES1 PkgConfig::GLES2 Threads::Threads
 )
 
 enable_testing()
 add_executable(bada-display-test display_test.cpp)
 target_include_directories(bada-display-test PRIVATE "${BADA_ROOT}")
-target_link_libraries(bada-display-test PRIVATE PkgConfig::SDL2)
+target_link_libraries(bada-display-test PRIVATE bada-sdl)
 add_test(NAME display-scaling COMMAND bada-display-test)
 add_executable(bada-mobile-display-test display_test.cpp)
 target_include_directories(bada-mobile-display-test PRIVATE "${BADA_ROOT}")
 target_compile_definitions(bada-mobile-display-test PRIVATE __ANDROID__=1)
-target_link_libraries(bada-mobile-display-test PRIVATE PkgConfig::SDL2)
+target_link_libraries(bada-mobile-display-test PRIVATE bada-sdl)
 add_test(NAME display-mobile-resolution COMMAND bada-mobile-display-test)
 add_executable(bada-gles-test gl_render_test.cpp)
 target_link_libraries(bada-gles-test PRIVATE bada-test-engine)
@@ -98,9 +97,8 @@ endforeach()
 # coverage; it does not substitute for the native ES 1 probe.
 add_library(bada-desktop-test-engine STATIC ${BADA_TEST_SOURCES})
 target_include_directories(bada-desktop-test-engine PUBLIC "${BADA_ROOT}")
-target_include_directories(bada-desktop-test-engine PRIVATE "${REPO_ROOT}/third_party/pvr" "${REPO_ROOT}/third_party/tlsf")
 target_link_libraries(bada-desktop-test-engine PUBLIC
-    PkgConfig::SDL2 ${BADA_CPU_TARGET} PkgConfig::DESKTOP_GL Threads::Threads
+    bada-sdl ${BADA_CPU_TARGET} bada-pvr bada-tlsf PkgConfig::DESKTOP_GL Threads::Threads
 )
 add_executable(bada-desktop-render-test gl_render_test.cpp)
 target_compile_definitions(bada-desktop-render-test PRIVATE BADA_TEST_DESKTOP=1)

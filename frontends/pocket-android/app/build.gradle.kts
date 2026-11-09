@@ -3,6 +3,27 @@ plugins {
     id("org.jetbrains.kotlin.android")
 }
 
+val noticeAssetRoot = layout.buildDirectory.dir("generated/noticeAssets")
+val prepareNotices by tasks.registering(Copy::class) {
+    val repositoryRoot = rootProject.projectDir.resolve("../..")
+    val noticePaths = repositoryRoot.resolve("third_party/notices.txt").readLines()
+    from(repositoryRoot) {
+        include(noticePaths)
+    }
+    into(noticeAssetRoot.map { it.dir("notices") })
+    doFirst {
+        noticePaths.forEach { path ->
+            check(repositoryRoot.resolve(path).isFile) {
+                "Missing distribution notice: $path; initialize Git submodules first"
+            }
+        }
+    }
+}
+
+tasks.named("preBuild") {
+    dependsOn(prepareNotices)
+}
+
 android {
     namespace = "org.badanaut.emulator"
     compileSdk = 34
@@ -42,6 +63,8 @@ android {
 
     sourceSets.getByName("main") {
         assets.srcDir("../../shared-ui")
+        assets.srcDir(noticeAssetRoot)
+        java.srcDir("../../../third_party/SDL2/android-project/app/src/main/java")
         // Native libraries are built by CMake; ignore generated files from older builds.
         jniLibs.setSrcDirs(emptyList<String>())
     }

@@ -1,9 +1,6 @@
-# Rust
-/target
+# Build directories
 /.build/
 /build/
-**/*.rs.bk
-Cargo.lock.bak
 
 # Build artifacts
 *.so
@@ -11,7 +8,6 @@ Cargo.lock.bak
 *.dll
 *.a
 *.lib
-*.rlib
 *.pdb
 
 # IDEs / editors

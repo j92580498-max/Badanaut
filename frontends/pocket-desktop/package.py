@@ -16,8 +16,12 @@ command = [sys.executable, "-m", "PyInstaller", "--noconfirm", "--clean", "--one
            "--specpath", str(root / ".build"), "--add-data", f"{root / 'frontends/shared-ui'}{os.pathsep}shared-ui"]
 for package in ("PySide6_Essentials", "shiboken6"):
     command += ["--copy-metadata", package]
-for notice in ("THIRD_PARTY_NOTICES.md", "LICENSE-MIT", "LICENSE-APACHE", "third_party/bada-hle/UPSTREAM.md"):
-    command += ["--add-data", f"{root / notice}{os.pathsep}notices"]
+for entry in (root / "third_party/notices.txt").read_text(encoding="utf-8").splitlines():
+    notice = Path(entry)
+    if not (root / notice).is_file():
+        raise SystemExit(f"Missing distribution notice: {notice}; initialize Git submodules first")
+    destination = (Path("notices") / notice.parent).as_posix()
+    command += ["--add-data", f"{root / notice}{os.pathsep}{destination}"]
 for binary in native.iterdir():
     if binary.is_file() and (binary.name == engine.name or binary.suffix.lower() == ".dll" or ".so" in binary.name):
         command += ["--add-binary", f"{binary}{os.pathsep}native"]

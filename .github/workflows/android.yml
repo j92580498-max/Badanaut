@@ -20,10 +20,12 @@ jobs:
     steps:
       - name: Check out source
         uses: actions/checkout@v4
+        with:
+          submodules: recursive
       - name: Install graphics test dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake ninja-build pkg-config libsdl2-dev libunicorn-dev libgl-dev libgles-dev libegl1-mesa-dev xvfb xauth
+          sudo apt-get install -y cmake ninja-build pkg-config libasound2-dev libpulse-dev libudev-dev libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev libxss-dev libxinerama-dev libxxf86vm-dev libgl-dev libgles-dev libegl1-mesa-dev xvfb xauth
       - name: Build native regression probes
         run: |
           cmake -S frontends/pocket-android/tests/native -B .build/bada-gles -G Ninja -DCMAKE_BUILD_TYPE=Release
@@ -40,6 +42,8 @@ jobs:
     steps:
       - name: Check out source
         uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - name: Set up Java 17
         uses: actions/setup-java@v4

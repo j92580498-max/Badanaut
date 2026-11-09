@@ -1,8 +1,10 @@
 # Third-party notices
 
-## PocketHLE
+## Project licensing
 
-The PocketHLE source in this repository retains the upstream dual license, Apache-2.0 OR MIT. See `LICENSE-APACHE` and `LICENSE-MIT`.
+The launcher code and supporting scripts retain this repository's dual license,
+Apache-2.0 OR MIT. The original PocketHLE attribution remains in `LICENSE` and
+`LICENSE-MIT`. These licenses do not relicense the Bada engine or its dependencies.
 
 ## Bada HLE
 
@@ -11,6 +13,15 @@ The PocketHLE source in this repository retains the upstream dual license, Apach
 ## SDL2
 
 SDL2 is under the zlib license. See `third_party/SDL2/LICENSE.txt`.
+
+## SDL2_image
+
+SDL2_image is under the zlib license. See `third_party/SDL2_image/LICENSE.txt`.
+The desktop build uses its bundled stb PNG/JPEG codecs and screenshot encoders.
+
+## cxxopts
+
+cxxopts is distributed under the MIT license. See `third_party/cxxopts/LICENSE`.
 
 ## Unicorn Engine
 
@@ -24,15 +35,23 @@ pugixml is distributed under the MIT license. See `third_party/pugixml/LICENSE.m
 
 The unmodified decoder in `third_party/pvr/` comes from the PowerVR Native SDK,
 copyright (c) Imagination Technologies Ltd., under the MIT license. See
-`third_party/pvr/LICENSE.md` and `third_party/pvr/UPSTREAM.md`.
+`third_party/pvr/LICENSE.md`. The pinned SDK revision and decoder path are
+documented in `third_party/README.md`.
 
 The Bada game archive and firmware libraries are not included in this repository.
 
 ## TLSF guest heap allocator
 
 The unmodified TLSF allocator in `third_party/tlsf/` is copyright (c) 2006-2016
-Matthew Conte, under the BSD 3-Clause license. See `third_party/tlsf/LICENSE.md`
-and `third_party/tlsf/UPSTREAM.md`.
+Matthew Conte, under the BSD 3-Clause license retained in `third_party/tlsf/tlsf.h`.
+The pinned revision is documented in `third_party/README.md`.
+
+## Nuklear
+
+Nuklear and its SDL/OpenGL 2 backend are available under the MIT license or
+public domain terms. See `third_party/nuklear/LICENSE`. The single header
+`third_party/nuklear/nuklear.h` also retains the notices for its embedded stb
+code and ProggyClean font. Both files are included in distribution notices.
 
 ## New desktop UI dependencies
 

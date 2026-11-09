@@ -14,16 +14,18 @@ installs separately from the old `com.pockethle.app` application; import games
 and the runtime into the new app. The Bada library directory format is unchanged. No WebView or JavaScript is used.
 
 Build with JDK 17, SDK Platform and Build Tools 34, NDK `26.1.10909125` and
-CMake `3.22.1`:
+CMake `3.22.1`. Initialize native dependency submodules first:
 
 ```sh
+git submodule update --init --recursive
 ./frontends/pocket-android/build-android.sh
 cd frontends/pocket-android
 ./gradlew --no-daemon --max-workers=2 :app:testDebugUnitTest
 ```
 
 The script writes `dist/Badanaut-Android.apk`. CMake builds the Bada engine and
-pinned Unicorn 2.1.4 directly for ARM64 and ARMv7; Rust/cargo-ndk are unnecessary.
+pinned Unicorn 2.1.4 submodule directly for ARM64 and ARMv7. SDL's Java host
+sources come from the same SDL2 submodule as its native library.
 Run `python3 tools/verify-android-apk.py dist/Badanaut-Android.apk` to verify its
 native contents. Generated JNI files from older builds are ignored.
 

@@ -1,6 +1,7 @@
 #include "ui.h"
 #include "cpu.h"
 #include "dispatch.h"
+#include <algorithm>
 #include <cstdio>
 #include <map>
 
@@ -15,6 +16,7 @@ namespace {
 
 std::map<uint32_t, hle::EditField> g_fields;
 std::vector<uint32_t> g_order; // creation order, for a stable overlay layout
+int g_generation = 0; // unique even when an allocator reuses a guest object
 
 hle::EditField* field(uint32_t obj) {
     auto it = g_fields.find(obj);
@@ -45,6 +47,7 @@ void ef_ctor(Cpu& c) {
     }
     hle::EditField f;
     f.obj = o;
+    f.generation = ++g_generation;
     g_fields[o] = f;
     c.set_ret32(o);
 }
@@ -68,7 +71,7 @@ void ef_construct(Cpu& c) {
 void ef_settext(Cpu& c) {
     if (hle::EditField* f = field(c.arg32(0))) {
         f->text = hle::osp_string_get(c, c.arg32(1));
-        f->generation++; // the overlay's widget state no longer fits
+        f->generation = ++g_generation; // the overlay's widget state no longer fits
     }
     c.set_ret32(0);
 }
@@ -86,7 +89,7 @@ void ef_gettextlength(Cpu& c) {
 void ef_showkeypad(Cpu& c) {
     if (hle::EditField* f = field(c.arg32(0))) {
         if (!f->visible) {
-            f->generation++; // a new session: the overlay starts fresh
+            f->generation = ++g_generation; // a new session: the overlay starts fresh
         }
         f->visible = true;
         printf("[ui] EditField 0x%x keypad shown\n", f->obj);
@@ -129,17 +132,44 @@ void ef_set_command_button(Cpu& c) {
 // Control::SetShowState(bool) / Show(): a hidden field leaves the overlay.
 void ctl_setshowstate(Cpu& c) {
     if (hle::EditField* f = field(c.arg32(0))) {
+        if (!f->visible && c.arg32(1)) f->generation = ++g_generation;
         f->visible = c.arg32(1) != 0;
     }
     c.set_ret32(0);
 }
 void ctl_show(Cpu& c) {
     if (hle::EditField* f = field(c.arg32(0))) {
+        if (!f->visible) f->generation = ++g_generation;
         f->visible = true;
     }
     c.set_ret32(0);
 }
 void ret_ok(Cpu& c) { c.set_ret32(0); }
+void keypad_dtor(Cpu& c) {
+    const uint32_t object = c.arg32(0);
+    g_fields.erase(object);
+    g_order.erase(std::remove(g_order.begin(), g_order.end(), object), g_order.end());
+    c.set_ret32(0);
+}
+void keypad_delete(Cpu& c) { const uint32_t object = c.arg32(0); keypad_dtor(c); c.free(object); }
+void keypad_ctor(Cpu& c) {
+    ef_ctor(c);
+    c.write_u32(c.arg32(0), c.make_vtable(40, {{0, keypad_dtor}, {1, keypad_delete},
+        {8, ctl_show}, {9, ret_ok}, {16, ctl_setshowstate}}));
+    auto* f = field(c.arg32(0));
+    f->keypad = true;
+    f->x = 160; f->y = 180; f->w = 480; f->h = 40;
+    f->command[0] = "Done";
+    f->command[1] = "Cancel";
+    f->has_command[0] = f->has_command[1] = true;
+}
+void keypad_construct(Cpu& c) {
+    auto* f = field(c.arg32(0));
+    const int32_t limit = c.arg32(3);
+    if (!f || limit <= 0) { c.set_ret32(0xa0000000u + 1909); return; }
+    f->limit = limit;
+    c.set_ret32(0);
+}
 
 } // namespace
 
@@ -172,10 +202,16 @@ void ui_set_text(Cpu& cpu, EditField& f, const std::string& text) {
         return;
     }
     f.text = text;
-    call_virtual(cpu, f.text_listener, 2, {f.obj}); // OnTextValueChanged(source)
+    if (!f.keypad) call_virtual(cpu, f.text_listener, 2, {f.obj}); // OnTextValueChanged(source)
 }
 
 void ui_commit(Cpu& cpu, EditField& f, int slot) {
+    if (f.keypad) {
+        if (slot == 1) { ui_cancel(cpu, f); return; }
+        f.visible = false;
+        call_virtual(cpu, f.text_listener, 2, {f.obj});
+        return;
+    }
     f.visible = false;
     printf("[ui] EditField 0x%x commit \"%s\" (action %d)\n", f.obj, f.text.c_str(),
            f.action_id[slot]);
@@ -188,6 +224,13 @@ void ui_cancel(Cpu& cpu, EditField& f) {
 }
 
 void register_ui() {
+    register_handler("_ZN3Osp2Ui8Controls6KeypadC1Ev", keypad_ctor);
+    register_handler("_ZN3Osp2Ui8Controls6KeypadC2Ev", keypad_ctor);
+    register_handler("_ZN3Osp2Ui8Controls6Keypad9ConstructENS1_11KeypadStyleENS1_23KeypadInputModeCategoryEi", keypad_construct);
+    register_handler("_ZN3Osp2Ui8Controls6Keypad20AddTextEventListenerERKNS0_18ITextEventListenerE", ef_add_text_listener);
+    register_handler("_ZNK3Osp2Ui8Controls6Keypad7GetTextEv", ef_gettext);
+    register_handler("_ZN3Osp2Ui8Controls6KeypadD1Ev", keypad_dtor);
+    register_handler("_ZN3Osp2Ui8Controls6KeypadD2Ev", keypad_dtor);
     register_handler("_ZN3Osp2Ui8Controls9EditFieldC1Ev", ef_ctor);
     register_handler("_ZN3Osp2Ui8Controls9EditFieldC2Ev", ef_ctor);
     register_handler(

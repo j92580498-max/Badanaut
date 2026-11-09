@@ -51,6 +51,7 @@ void touch_test(Cpu& cpu) {
     constexpr const char* point_id = "_ZNK3Osp2Ui14TouchEventInfo10GetPointIdEv";
     const uint32_t touch = cpu.alloc(16), form = cpu.alloc(16), other_form = cpu.alloc(16);
     const uint32_t info = cpu.make_stub_object(32);
+    const uint32_t point = cpu.alloc(16);
     require(call(cpu, is_multi, {touch, form}) == 0, "multi-point input enabled before the app requested it");
     require(call(cpu, set_multi, {touch, form, 1}) == 0 &&
             call(cpu, is_multi, {touch, form}) == 1, "app could not enable multi-point input");
@@ -59,8 +60,10 @@ void touch_test(Cpu& cpu) {
     input::TouchInput router;
     std::vector<input::TouchEvent> received;
     const input::TouchInput::Sink sink = [&](const input::TouchEvent& event) {
-        hle::touch_event_set(info, event.point_id);
+        hle::touch_event_set(info, event.point_id, event.x, event.y);
         require(call(cpu, point_id, {info}) == event.point_id, "Bada returned the wrong contact identity");
+        call(cpu, "_ZNK3Osp2Ui14TouchEventInfo18GetCurrentPositionEv", {point, info});
+        require(cpu.read_u32(point + 4) == static_cast<uint32_t>(event.x) && cpu.read_u32(point + 8) == static_cast<uint32_t>(event.y), "TouchEventInfo lost the contact position");
         received.push_back(event);
     };
     const auto pump = [&] {

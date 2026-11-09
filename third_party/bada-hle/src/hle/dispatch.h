@@ -63,7 +63,7 @@ void user_event_pump(Cpu& cpu);
 bool touch_listener(uint32_t& listener, uint32_t& source);
 bool touch_multipoint_enabled(uint32_t source);
 // Associate the emulator-owned TouchEventInfo with this callback's contact.
-void touch_event_set(uint32_t object, uint32_t point_id);
+void touch_event_set(uint32_t object, uint32_t point_id, int x = 0, int y = 0);
 void set_package_root(const std::string& root); // .../FruitNinjaBada
 
 std::string demangle(const std::string& name);

@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <set>
 #include <stdexcept>
 #include <vector>
 
@@ -93,8 +94,10 @@ void file_test(Cpu& cpu, const std::filesystem::path& package) {
     hle::osp_string_set(cpu, mode, "w");
     call(cpu, "_ZN3Osp2Io4FileC1Ev", {first});
     require(call(cpu, construct, {first, name, mode, 0}) == 0, "new checkpoint open failed");
+    // Bada Write returns E_SUCCESS, while Read returns the byte count. The
+    // Marmalade wrapper reports a save failure if Write returns that count.
     cpu.write_mem(destination, pattern.data(), pattern.size());
-    require(call(cpu, "_ZN3Osp2Io4File5WriteEPKvi", {first, destination, static_cast<uint32_t>(pattern.size())}) == pattern.size(),
+    require(call(cpu, "_ZN3Osp2Io4File5WriteEPKvi", {first, destination, static_cast<uint32_t>(pattern.size())}) == 0,
             "checkpoint write spanning staging chunks was truncated");
     uint32_t result = 0;
     require(cpu.run_guest(cpu.read_u32(cpu.read_u32(first) + 4), {first}, result),
@@ -110,14 +113,14 @@ void file_test(Cpu& cpu, const std::filesystem::path& package) {
     call(cpu, "_ZN3Osp2Io4FileD1Ev", {first});
     hle::osp_string_set(cpu, mode, "w");
     require(call(cpu, construct, {first, name, mode, 0}) == 0, "checkpoint truncate open failed");
-    require(call(cpu, "_ZN3Osp2Io4File5WriteEPKvi", {first, destination, 4}) == 4, "checkpoint replacement failed");
+    require(call(cpu, "_ZN3Osp2Io4File5WriteEPKvi", {first, destination, 4}) == 0, "checkpoint replacement failed");
     call(cpu, "_ZN3Osp2Io4FileD1Ev", {first});
     require(std::filesystem::file_size(package / "Home/session/checkpoint.dat") == 4,
             "write mode retained the old checkpoint tail");
     hle::osp_string_set(cpu, mode, "a");
     require(call(cpu, construct, {first, name, mode, 0}) == 0, "checkpoint append open failed");
     call(cpu, seek, {first, 0, 0});
-    require(call(cpu, "_ZN3Osp2Io4File5WriteEPKvi", {first, destination, 4}) == 4 &&
+    require(call(cpu, "_ZN3Osp2Io4File5WriteEPKvi", {first, destination, 4}) == 0 &&
             call(cpu, tell, {first}) == 8, "append did not update the checkpoint cursor");
     call(cpu, "_ZN3Osp2Io4FileD1Ev", {first});
     require(call(cpu, "_ZN3Osp2Io4File6RemoveERKNS_4Base6StringE", {name}) == 0,
@@ -125,6 +128,34 @@ void file_test(Cpu& cpu, const std::filesystem::path& package) {
     hle::osp_string_set(cpu, mode, "r");
     require(call(cpu, construct, {first, name, mode, 0}) != 0,
             "removed checkpoint is still readable");
+}
+void directory_test(Cpu& cpu, const std::filesystem::path& package) {
+    std::filesystem::create_directories(package / "Data");
+    std::ofstream(package / "Data/Game.s3e") << "package";
+    std::ofstream(package / "Home/game.S3E") << "overlay";
+    std::ofstream(package / "Home/save.dat") << "save";
+    const uint32_t directory = cpu.alloc(32), name = cpu.alloc(32), output = cpu.alloc(32);
+    hle::osp_string_set(cpu, name, "/Home");
+    call(cpu, "_ZN3Osp2Io9DirectoryC1Ev", {directory});
+    require(call(cpu, "_ZN3Osp2Io9Directory9ConstructERKNS_4Base6StringE", {directory, name}) == 0, "private directory construction failed");
+    const uint32_t enumeration = call(cpu, "_ZN3Osp2Io9Directory5ReadNEv", {directory});
+    require(enumeration != 0, "private directory enumeration failed");
+    const uint32_t table = cpu.read_u32(enumeration);
+    uint32_t result = 0;
+    std::set<std::string> names;
+    while (true) {
+        require(cpu.run_guest(cpu.read_u32(table + 20), {enumeration}, result), "MoveNext faulted");
+        if (result != 0) break;
+        require(cpu.run_guest(cpu.read_u32(table + 16), {enumeration}, result) && result, "GetCurrent lost its entry");
+        call(cpu, "_ZNK3Osp2Io8DirEntry7GetNameEv", {output, result});
+        names.insert(hle::osp_string_get(cpu, output));
+    }
+    require(names.count("game.S3E") == 1 && names.count("Game.s3e") == 0 && names.count("save.dat") == 1, "Home did not merge package data with overlay precedence");
+    require(cpu.run_guest(cpu.read_u32(table + 24), {enumeration}, result), "enumerator reset failed");
+    require(cpu.run_guest(cpu.read_u32(table + 20), {enumeration}, result) && result == 0, "reset did not restart enumeration");
+    require(cpu.run_guest(cpu.read_u32(table + 4), {enumeration}, result), "enumerator deleting destructor failed");
+    require(cpu.allocation_size(enumeration) == 0, "enumerator cleanup retained the object");
+    call(cpu, "_ZN3Osp2Io9DirectoryD1Ev", {directory});
 }
 } // namespace
 
@@ -141,6 +172,7 @@ int main() {
         std::string error;
         require(cpu.init(image, error), error.c_str());
         file_test(cpu, package);
+        directory_test(cpu, package);
         SDL_Quit();
         std::filesystem::remove_all(package);
         puts("Streaming resource reads, independent cursors and virtual file cleanup passed");

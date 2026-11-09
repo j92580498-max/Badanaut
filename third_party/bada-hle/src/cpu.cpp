@@ -3,6 +3,7 @@
 #include "hle/dispatch.h"
 #include "pixel_accel.h"
 #include "tlsf.h"
+#include <SDL2/SDL.h>
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -114,6 +115,8 @@ struct Cpu::Watchdog {
 Cpu::Cpu() = default;
 
 Cpu::~Cpu() {
+    if (scheduler_context_) uc_context_free(scheduler_context_);
+    for (auto& thread : threads_) if (thread->context) uc_context_free(thread->context);
     watchdog_.reset();
     // uc_mem_map_ptr borrows the pool: close the core before releasing it.
     if (uc) uc_close(uc);
@@ -455,6 +458,10 @@ bool Cpu::run_guest(uint32_t addr, const std::vector<uint32_t>& args, uint32_t& 
         cpsr &= ~(1 << 5);
     }
     uc_reg_write(uc, UC_ARM_REG_CPSR, &cpsr);
+    return run_slice(addr, ret, timeout_us);
+}
+
+bool Cpu::run_slice(uint32_t addr, uint32_t& ret, uint64_t timeout_us) {
     // Keep the generous wall-clock guard for asset initialization. Passing
     // zero here disables Unicorn's busy polling timer; our worker owns the
     // deadline and reports expiry as failure instead of accepting partial init.
@@ -485,6 +492,164 @@ bool Cpu::run_guest(uint32_t addr, const std::vector<uint32_t>& args, uint32_t& 
     }
     ret = reg(UC_ARM_REG_R0);
     return true;
+}
+
+bool Cpu::construct_thread(uint32_t object, uint32_t runnable, uint32_t size) {
+    for (const auto& t : threads_) if (t->object == object) return false;
+    if (!object || !runnable || size > 8 * 1024 * 1024) return false;
+    auto thread = std::make_unique<GuestThread>();
+    thread->object = object;
+    thread->runnable = runnable;
+    thread->entry = read_u32(read_u32(runnable) + 8); // IRunnable::Run, after D1/D0
+    if (!thread->entry) return false;
+    thread->stack_size = std::max(size, 64u * 1024);
+    thread->stack = alloc(thread->stack_size, 8);
+    if (!thread->stack) return false;
+    threads_.push_back(std::move(thread));
+    return true;
+}
+
+bool Cpu::start_thread(uint32_t object) {
+    for (auto& thread : threads_) if (thread->object == object && !thread->started) {
+        thread->started = true;
+        return true;
+    }
+    return false;
+}
+bool Cpu::destroy_thread(uint32_t object) {
+    for (auto it = threads_.begin(); it != threads_.end(); ++it) {
+        const auto& thread = *it;
+        if (thread->object != object) continue;
+        if (thread->started && !thread->finished) return false;
+        if (thread->context) uc_context_free(thread->context);
+        free(thread->stack);
+        threads_.erase(it);
+        for (auto& waiting : threads_) if (waiting->joining == object) waiting->joining = 0;
+        return true;
+    }
+    return false;
+}
+
+bool Cpu::join_thread(uint32_t object) {
+    for (const auto& thread : threads_) if (thread->object == object) {
+        if (!thread->started || thread.get() == running_thread_) return false;
+        if (thread->finished) return true;
+        if (!running_thread_) return false;
+        running_thread_->joining = object;
+        running_thread_->suspended = true;
+        do_return();
+        uc_emu_stop(uc);
+        return true;
+    }
+    return false;
+}
+
+uint32_t Cpu::current_thread() {
+    if (running_thread_) return running_thread_->object;
+    if (!main_thread_) main_thread_ = make_stub_object(32);
+    return main_thread_;
+}
+
+uint32_t Cpu::allocated_memory() const {
+    uint32_t bytes = 0;
+    for (const auto& allocation : allocations_) bytes += allocation.second.size;
+    return bytes;
+}
+
+void Cpu::sleep_thread(uint32_t milliseconds) {
+    if (!running_thread_) return;
+    running_thread_->deadline = SDL_GetTicks() + milliseconds;
+    running_thread_->timed = true;
+    running_thread_->suspended = true;
+    do_return();
+    uc_emu_stop(uc);
+}
+
+void Cpu::exit_thread() {
+    if (!running_thread_) return;
+    running_thread_->finished = true;
+    uc_emu_stop(uc);
+}
+
+void Cpu::create_semaphore(uint32_t object, int count) { semaphores_[object] = std::max(0, count); }
+bool Cpu::acquire_semaphore(uint32_t object, int32_t timeout) {
+    auto semaphore = semaphores_.find(object);
+    if (semaphore == semaphores_.end()) return false;
+    if (semaphore->second > 0) { --semaphore->second; return true; }
+    if (!timeout || !running_thread_) return false;
+    running_thread_->semaphore = object;
+    running_thread_->timed = timeout > 0;
+    running_thread_->deadline = SDL_GetTicks() + std::max(0, timeout);
+    running_thread_->suspended = true;
+    do_return();
+    uc_emu_stop(uc);
+    return true; // the context resumes only once Release transfers the token
+}
+void Cpu::release_semaphore(uint32_t object) {
+    auto semaphore = semaphores_.find(object);
+    if (semaphore == semaphores_.end()) return;
+    for (auto& thread : threads_) if (thread->semaphore == object && !thread->finished) {
+        thread->semaphore = 0;
+        thread->timed = false;
+        return;
+    }
+    ++semaphore->second;
+}
+
+bool Cpu::pump_threads() {
+    bool active = false;
+    for (const auto& thread : threads_) active |= thread->started && !thread->finished;
+    if (!active) return true;
+    if (!scheduler_context_ && uc_context_alloc(uc, &scheduler_context_) != UC_ERR_OK) return false;
+    uc_context* host = scheduler_context_;
+    if (uc_context_save(uc, host) != UC_ERR_OK) return false;
+    bool success = true;
+    // A worker can create workers or destroy completed ones. Snapshot object
+    // identities, then look them up before each slice; vector indices and
+    // pointers to a future worker can become invalid during a guest call.
+    std::vector<uint32_t> objects;
+    for (const auto& thread : threads_) objects.push_back(thread->object);
+    for (uint32_t object : objects) {
+        GuestThread* thread = nullptr;
+        for (const auto& candidate : threads_) if (candidate->object == object) { thread = candidate.get(); break; }
+        if (!thread) continue;
+        if (!thread->started || thread->finished) continue;
+        if (thread->joining) {
+            bool finished = false;
+            for (const auto& joined : threads_) if (joined->object == thread->joining) finished = joined->finished;
+            if (!finished) continue;
+            thread->joining = 0;
+        }
+        if (thread->timed && (int32_t)(SDL_GetTicks() - thread->deadline) < 0) continue;
+        if (thread->semaphore) {
+            if (!thread->timed) continue;
+            thread->semaphore = 0;
+            if (uc_context_restore(uc, thread->context) != UC_ERR_OK) { success = false; break; }
+            set_ret32(0xa0000000u + 3001); // E_TIMEOUT; no token was consumed
+            if (uc_context_save(uc, thread->context) != UC_ERR_OK) { success = false; break; }
+        }
+        thread->timed = false;
+        running_thread_ = thread;
+        thread->suspended = false;
+        uint32_t result = 0;
+        bool ok;
+        if (thread->context) {
+            if (uc_context_restore(uc, thread->context) != UC_ERR_OK) { success = false; break; }
+            uint32_t pc = reg(UC_ARM_REG_PC) | ((reg(UC_ARM_REG_CPSR) >> 5) & 1);
+            ok = run_slice(pc, result, 120'000'000);
+        } else {
+            if (uc_context_alloc(uc, &thread->context) != UC_ERR_OK || uc_context_restore(uc, host) != UC_ERR_OK) { success = false; break; }
+            set_reg(UC_ARM_REG_SP, thread->stack + thread->stack_size - 16);
+            ok = run_guest(thread->entry, {thread->runnable}, result);
+        }
+        if (thread->suspended && ok) {
+            if (uc_context_save(uc, thread->context) != UC_ERR_OK) { success = false; break; }
+        }
+        else thread->finished = true;
+        if (!ok) { success = false; break; }
+    }
+    running_thread_ = nullptr;
+    return uc_context_restore(uc, host) == UC_ERR_OK && success;
 }
 
 // ---- ABI accessors ----

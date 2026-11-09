@@ -27,6 +27,7 @@ struct EditField {
     int action_id[2] = {0, 0};
     bool has_command[2] = {false, false};
     bool visible = false; // ShowKeypad()/Show() opened it
+    bool keypad = false; // Keypad reports text only when the session is accepted
     // Bumped whenever the app reopens the control or replaces its text. The
     // overlay keys its widget on this, so the widget starts with fresh state
     // instead of a text selection that no longer fits the new string.

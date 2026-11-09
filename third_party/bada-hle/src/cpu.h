@@ -31,6 +31,19 @@ class Cpu {
     void run_init_array(); // run DT_INIT_ARRAY constructors
     bool run_guest(uint32_t addr, const std::vector<uint32_t>& args, uint32_t& ret,
                    uint64_t timeout_us = 120'000'000);
+    // Cooperative Bada workers share memory, but retain separate ARM/VFP
+    // contexts and stacks. Pump only from the host, outside uc_emu_start.
+    bool construct_thread(uint32_t object, uint32_t runnable, uint32_t stack_size);
+    bool start_thread(uint32_t object);
+    bool join_thread(uint32_t object);
+    bool destroy_thread(uint32_t object);
+    bool pump_threads();
+    void sleep_thread(uint32_t milliseconds);
+    uint32_t current_thread();
+    void exit_thread();
+    void create_semaphore(uint32_t object, int count);
+    bool acquire_semaphore(uint32_t object, int32_t timeout);
+    void release_semaphore(uint32_t object);
 
     // --- Calling-convention accessors (for HLE handlers) ---
     uint32_t arg32(int i); // i-th integer/pointer arg (r0-r3, then stack)
@@ -55,6 +68,7 @@ class Cpu {
     uint32_t alloc(uint32_t size, uint32_t align = 8);
     void free(uint32_t address);
     uint32_t allocation_size(uint32_t address) const;
+    uint32_t allocated_memory() const;
 
     // --- Synthetic trampolines / vtables for HLE-built guest objects ---
     // The guest dispatches virtual calls through an object's vtable, so HLE
@@ -93,6 +107,18 @@ class Cpu {
     bool hard_float = true; // VFP float args (FruitNinja) vs soft-float (GlesCube)
 
   private:
+    struct GuestThread {
+        uint32_t object = 0, runnable = 0, entry = 0, stack = 0, stack_size = 0;
+        uint32_t deadline = 0, semaphore = 0, joining = 0;
+        bool started = false, finished = false, suspended = false, timed = false;
+        uc_context* context = nullptr;
+    };
+    std::vector<std::unique_ptr<GuestThread>> threads_;
+    uc_context* scheduler_context_ = nullptr;
+    GuestThread* running_thread_ = nullptr;
+    uint32_t main_thread_ = 0;
+    std::unordered_map<uint32_t, int> semaphores_;
+    bool run_slice(uint32_t address, uint32_t& result, uint64_t timeout_us);
     struct Watchdog;
     std::unique_ptr<Watchdog> watchdog_;
     void* heap_storage_ = nullptr;

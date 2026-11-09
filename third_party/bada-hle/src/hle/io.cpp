@@ -1,5 +1,7 @@
 #include "cpu.h"
 #include "dispatch.h"
+#include <SDL2/SDL.h>
+#include <algorithm>
 #include <cctype>
 #include <cstdio>
 #include <cstring>
@@ -45,8 +47,17 @@ struct File {
     size_t pos = 0;
 };
 std::map<uint32_t, Buf> g_bufs;           // ByteBuffer object -> backing store
+std::map<uint32_t, uint32_t> g_owned_buffers; // StringToUtf8N allocates an owned result
 std::map<uint32_t, File> g_files;         // File object -> owned host stream
 std::map<uint32_t, uint64_t> g_attr_size; // FileAttributes object -> size
+std::map<uint32_t, std::string> g_directories;
+struct Enumeration {
+    std::vector<fs::directory_entry> entries;
+    size_t position = 0;
+    uint32_t entry = 0;
+};
+std::map<uint32_t, Enumeration> g_enumerators;
+std::map<uint32_t, std::string> g_entry_names;
 
 bool iequals(const std::string& a, const std::string& b) {
     if (a.size() != b.size()) {
@@ -113,6 +124,7 @@ std::string home_rel(const std::string& guest) {
     if (g.size() >= 5 && iequals(g.substr(0, 5), "Home/")) {
         g = g.substr(5);
     }
+    if (iequals(g, "Home")) g.clear();
     return g;
 }
 
@@ -160,6 +172,91 @@ std::string read_string(Cpu& c, uint32_t obj) {
     return s;
 }
 
+void directory_ctor(Cpu& c) {
+    c.write_u32(c.arg32(0), c.noop_vtable());
+    g_directories.erase(c.arg32(0));
+    c.set_ret32(c.arg32(0));
+}
+void directory_construct(Cpu& c) {
+    const std::string path = read_string(c, c.arg32(1));
+    const std::string host = resolve(path);
+    std::error_code ec;
+    if (host.empty() || !fs::is_directory(host, ec)) { c.set_ret32(0xa0000000u + 2501); return; }
+    g_directories[c.arg32(0)] = path;
+    c.set_ret32(0);
+}
+void directory_dtor(Cpu& c) { g_directories.erase(c.arg32(0)); c.set_ret32(0); }
+void enumerator_next(Cpu& c) {
+    auto found = g_enumerators.find(c.arg32(0));
+    if (found == g_enumerators.end() || found->second.position == found->second.entries.size()) {
+        c.set_ret32(0xa0000000u + 1926); // E_INVALID_STATE, end of enumeration
+        return;
+    }
+    auto& enumeration = found->second;
+    g_entry_names[enumeration.entry] = enumeration.entries[enumeration.position++].path().filename().u8string();
+    c.set_ret32(0);
+}
+void enumerator_current(Cpu& c) {
+    auto found = g_enumerators.find(c.arg32(0));
+    c.set_ret32(found == g_enumerators.end() || !found->second.position ? 0 : found->second.entry);
+}
+void enumerator_reset(Cpu& c) {
+    auto found = g_enumerators.find(c.arg32(0));
+    if (found != g_enumerators.end()) found->second.position = 0;
+    c.set_ret32(0);
+}
+void enumerator_dtor(Cpu& c) {
+    auto found = g_enumerators.find(c.arg32(0));
+    if (found != g_enumerators.end()) {
+        g_entry_names.erase(found->second.entry);
+        c.free(found->second.entry);
+        g_enumerators.erase(found);
+    }
+    c.set_ret32(0);
+}
+void enumerator_delete(Cpu& c) { const auto object = c.arg32(0); enumerator_dtor(c); c.free(object); }
+void directory_read(Cpu& c) {
+    auto found = g_directories.find(c.arg32(0));
+    if (found == g_directories.end()) { c.set_ret32(0); return; }
+    // Bada deploys Data in the app's private /Home namespace. Merge the
+    // writable overlay with package files, matching the ordinary read lookup.
+    const std::string relative = home_rel(found->second);
+    std::map<std::string, fs::directory_entry> entries;
+    std::vector<std::string> paths;
+    std::string guest_path = found->second;
+    while (!guest_path.empty() && (guest_path[0] == '/' || guest_path[0] == '\\')) guest_path.erase(guest_path.begin());
+    if (iequals(guest_path, "Home") || (guest_path.size() > 5 && iequals(guest_path.substr(0, 5), "Home/"))) {
+        paths = {ci_resolve(g_home, relative), ci_resolve(g_pkg_root, "Data/" + relative)};
+    } else paths = {resolve(found->second)};
+    for (const auto& path : paths) {
+        if (path.empty()) continue;
+        std::error_code ec;
+        fs::directory_iterator iterator(path, ec), end;
+        while (!ec && iterator != end) {
+            const auto& entry = *iterator;
+            std::string key = entry.path().filename().u8string();
+            for (auto& character : key) character = std::tolower(static_cast<unsigned char>(character));
+            entries.emplace(key, entry); // writable files take precedence
+            iterator.increment(ec);
+        }
+    }
+    Enumeration enumeration;
+    for (const auto& entry : entries) enumeration.entries.push_back(entry.second);
+    enumeration.entry = c.make_stub_object(32);
+    const uint32_t object = c.alloc(32);
+    c.write_u32(object, c.make_vtable(8, {{0, enumerator_dtor}, {1, enumerator_delete},
+                                        {4, enumerator_current}, {5, enumerator_next}, {6, enumerator_reset}}));
+    g_enumerators[object] = std::move(enumeration);
+    c.set_ret32(object);
+}
+void direntry_getname(Cpu& c) {
+    const uint32_t output = c.arg32(0);
+    const auto found = g_entry_names.find(c.arg32(1));
+    const std::string name = found == g_entry_names.end() ? "" : found->second;
+    hle::osp_string_set(c, output, name);
+    c.set_ret32(output);
+}
+
 // ---- ByteBuffer ----
 void bb_ctor(Cpu& c) {
     uint32_t o = c.arg32(0);
@@ -187,7 +284,35 @@ void bb_construct_copy(Cpu& c) {
     g_bufs[c.arg32(0)] = src == g_bufs.end() ? Buf{} : src->second;
     c.set_ret32(0);
 }
-void bb_dtor(Cpu& c) { g_bufs.erase(c.arg32(0)); c.set_ret32(0); }
+void bb_dtor(Cpu& c) {
+    const auto owned = g_owned_buffers.find(c.arg32(0));
+    if (owned != g_owned_buffers.end()) { c.free(owned->second); g_owned_buffers.erase(owned); }
+    g_bufs.erase(c.arg32(0));
+    c.set_ret32(0);
+}
+void bb_delete(Cpu& c) { const uint32_t object = c.arg32(0); bb_dtor(c); c.free(object); }
+// StringUtil::StringToUtf8N returns a caller-owned ByteBuffer containing the
+// UTF-8 bytes and a NUL terminator. Marmalade reads it with strlen/strcpy and
+// deletes it through its virtual destructor after native name entry.
+void string_to_utf8(Cpu& c) {
+    const uint32_t string = c.arg32(0), length = c.read_u32(string + 8);
+    if (length > 65536) { c.set_ret32(0); return; }
+    std::vector<char> input((length + 1) * 2, 0);
+    if (length) c.read_mem(c.read_u32(string + 12), input.data(), length * 2);
+    char* encoded = SDL_iconv_string("UTF-8", "UTF-16LE", input.data(), input.size());
+    if (!encoded) { c.set_ret32(0); return; }
+    const uint32_t size = strlen(encoded) + 1;
+    const uint32_t object = c.alloc(32), data = c.alloc(size, 4);
+    if (!object || !data) {
+        c.free(object); c.free(data); SDL_free(encoded); c.set_ret32(0); return;
+    }
+    c.write_mem(data, encoded, size);
+    SDL_free(encoded);
+    c.write_u32(object, c.make_vtable(8, {{0, bb_dtor}, {1, bb_delete}}));
+    g_bufs[object] = {data, static_cast<int>(size), 0, static_cast<int>(size)};
+    g_owned_buffers[object] = data;
+    c.set_ret32(object);
+}
 void bb_getpointer(Cpu& c) { c.set_ret32(g_bufs.count(c.arg32(0)) ? g_bufs[c.arg32(0)].data : 0); }
 void bb_getbyte(Cpu& c) {
     auto it = g_bufs.find(c.arg32(0));
@@ -212,6 +337,10 @@ void bb_setbyte(Cpu& c) {
 void bb_getlimit(Cpu& c) {
     auto it = g_bufs.find(c.arg32(0));
     c.set_ret32(it == g_bufs.end() ? 0 : (uint32_t)it->second.limit);
+}
+void bb_getcapacity(Cpu& c) {
+    auto it = g_bufs.find(c.arg32(0));
+    c.set_ret32(it == g_bufs.end() ? 0 : static_cast<uint32_t>(it->second.cap));
 }
 void bb_setposition(Cpu& c) {
     auto it = g_bufs.find(c.arg32(0));
@@ -391,12 +520,13 @@ void file_read_raw(Cpu& c) {
     size_t n = file_read_into_guest(c, f, buf, static_cast<size_t>(len));
     c.set_ret32((uint32_t)n); // count of bytes read
 }
-// File::Write(const void*, int) -> bytes written (Nova's CWriteFile forwards it).
+// File::Write(const void*, int) returns a result, unlike Read's byte count.
+// Marmalade converts E_SUCCESS into the requested number of bytes itself.
 void file_write_raw(Cpu& c) {
     auto fi = g_files.find(c.arg32(0));
     uint32_t source = c.arg32(1);
     int length = static_cast<int32_t>(c.arg32(2));
-    if (fi == g_files.end() || length <= 0) { c.set_ret32(0); return; }
+    if (fi == g_files.end() || length < 0) { c.set_ret32(0x80000000); return; }
     File& f = fi->second;
     std::vector<uint8_t> bytes(std::min(static_cast<size_t>(length), size_t{64 * 1024}));
     size_t total = 0;
@@ -410,7 +540,7 @@ void file_write_raw(Cpu& c) {
     long position = ftell(f.stream.get());
     f.pos = position >= 0 ? static_cast<size_t>(position) : f.pos + total;
     f.size = std::max(f.size, f.pos);
-    c.set_ret32(static_cast<uint32_t>(total));
+    c.set_ret32(total == static_cast<size_t>(length) ? 0 : 0x80000000);
 }
 void file_remove(Cpu& c) {
     // Resolve the same private data file that Construct reads. Returning
@@ -727,11 +857,19 @@ bool byte_buffer_view(uint32_t object, uint32_t& data, uint32_t& length) {
 }
 
 void register_io() {
+    register_handler("_ZN3Osp4Base7Utility10StringUtil13StringToUtf8NERKNS0_6StringE", string_to_utf8);
+    register_handler("_ZN3Osp2Io9DirectoryC1Ev", directory_ctor);
+    register_handler("_ZN3Osp2Io9DirectoryC2Ev", directory_ctor);
+    register_handler("_ZN3Osp2Io9Directory9ConstructERKNS_4Base6StringE", directory_construct);
+    register_handler("_ZN3Osp2Io9DirectoryD1Ev", directory_dtor);
+    register_handler("_ZN3Osp2Io9Directory5ReadNEv", directory_read);
+    register_handler("_ZNK3Osp2Io8DirEntry7GetNameEv", direntry_getname);
     register_handler("_ZN3Osp4Base10ByteBufferC1Ev", bb_ctor);
     register_handler("_ZN3Osp4Base10ByteBufferC2Ev", bb_ctor);
     register_handler("_ZN3Osp4Base10ByteBuffer9ConstructEi", bb_construct);
     register_handler("_ZN3Osp4Base10ByteBuffer9ConstructERKS1_", bb_construct_copy);
     register_handler("_ZNK3Osp4Base10BufferBase8GetLimitEv", bb_getlimit);
+    register_handler("_ZNK3Osp4Base10BufferBase11GetCapacityEv", bb_getcapacity);
     register_handler("_ZN3Osp4Base10BufferBase11SetPositionEi", bb_setposition);
     register_handler("_ZN3Osp4Base10BufferBase4FlipENS0_10PositionToE", bb_flip);
     register_handler("_ZN3Osp4Base10BufferBase5ClearEv", bb_clear);

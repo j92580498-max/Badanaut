@@ -499,6 +499,46 @@ void g1_blendfunc(Cpu& c) { glBlendFunc(c.arg32(0), c.arg32(1)); }
 // independent VFP registers in the hard ABI and follow integer args in soft.
 void g1_colormask(Cpu& c) { glColorMask(c.arg32(0), c.arg32(1), c.arg32(2), c.arg32(3)); }
 void g1_color4f(Cpu& c) { glColor4f(c.argf32(0), c.argf32(1), c.argf32(2), c.argf32(3)); }
+float fixed(uint32_t value) { return static_cast<int32_t>(value) / 65536.f; }
+void g1_color4x(Cpu& c) { glColor4f(fixed(c.arg32(0)), fixed(c.arg32(1)), fixed(c.arg32(2)), fixed(c.arg32(3))); }
+void g1_clearcolorx(Cpu& c) { glClearColor(fixed(c.arg32(0)), fixed(c.arg32(1)), fixed(c.arg32(2)), fixed(c.arg32(3))); }
+void g1_depthrangex(Cpu& c) {
+#ifdef BADA_GLES_BACKEND
+    glDepthRangef(fixed(c.arg32(0)), fixed(c.arg32(1)));
+#else
+    glDepthRange(fixed(c.arg32(0)), fixed(c.arg32(1)));
+#endif
+}
+void g1_alphafuncx(Cpu& c) { glAlphaFunc(c.arg32(0), fixed(c.arg32(1))); }
+void g1_polygonoffsetx(Cpu& c) { glPolygonOffset(fixed(c.arg32(0)), fixed(c.arg32(1))); }
+void g1_fogx(Cpu& c) { glFogf(c.arg32(0), c.arg32(0) == GL_FOG_MODE ? c.arg32(1) : fixed(c.arg32(1))); }
+void g1_lightmodelx(Cpu& c) { glLightModelf(c.arg32(0), fixed(c.arg32(1))); }
+std::array<GLfloat, 4> fixed_vector(Cpu& c, uint32_t pointer, int count) {
+    std::array<GLfloat, 4> values{};
+    for (int i = 0; i < count; ++i) values[i] = fixed(c.read_u32(pointer + i * 4));
+    return values;
+}
+void g1_lightmodelxv(Cpu& c) {
+    auto values = fixed_vector(c, c.arg32(1), c.arg32(0) == GL_LIGHT_MODEL_AMBIENT ? 4 : 1);
+    glLightModelfv(c.arg32(0), values.data());
+}
+void g1_materialxv(Cpu& c) {
+    auto values = fixed_vector(c, c.arg32(2), c.arg32(1) == GL_SHININESS ? 1 : 4);
+    glMaterialfv(c.arg32(0), c.arg32(1), values.data());
+}
+void g1_lightxv(Cpu& c) {
+    const uint32_t pname = c.arg32(1);
+    const int count = pname == GL_SPOT_DIRECTION ? 3 : pname == GL_AMBIENT || pname == GL_DIFFUSE || pname == GL_SPECULAR || pname == GL_POSITION ? 4 : 1;
+    auto values = fixed_vector(c, c.arg32(2), count);
+    glLightfv(c.arg32(0), pname, values.data());
+}
+void g1_depthrangef(Cpu& c) {
+#ifdef BADA_GLES_BACKEND
+    glDepthRangef(c.argf32(0), c.argf32(1));
+#else
+    glDepthRange(c.argf32(0), c.argf32(1));
+#endif
+}
 void g1_frontface(Cpu& c) { glFrontFace(c.arg32(0)); }
 void g1_hint(Cpu& c) { glHint(c.arg32(0), c.arg32(1)); }
 void g1_linewidth(Cpu& c) { glLineWidth(c.argf32(0)); }
@@ -612,6 +652,13 @@ void g1_multmatrixf(Cpu& c) {
     c.read_mem(c.arg32(0), m, 64);
     glMultMatrixf(m);
 }
+void g1_loadmatrixx(Cpu& c) {
+    GLfloat matrix[16];
+    for (int i = 0; i < 16; ++i) matrix[i] = fixed(c.read_u32(c.arg32(0) + i * 4));
+    glLoadMatrixf(matrix);
+}
+void g1_rotatex(Cpu& c) { glRotatef(fixed(c.arg32(0)), fixed(c.arg32(1)), fixed(c.arg32(2)), fixed(c.arg32(3))); }
+void g1_scalex(Cpu& c) { glScalef(fixed(c.arg32(0)), fixed(c.arg32(1)), fixed(c.arg32(2))); }
 // textures
 void g1_activetexture(Cpu& c) { host<void (*)(GLenum)>("glActiveTexture")(c.arg32(0)); }
 void g1_clientactivetexture(Cpu& c) { host<void (*)(GLenum)>("glClientActiveTexture")(c.arg32(0)); }
@@ -619,8 +666,14 @@ void g1_bindtexture(Cpu& c) { glBindTexture(c.arg32(0), c.arg32(1)); }
 void g1_texparameteri(Cpu& c) { glTexParameteri(c.arg32(0), c.arg32(1), c.arg32(2)); }
 void g1_texenvi(Cpu& c) { glTexEnvi(c.arg32(0), c.arg32(1), c.arg32(2)); }
 void g1_texenvf(Cpu& c) { glTexEnvf(c.arg32(0), c.arg32(1), c.argf32(c.hard_float ? 0 : 2)); }
+void g1_texparameterx(Cpu& c) { glTexParameteri(c.arg32(0), c.arg32(1), c.arg32(2)); }
+void g1_texenvx(Cpu& c) { glTexEnvi(c.arg32(0), c.arg32(1), c.arg32(2)); }
 void g1_gentextures(Cpu& c) {
     GLsizei n = c.arg32(0);
+    if (n < 0) {
+        glGenTextures(n, nullptr); // GLES reports GL_INVALID_VALUE without reading the output
+        return;
+    }
     std::vector<GLuint> ids(n);
     glGenTextures(n, ids.data());
     for (int i = 0; i < n; i++) {
@@ -872,6 +925,46 @@ void ff_bind_all(Cpu& c, uint32_t vcount) {
         const auto& binding = bindings[slot];
         const auto& a = *binding.array;
         if (!a.enabled || uploaded[slot] || (!a.vbo && !a.ptr)) continue;
+#ifndef BADA_GLES_BACKEND
+        // Desktop fixed-function arrays reject GL_FIXED. Convert the 16.16
+        // elements while retaining the guest descriptor for state queries.
+        if (a.type == 0x140C) {
+            const uint32_t stride = stride_of(a);
+            uint32_t count = vcount;
+            std::vector<uint8_t> source;
+            if (a.vbo) {
+                host<bindfn>("glBindBuffer")(GL_ARRAY_BUFFER, a.vbo);
+                GLint bytes = 0;
+                host<void (*)(GLenum, GLenum, GLint*)>("glGetBufferParameteriv")(GL_ARRAY_BUFFER, GL_BUFFER_SIZE, &bytes);
+                if (bytes > 0 && a.ptr < static_cast<uint32_t>(bytes)) {
+                    source.resize(bytes - a.ptr);
+                    host<void (*)(GLenum, GLintptr, GLsizeiptr, void*)>("glGetBufferSubData")(GL_ARRAY_BUFFER, a.ptr, source.size(), source.data());
+                    if (!count && source.size() >= static_cast<size_t>(a.size) * 4)
+                        count = 1 + (source.size() - a.size * 4) / stride;
+                }
+            }
+            std::vector<GLfloat> values(static_cast<size_t>(count) * a.size);
+            for (uint32_t vertex = 0; vertex < count; ++vertex) for (int component = 0; component < a.size; ++component) {
+                uint32_t value = 0;
+                const size_t offset = static_cast<size_t>(vertex) * stride + component * 4;
+                if (a.vbo) {
+                    if (offset + 4 <= source.size()) memcpy(&value, source.data() + offset, 4);
+                } else value = c.read_u32(a.ptr + offset);
+                values[vertex * a.size + component] = fixed(value);
+            }
+            auto& stream = g_ff_streams[slot];
+            if (!stream.buffer) host<genfn>("glGenBuffers")(1, &stream.buffer);
+            host<bindfn>("glBindBuffer")(GL_ARRAY_BUFFER, stream.buffer);
+            host<datafn>("glBufferData")(GL_ARRAY_BUFFER, values.size() * sizeof(GLfloat), values.data(), client_buffer_usage);
+            FFArray converted = a;
+            converted.type = GL_FLOAT;
+            converted.stride = 0;
+            activate(binding);
+            binding.set(converted, 0);
+            uploaded[slot] = true;
+            continue;
+        }
+#endif
         if (a.vbo) {
             // Guest VBOs stay on the GPU; pointers are offsets into the data
             // already uploaded by glBufferData (Fruit Ninja's static models).
@@ -892,6 +985,9 @@ void ff_bind_all(Cpu& c, uint32_t vcount) {
         for (size_t next = slot + 1; next < bindings.size(); ++next) {
             const auto& other = *bindings[next].array;
             if (!other.enabled || other.vbo || !other.ptr || uploaded[next] || stride_of(other) != stride) continue;
+#ifndef BADA_GLES_BACKEND
+            if (other.type == 0x140C) continue;
+#endif
             const uint32_t first = std::min(base, other.ptr), final = std::max(last, other.ptr);
             if (final - first >= stride) continue;
             base = first;
@@ -1011,15 +1107,55 @@ void g1_getstring(Cpu& c) {
     c.set_ret32(cache[n]);
 }
 
-// ============================ EGL (sgl*) stubs ============================
-// SDL already created the real context; the EGL calls just need to "succeed".
+// ============================ EGL (sgl*) ============================
+// SDL owns the surface. Expose one RGBA/depth configuration and let the host
+// select the actual ES context when a runtime imports both API versions.
 constexpr uint32_t EGL_TRUE_ = 1, EGL_SUCCESS_ = 0x3000;
+uint32_t g_egl_error = EGL_SUCCESS_;
+std::function<bool(int)> g_context_factory;
 void egl_true(Cpu& c) { c.set_ret32(EGL_TRUE_); }
 void egl_handle(Cpu& c) { c.set_ret32(1); } // nonzero display/surface/context
-void egl_geterror(Cpu& c) { c.set_ret32(EGL_SUCCESS_); }
+void egl_createcontext(Cpu& c) {
+    int version = 1; // EGL's default client version
+    const uint32_t attributes = c.arg32(3);
+    if (attributes) {
+        for (unsigned i = 0; i < 64; i += 2) {
+            const uint32_t attribute = c.read_u32(attributes + i * 4);
+            if (attribute == 0x3038) break; // EGL_NONE
+            if (attribute == 0x3098) version = c.read_u32(attributes + (i + 1) * 4);
+        }
+    }
+    const bool created = (version == 1 || version == 2) && (!g_context_factory || g_context_factory(version));
+    if (!created) g_egl_error = 0x3009; // EGL_BAD_MATCH
+    c.set_ret32(created ? 1 : 0);
+}
+void egl_geterror(Cpu& c) { c.set_ret32(g_egl_error); g_egl_error = EGL_SUCCESS_; }
+void egl_initialize(Cpu& c) {
+    if (c.arg32(1)) c.write_u32(c.arg32(1), 1);
+    if (c.arg32(2)) c.write_u32(c.arg32(2), 4);
+    c.set_ret32(EGL_TRUE_);
+}
+void egl_getconfigs(Cpu& c) {
+    if (c.arg32(1) && static_cast<int32_t>(c.arg32(2)) > 0) c.write_u32(c.arg32(1), 1);
+    if (c.arg32(3)) c.write_u32(c.arg32(3), 1);
+    c.set_ret32(EGL_TRUE_);
+}
+void egl_querystring(Cpu& c) {
+    const char* value;
+    switch (c.arg32(1)) {
+    case 0x3054: value = "1.4"; break; // EGL_VERSION
+    case 0x3053: value = "Badanaut"; break; // EGL_VENDOR
+    case 0x308D: value = "OpenGL_ES"; break; // EGL_CLIENT_APIS
+    case 0x3055: value = ""; break; // EGL_EXTENSIONS
+    default: g_egl_error = 0x300C; c.set_ret32(0); return;
+    }
+    const uint32_t output = c.alloc(strlen(value) + 1);
+    c.write_mem(output, value, strlen(value) + 1);
+    c.set_ret32(output);
+}
 void egl_chooseconfig(Cpu& c) { // (dpy,attrs,configs,size,num)
     uint32_t configs = c.arg32(2), num = c.arg32(4);
-    if (configs) {
+    if (configs && static_cast<int32_t>(c.arg32(3)) > 0) {
         c.write_u32(configs, 1);
     }
     if (num) {
@@ -1030,8 +1166,19 @@ void egl_chooseconfig(Cpu& c) { // (dpy,attrs,configs,size,num)
 // sglGetConfigAttrib(dpy, config, attr, &value)
 void egl_getconfigattrib(Cpu& c) {
     uint32_t attr = c.arg32(2), out = c.arg32(3);
-    uint32_t v = (attr == 0x3025) ? 24 : (attr == 0x3026) ? 8
-                                                          : 8; // DEPTH=24, else 8
+    uint32_t v = 0;
+    switch (attr) {
+    case 0x3020: v = 32; break; // EGL_BUFFER_SIZE
+    case 0x3021: case 0x3022: case 0x3023: case 0x3024: case 0x3026: v = 8; break; // RGBA, stencil
+    case 0x3025: v = 24; break; // EGL_DEPTH_SIZE
+    case 0x3028: v = 1; break; // EGL_CONFIG_ID
+    case 0x3033: v = 4; break; // EGL_WINDOW_BIT
+    case 0x3040: v = 5; break; // EGL_OPENGL_ES_BIT | EGL_OPENGL_ES2_BIT
+    case 0x3027: case 0x3034: v = 0x3038; break; // no caveat / transparency
+    case 0x303F: v = 0x308E; break; // EGL_RGB_BUFFER
+    case 0x3029: case 0x302D: case 0x302E: case 0x302F: case 0x3031: case 0x3032: break;
+    default: g_egl_error = 0x3004; c.set_ret32(0); return; // EGL_BAD_ATTRIBUTE
+    }
     if (out) {
         c.write_u32(out, v);
     }
@@ -1064,6 +1211,14 @@ void gl_map_touch(int x, int y, int width, int height, int& guest_x, int& guest_
         static_cast<int64_t>(y - top) * g_surface_height / area.height), 0, g_surface_height - 1) : 0;
 }
 void gl_resize() { apply_viewport(); apply_scissor(); }
+void gl_set_surface_size(int width, int height) {
+    g_surface_width = width;
+    g_surface_height = height;
+    g_window_fit = true;
+    if (g_window) display::size_window(g_window, width, height);
+    gl_resize();
+}
+void gl_set_context_factory(std::function<bool(int)> factory) { g_context_factory = std::move(factory); }
 void gl_set_preswap(std::function<void(Cpu&)> fn) { g_preswap = std::move(fn); }
 #ifdef BADA_GLES_BACKEND
 // Implemented alongside the Android frontend, using ES arrays/shaders instead
@@ -1228,6 +1383,20 @@ void register_gl() {
     register_handler("glBlendFunc_1", g1_blendfunc);
     register_handler("glColorMask_1", g1_colormask);
     register_handler("glColor4f_1", g1_color4f);
+    register_handler("glColor4x_1", g1_color4x);
+    register_handler("glClearColorx_1", g1_clearcolorx);
+    register_handler("glDepthRangex_1", g1_depthrangex);
+    register_handler("glAlphaFuncx_1", g1_alphafuncx);
+    register_handler("glPolygonOffsetx_1", g1_polygonoffsetx);
+    register_handler("glFogx_1", g1_fogx);
+    register_handler("glLightModelx_1", g1_lightmodelx);
+    register_handler("glLightModelxv_1", g1_lightmodelxv);
+    register_handler("glMaterialxv_1", g1_materialxv);
+    register_handler("glLightxv_1", g1_lightxv);
+    register_handler("glLoadMatrixx_1", g1_loadmatrixx);
+    register_handler("glRotatex_1", g1_rotatex);
+    register_handler("glScalex_1", g1_scalex);
+    register_handler("glDepthRangef_1", g1_depthrangef);
     register_handler("glFrontFace_1", g1_frontface);
     register_handler("glHint_1", g1_hint);
     register_handler("glLineWidth_1", g1_linewidth);
@@ -1262,6 +1431,8 @@ void register_gl() {
     register_handler("glClientActiveTexture_1", g1_clientactivetexture);
     register_handler("glBindTexture_1", g1_bindtexture);
     register_handler("glTexParameteri_1", g1_texparameteri);
+    register_handler("glTexParameterx_1", g1_texparameterx);
+    register_handler("glTexEnvx_1", g1_texenvx);
     register_handler("glTexEnvi_1", g1_texenvi);
     register_handler("glTexEnvf_1", g1_texenvf);
     register_handler("glGenTextures_1", g1_gentextures);
@@ -1293,11 +1464,13 @@ void register_gl() {
     // EGL via Samsung sgl* wrapper
     register_handler("sglBindAPI", egl_true);
     register_handler("sglGetDisplay", egl_handle);
-    register_handler("sglInitialize", egl_true);
+    register_handler("sglInitialize", egl_initialize);
     register_handler("sglGetError", egl_geterror);
+    register_handler("sglGetConfigs", egl_getconfigs);
+    register_handler("sglQueryString", egl_querystring);
     register_handler("sglChooseConfig", egl_chooseconfig);
     register_handler("sglCreateWindowSurface", egl_handle);
-    register_handler("sglCreateContext", egl_handle);
+    register_handler("sglCreateContext", egl_createcontext);
     register_handler("sglMakeCurrent", egl_true);
     register_handler("sglSwapBuffers", egl_swapbuffers);
     register_handler("sglGetConfigAttrib", egl_getconfigattrib);

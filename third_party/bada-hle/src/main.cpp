@@ -268,7 +268,7 @@ void feed_touch(Cpu& cpu, SDL_Window* win, int kind, int wx, int wy, uint32_t po
     cpu.write_u32(g_pt_obj + 4, (uint32_t)dx); // Osp::Graphics::Point.x (@+4)
     cpu.write_u32(g_pt_obj + 8, (uint32_t)dy); // Osp::Graphics::Point.y (@+8)
     cpu.write_u32(g_pt_obj + 12, 0);
-    hle::touch_event_set(g_ti_obj, point_id);
+    hle::touch_event_set(g_ti_obj, point_id, dx, dy);
     if (getenv("BADA_TRACE_TOUCH"))
         printf("[touch] id=%u kind=%d guest=%d,%d\n", point_id, kind, dx, dy);
     uint32_t ret = 0;
@@ -888,6 +888,26 @@ int main(int argc, char** argv) {
                                                                                                                               : "es/other");
     }
     hle::gl_set_window(win); // sglSwapBuffers -> SDL_GL_SwapWindow
+#ifdef __ANDROID__
+    // Runtimes such as Marmalade import both GL APIs. The actual game selects
+    // its API at sglCreateContext, after the wrapper has shown its Canvas UI.
+    int active_gles_version = gles_version;
+    hle::gl_set_context_factory([&](int version) {
+        if (version == active_gles_version) return true;
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, version);
+        SDL_GLContext next = SDL_GL_CreateContext(win);
+        if (!next) {
+            printf("[gl] cannot create ES %d context: %s\n", version, SDL_GetError());
+            SDL_GL_MakeCurrent(win, glctx);
+            return false;
+        }
+        SDL_GL_DeleteContext(glctx);
+        glctx = next;
+        active_gles_version = version;
+        SDL_GL_SetSwapInterval(vsync ? 1 : 0);
+        return true;
+    });
+#endif
     overlay::init(win);
     // The app owns the swap, so the overlay draws from inside sglSwapBuffers.
     hle::gl_set_preswap([win](Cpu&) { overlay::draw(win); });
@@ -1091,6 +1111,9 @@ int main(int argc, char** argv) {
         }
     }
 
+    if (!g_on_background) g_on_background = img.resolve_contains("12OnBackgroundEv");
+    if (!g_on_foreground) g_on_foreground = img.resolve_contains("12OnForegroundEv");
+
     // ---- Run static constructors ----
     printf("\n[boot] running %zu init_array constructors...\n", img.init_array.size());
     cpu.run_init_array();
@@ -1136,6 +1159,9 @@ int main(int argc, char** argv) {
             return 0;
         }
 
+        feed_focus(cpu, g_on_foreground, "OnForeground (startup)");
+        if (!cpu.pump_threads()) return 1;
+
         // ---- Timer-driven frame loop: each frame = one OnTimerExpired -> Draw ----
         uint32_t ote = img.resolve_contains("14OnTimerExpiredE");
         printf("[boot] OnTimerExpired @ 0x%x -- entering frame loop\n", ote);
@@ -1162,6 +1188,7 @@ int main(int argc, char** argv) {
         };
         for (bool running = true; running;) {
             uint32_t frame_start = SDL_GetTicks();
+            overlay::begin_frame();
             SDL_Event ev;
             while (SDL_PollEvent(&ev)) {
                 if (ev.type == SDL_QUIT) {
@@ -1169,7 +1196,7 @@ int main(int argc, char** argv) {
                     continue;
                 }
 #ifdef __ANDROID__
-                if (ev.type == SDL_KEYDOWN && ev.key.keysym.sym == SDLK_AC_BACK) {
+                if (!overlay::active() && ev.type == SDL_KEYDOWN && ev.key.keysym.sym == SDLK_AC_BACK) {
                     running = false;
                     continue;
                 }
@@ -1277,6 +1304,8 @@ int main(int argc, char** argv) {
             hle::user_event_pump(cpu); // deliver Control::SendUserEvent posts
             hle::player_pump(cpu);     // signal no-op video clips as ended (intro skip)
             hle::audio_pump(cpu);      // consumed PCM buffers -> AudioOut listener
+            if (!cpu.pump_threads()) break;
+            overlay::present_idle(win);
             if (ticked && ++frames == 1) {
                 printf("[boot] first frame drawn\n");
             }
@@ -1323,6 +1352,7 @@ int main(int argc, char** argv) {
 
     hle::dump_stats();
     hle::audio_shutdown();
+    overlay::shutdown();
     SDL_GL_DeleteContext(glctx);
     SDL_DestroyWindow(win);
     SDL_Quit();

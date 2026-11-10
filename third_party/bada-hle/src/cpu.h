@@ -63,6 +63,7 @@ class Cpu {
     // Read-only view of the owned heap, for immediate HLE/GL transfers.
     // Writes still go through Unicorn to retain its code-cache invalidation.
     const uint8_t* memory_ptr(uint32_t a, uint32_t n) const;
+    bool memory_mapped(uint32_t address, uint32_t length) const;
 
     // --- Guest heap (TLSF pool, shared with Unicorn) ---
     uint32_t alloc(uint32_t size, uint32_t align = 8);
@@ -143,6 +144,7 @@ class Cpu {
     uint32_t noop_tramp_ = 0;
     uint32_t noop_vtable_ = 0;
     bool native_abi_ = false;
+    uint64_t handler_failures_ = 0;
     uint32_t import_slot(const std::string& name); // slot address for an import
     bool map_image(std::string& err);
     void apply_relocs();

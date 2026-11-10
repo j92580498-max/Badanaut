@@ -45,6 +45,7 @@ struct File {
     std::unique_ptr<FILE, int (*)(FILE*)> stream{nullptr, fclose};
     size_t size = 0;
     size_t pos = 0;
+    std::string name;
 };
 std::map<uint32_t, Buf> g_bufs;           // ByteBuffer object -> backing store
 std::map<uint32_t, uint32_t> g_owned_buffers; // StringToUtf8N allocates an owned result
@@ -466,6 +467,7 @@ void file_construct(Cpu& c) {
         return;
     }
     File fl;
+    fl.name = path;
     fl.stream.reset(f);
     fseek(f, 0, SEEK_END);
     long n = ftell(f);
@@ -477,6 +479,13 @@ void file_construct(Cpu& c) {
     fl.size = static_cast<size_t>(n);
     g_files[o] = std::move(fl);
     c.set_ret32(0);
+}
+void file_getname(Cpu& c) {
+    // Returning String by value uses r0 for the result and r1 for this.
+    const uint32_t output = c.arg32(0);
+    const auto file = g_files.find(c.arg32(1));
+    hle::osp_string_set(c, output, file == g_files.end() ? "" : file->second.name);
+    c.set_ret32(output);
 }
 size_t file_read_into_guest(Cpu& c, File& f, uint32_t destination, size_t length) {
     const size_t requested = std::min(length, f.size - f.pos);
@@ -547,6 +556,11 @@ void file_remove(Cpu& c) {
     // success without removing it made New Game reload an old checkpoint.
     std::string host = resolve(read_string(c, c.arg32(0)));
     c.set_ret32(!host.empty() && std::remove(host.c_str()) == 0 ? 0 : 0x80000000);
+}
+void file_exists(Cpu& c) {
+    const std::string host = resolve(read_string(c, c.arg32(0)));
+    std::error_code error;
+    c.set_ret32(!host.empty() && fs::is_regular_file(host, error));
 }
 // File::Seek(FileSeekPosition pos, long offset). pos: BEGIN=0, CUR=1, END=2.
 void file_seek(Cpu& c) {
@@ -893,10 +907,12 @@ void register_io() {
     register_handler("_ZN3Osp2Io4FileD1Ev", file_dtor);
     register_handler("_ZN3Osp2Io4FileD2Ev", file_dtor);
     register_handler("_ZN3Osp2Io4File9ConstructERKNS_4Base6StringES5_b", file_construct);
+    register_handler("_ZN3Osp2Io4File7GetNameEv", file_getname);
     register_handler("_ZN3Osp2Io4File4ReadERNS_4Base10ByteBufferE", file_read);
     register_handler("_ZN3Osp2Io4File4ReadEPvi", file_read_raw);              // Read(void*, int)
     register_handler("_ZN3Osp2Io4File5WriteEPKvi", file_write_raw);
     register_handler("_ZN3Osp2Io4File6RemoveERKNS_4Base6StringE", file_remove);
+    register_handler("_ZN3Osp2Io4File11IsFileExistERKNS_4Base6StringE", file_exists);
     register_handler("_ZN3Osp2Io4File4SeekENS0_16FileSeekPositionEl", file_seek);
     register_handler("_ZNK3Osp2Io4File4TellEv", file_tell);
     register_handler("_ZN3Osp2Io4File13GetAttributesERKNS_4Base6StringERNS0_14FileAttributesE", file_getattributes);

@@ -238,6 +238,8 @@ struct VidPlayer {
     int state = 0;                                // PlayerState
     std::chrono::steady_clock::time_point t_play; // when Play() was called
     bool playing = false;
+    bool looping = false;
+    int position = 0;
     bool ended = false;    // OnPlayerEndOfClip already fired
     uint32_t listener = 0; // IPlayerEventListener `this` (from Construct)
     uint32_t end_cb = 0;   // listener's OnPlayerEndOfClip address
@@ -251,13 +253,16 @@ VidPlayer& player(Cpu& c) { return g_players[c.arg32(0)]; }
 void player_construct(Cpu& c) {
     VidPlayer& p = player(c);
     p.listener = c.arg32(1);
-    p.end_cb = c.img ? c.img->resolve_contains("17OnPlayerEndOfClipEv") : 0;
+    const uint32_t vtable = p.listener ? c.read_u32(p.listener) : 0;
+    // Two destructor entries, OnPlayerOpened, then OnPlayerEndOfClip.
+    // Retain the listener subobject so the guest's adjustment thunk runs.
+    p.end_cb = vtable ? c.read_u32(vtable + 3 * 4) : 0;
     c.set_ret32(0);
 }
 int player_elapsed_ms(const VidPlayer& p) {
-    return (int)std::chrono::duration_cast<std::chrono::milliseconds>(
+    return p.position + (p.playing ? (int)std::chrono::duration_cast<std::chrono::milliseconds>(
                std::chrono::steady_clock::now() - p.t_play)
-        .count();
+        .count() : 0);
 }
 void player_ctor(Cpu& c) {
     uint32_t o = c.arg32(0);
@@ -268,11 +273,15 @@ void player_ctor(Cpu& c) {
     c.set_ret32(o);
 }
 void player_openfile(Cpu& c) {
-    player(c).state = 2; // OPENED
+    VidPlayer& p = player(c);
+    p.state = 2; // OPENED
+    p.playing = p.ended = false;
+    p.position = 0;
     c.set_ret32(0);
 }
 void player_play(Cpu& c) {
     VidPlayer& p = player(c);
+    if (p.state != 5) p.position = 0; // resume a paused clip; restart other states
     p.state = 6; // PLAYING
     p.playing = true;
     p.ended = false;
@@ -281,7 +290,7 @@ void player_play(Cpu& c) {
 }
 void player_getstate(Cpu& c) {
     VidPlayer& p = player(c);
-    if (p.playing && player_elapsed_ms(p) >= kClipMs) {
+    if (p.playing && !p.looping && player_elapsed_ms(p) >= kClipMs) {
         p.state = 3; // ENDOFCLIP
     }
     c.set_ret32((uint32_t)p.state);
@@ -289,13 +298,23 @@ void player_getstate(Cpu& c) {
 void player_getduration(Cpu& c) { c.set_ret32(kClipMs); }
 void player_getposition(Cpu& c) {
     VidPlayer& p = player(c);
-    int pos = p.playing ? player_elapsed_ms(p) : 0;
-    c.set_ret32((uint32_t)(pos > kClipMs ? kClipMs : pos));
+    const int pos = player_elapsed_ms(p);
+    c.set_ret32(p.looping ? pos % kClipMs : std::min(pos, kClipMs));
+}
+void player_pause(Cpu& c) {
+    VidPlayer& p = player(c);
+    if (p.playing) {
+        p.position = player_elapsed_ms(p);
+        p.state = 5; // PAUSED
+        p.playing = false;
+    }
+    c.set_ret32(0);
 }
 void player_stop(Cpu& c) {
     VidPlayer& p = player(c);
     p.state = 4; // STOPPED
     p.playing = false;
+    p.position = 0;
     c.set_ret32(0);
 }
 void player_close(Cpu& c) {
@@ -303,6 +322,7 @@ void player_close(Cpu& c) {
     p.state = 7; // CLOSED -- BVideoPlayer::UpdateVideo gates the trailer exit on
                  // GetState()==CLOSED after it calls Close() in the ENDOFCLIP case
     p.playing = false;
+    p.position = 0;
     c.set_ret32(0);
 }
 
@@ -410,6 +430,11 @@ void control_addtouchlistener(Cpu& c) {
     }
     c.set_ret32(0);
 }
+void appframe_addtouchlistener(Cpu& c) {
+    g_touch_listener = c.arg32(1);
+    g_touch_source = g_frame;
+    c.set_ret32(0);
+}
 
 struct UserEvent {
     uint32_t id;
@@ -423,7 +448,7 @@ void control_senduserevent(Cpu& c) {
 void app_getappframe(Cpu& c) {
     if (!g_appframe) {
         g_frame = c.make_stub_object(256, 64);                  // the Frame/Container
-        uint32_t vt = c.make_vtable(64, {{9, frame_getframe}}); // AppFrame: slot 9 = GetFrame
+        uint32_t vt = c.make_vtable(64, {{5, appframe_addtouchlistener}, {9, frame_getframe}});
         g_appframe = c.alloc(64, 8);
         for (int i = 0; i < 64; i += 4) {
             c.write_u32(g_appframe + i, 0);
@@ -446,7 +471,10 @@ std::string g_locale_country = "US";
 
 // SettingInfo::GetValue(String key, bool& out) -> write false (e.g. SilentMode off)
 void settinginfo_getvalue_bool(Cpu& c) {
-    c.write_u32(c.arg32(1), 0);
+    // A Bada bool occupies one byte. AppBridge::IsSilent places this output
+    // immediately before a saved register, so a word store corrupts this.
+    const uint8_t value = 0;
+    c.write_mem(c.arg32(1), &value, sizeof value);
     c.set_ret32(0);
 }
 void runtimeinfo_getvalue_int(Cpu& c) {
@@ -674,9 +702,12 @@ void register_osp() {
     register_handler("_ZN3Osp5Media6Player9ConstructERKNS0_20IPlayerEventListenerEPKNS_8Graphics10BufferInfoE",
                      player_construct);
     register_handler("_ZN3Osp5Media6Player8OpenFileERKNS_4Base6StringEb", player_openfile);
+    register_handler("_ZN3Osp5Media6Player10OpenBufferERKNS_4Base10ByteBufferEb", player_openfile);
+    register_handler("_ZN3Osp5Media6Player10SetLoopingEb", [](Cpu& c) { player(c).looping = c.arg32(1) != 0; c.set_ret32(0); });
+    register_handler("_ZN3Osp5Media6Player9IsLoopingEv", [](Cpu& c) { c.set_ret32(player(c).looping); });
     register_handler("_ZN3Osp5Media6Player4PlayEv", player_play);
     register_handler("_ZN3Osp5Media6Player4StopEv", player_stop);
-    register_handler("_ZN3Osp5Media6Player5PauseEv", ret_ok);
+    register_handler("_ZN3Osp5Media6Player5PauseEv", player_pause);
     register_handler("_ZN3Osp5Media6Player5CloseEv", player_close);
     register_handler("_ZN3Osp5Media6Player6SeekToEl", ret_ok);
     register_handler("_ZN3Osp5Media6Player7SetMuteEb", ret_ok);
@@ -777,16 +808,23 @@ void set_locale(const std::string& spec) {
 // (Asphalt's intro trailer -> menu). Must run from the loop, not a handler (it
 // re-enters the guest).
 void player_pump(Cpu& cpu) {
-    for (auto& [self, p] : g_players) {
-        if (!p.playing || p.ended || !p.listener || !p.end_cb) {
-            continue;
-        }
-        if (player_elapsed_ms(p) >= kClipMs) {
-            p.ended = true;
-            p.state = 3; // ENDOFCLIP
-            uint32_t ret = 0;
-            cpu.run_guest(p.end_cb, {p.listener}, ret);
-        }
+    std::vector<uint32_t> completed;
+    for (const auto& [self, p] : g_players)
+        if (p.playing && !p.looping && !p.ended && player_elapsed_ms(p) >= kClipMs)
+            completed.push_back(self);
+    for (const uint32_t self : completed) {
+        auto found = g_players.find(self);
+        if (found == g_players.end()) continue;
+        VidPlayer& p = found->second;
+        if (!p.playing || p.looping || p.ended) continue;
+        p.ended = true;
+        p.playing = false;
+        p.position = kClipMs;
+        p.state = 3; // ENDOFCLIP
+        const uint32_t callback = p.end_cb, listener = p.listener;
+        uint32_t ret = 0;
+        // The callback may close this player or create another one.
+        if (callback && listener) cpu.run_guest(callback, {listener}, ret);
     }
 }
 

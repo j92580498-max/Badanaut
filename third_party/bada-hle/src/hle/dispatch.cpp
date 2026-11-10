@@ -23,6 +23,34 @@ static std::unordered_map<std::string, Handler> g_handlers;
 static std::map<std::string, uint64_t> g_calls; // name -> count
 static std::unordered_map<std::string, bool> g_warned_unknown;
 
+struct CallTiming {
+    uint64_t calls = 0;
+    uint64_t nanoseconds = 0;
+};
+static std::unordered_map<std::string, CallTiming> g_call_timings;
+
+// Optional timings distinguish host API work from time executing ARM code.
+// Ordinary runs do not read the clock or allocate timing records.
+class CallTimer {
+public:
+    explicit CallTimer(const std::string& name) {
+        static const bool enabled = getenv("BADA_PROFILE_HLE") != nullptr;
+        if (enabled) {
+            timing_ = &g_call_timings[name];
+            started_ = std::chrono::steady_clock::now();
+        }
+    }
+    ~CallTimer() {
+        if (!timing_) return;
+        ++timing_->calls;
+        timing_->nanoseconds += static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now() - started_).count());
+    }
+private:
+    CallTiming* timing_ = nullptr;
+    std::chrono::steady_clock::time_point started_;
+};
+
 // Runtime call trace state (set_trace / trace_count).
 static bool g_rt_trace = false;
 static std::string g_rt_filter;
@@ -418,6 +446,7 @@ static bool is_ctor_name(const std::string& n) {
 }
 
 void call(const std::string& name, Cpu& cpu) {
+    CallTimer timing(name);
     static const bool g_trace = getenv("BADA_TRACE") != nullptr;
     if (g_trace) {
         fprintf(stderr, "[call] %s\n", name.c_str());
@@ -466,6 +495,20 @@ void dump_stats() {
                handled ? "[impl]" : "[stub]", demangle(name).c_str());
     }
     printf("  total distinct symbols called: %zu\n", v.size());
+    if (!g_call_timings.empty()) {
+        std::vector<std::pair<std::string, CallTiming>> timings(g_call_timings.begin(), g_call_timings.end());
+        std::sort(timings.begin(), timings.end(), [](const auto& a, const auto& b) {
+            return a.second.nanoseconds > b.second.nanoseconds;
+        });
+        uint64_t total = 0;
+        for (const auto& entry : timings) total += entry.second.nanoseconds;
+        printf("\n[profile] HLE host time: %.3f seconds\n", total / 1e9);
+        for (size_t i = 0; i < std::min(timings.size(), size_t{20}); ++i) {
+            const auto& entry = timings[i];
+            printf("[profile] %9.2f ms %9llu calls %s\n", entry.second.nanoseconds / 1e6,
+                   static_cast<unsigned long long>(entry.second.calls), demangle(entry.first).c_str());
+        }
+    }
 }
 
 } // namespace hle

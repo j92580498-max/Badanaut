@@ -45,6 +45,22 @@ void mouse(Uint32 kind, Uint32 device, int x, int y) {
     require(SDL_PushEvent(&event) == 1, "could not queue a mouse event");
 }
 
+void app_frame_touch_test(Cpu& cpu) {
+    const uint32_t app = cpu.make_stub_object(32);
+    const uint32_t app_frame = call(cpu, "_ZNK3Osp3App11Application11GetAppFrameEv", {app});
+    const uint32_t vtable = cpu.read_u32(app_frame);
+    uint32_t frame = 0;
+    require(cpu.run_guest(cpu.read_u32(vtable + 9 * 4), {app_frame}, frame) && frame,
+            "IAppFrame::GetFrame did not return a valid control");
+    const uint32_t listener = cpu.make_stub_object(16);
+    uint32_t result = 1;
+    require(cpu.run_guest(cpu.read_u32(vtable + 5 * 4), {app_frame, listener}, result) && result == 0,
+            "IAppFrame rejected its touch listener");
+    uint32_t registered_listener = 0, source = 0;
+    require(hle::touch_listener(registered_listener, source) && registered_listener == listener &&
+            source == frame, "IAppFrame discarded its listener or used the interface as the touch source");
+}
+
 void touch_test(Cpu& cpu) {
     constexpr const char* set_multi = "_ZN3Osp2Ui5Touch20SetMultipointEnabledERKNS0_7ControlEb";
     constexpr const char* is_multi = "_ZNK3Osp2Ui5Touch19IsMultipointEnabledERKNS0_7ControlE";
@@ -141,6 +157,7 @@ int main() {
         Cpu cpu;
         std::string error;
         require(cpu.init(image, error), error.c_str());
+        app_frame_touch_test(cpu);
         touch_test(cpu);
         SDL_Quit();
         puts("Simultaneous SDL fingers, Bada IDs, mouse isolation and focus cancellation passed");

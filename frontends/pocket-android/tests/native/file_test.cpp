@@ -36,6 +36,13 @@ void file_test(Cpu& cpu, const std::filesystem::path& package) {
 
     const uint32_t name = cpu.alloc(32), mode = cpu.alloc(32);
     hle::osp_string_set(cpu, name, "/Res/data/resources.pack");
+    constexpr const char* exists = "_ZN3Osp2Io4File11IsFileExistERKNS_4Base6StringE";
+    require(call(cpu, exists, {name}) == 1, "file existence check rejected a packaged resource");
+    hle::osp_string_set(cpu, name, "/rEs/DaTa/RESOURCES.PACK");
+    require(call(cpu, exists, {name}) == 1, "file existence check did not use case-insensitive package lookup");
+    hle::osp_string_set(cpu, name, "/Res/data/missing.pack");
+    require(call(cpu, exists, {name}) == 0, "file existence check accepted a missing resource");
+    hle::osp_string_set(cpu, name, "/Res/data/resources.pack");
     hle::osp_string_set(cpu, mode, "r");
     uint32_t first = cpu.alloc(20);
     const uint32_t second = cpu.alloc(20);
@@ -44,6 +51,18 @@ void file_test(Cpu& cpu, const std::filesystem::path& package) {
         require(call(cpu, construct, {object, name, mode, 0}) == 0, "resource pack open failed");
     }
     require(cpu.read_u32(first) == cpu.read_u32(second), "resource files did not share their class vtable");
+    const uint32_t returned_name = cpu.alloc(32), attributes = cpu.alloc(128);
+    require(call(cpu, "_ZN3Osp2Io4File7GetNameEv", {returned_name, first}) == returned_name &&
+            hle::osp_string_get(cpu, returned_name) == "/Res/data/resources.pack",
+            "File::GetName did not construct the returned guest String");
+    call(cpu, "_ZN3Osp2Io14FileAttributesC1Ev", {attributes});
+    require(call(cpu, "_ZN3Osp2Io4File13GetAttributesERKNS_4Base6StringERNS0_14FileAttributesE",
+                 {returned_name, attributes}) == 0,
+            "resource attributes could not resolve the opened file name");
+    require(call(cpu, "_ZNK3Osp2Io14FileAttributes11GetFileSizeEv", {attributes}) == pattern.size() &&
+            cpu.reg(UC_ARM_REG_R1) == 0,
+            "resource size obtained through File::GetName was wrong");
+    call(cpu, "_ZN3Osp4Base6StringD1Ev", {returned_name});
 
     const uint32_t destination = cpu.alloc(pattern.size());
     require(call(cpu, read, {first, destination, 13}) == 13, "short pack read failed");
@@ -68,6 +87,9 @@ void file_test(Cpu& cpu, const std::filesystem::path& package) {
                 "virtual file destructor faulted");
         require(call(cpu, seek, {entry.first, 0, 0}) != 0,
                 "virtual file destructor retained the open resource pack");
+        call(cpu, "_ZN3Osp2Io4File7GetNameEv", {returned_name, entry.first});
+        require(hle::osp_string_get(cpu, returned_name).empty(), "closed file retained its resource name");
+        call(cpu, "_ZN3Osp4Base6StringD1Ev", {returned_name});
     }
 
     // ByteBuffer reads use the same stream translation and publish the actual

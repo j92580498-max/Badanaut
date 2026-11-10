@@ -71,6 +71,23 @@ uint32_t shader(Cpu& cpu, GLenum kind, const char* source) {
     return object;
 }
 
+void uniform_floats(Cpu& cpu, const char* symbol, uint32_t location,
+                    std::initializer_list<float> values) {
+    cpu.set_reg(UC_ARM_REG_R0, location);
+    int index = 0;
+    for (float value : values) {
+        if (cpu.hard_float) uc_reg_write(cpu.uc, UC_ARM_REG_S0 + index, &value);
+        else {
+            uint32_t bits;
+            memcpy(&bits, &value, sizeof bits);
+            if (index < 3) cpu.set_reg(UC_ARM_REG_R1 + index, bits);
+            else cpu.write_u32(cpu.reg(UC_ARM_REG_SP) + (index - 3) * 4, bits);
+        }
+        ++index;
+    }
+    hle::call(symbol, cpu);
+}
+
 void pixel(int x, int y, std::array<uint8_t, 3> expected) {
     uint8_t value[4] = {};
     glReadPixels(x, y, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, value);
@@ -134,6 +151,142 @@ void compressed_texture_test(Cpu& cpu, int api) {
     cpu.write_u32(out, texture);
     call(cpu, "glDeleteTextures" + suffix, {1, out});
     require(glGetError() == GL_NO_ERROR, "compressed texture probe left a GL error");
+}
+
+void renderbuffer_uniform_test(Cpu& cpu) {
+    const uint32_t names = cpu.alloc(8);
+    call(cpu, "glGenRenderbuffers_2", {2, names});
+    const uint32_t color = cpu.read_u32(names), depth = cpu.read_u32(names + 4);
+    require(color && depth && color != depth, "guest renderbuffer names were not generated");
+    call(cpu, "glBindRenderbuffer_2", {GL_RENDERBUFFER, color});
+    call(cpu, "glRenderbufferStorage_2", {GL_RENDERBUFFER, GL_RGBA4, 8, 8});
+    const uint32_t dimensions = cpu.alloc(12);
+    cpu.write_u32(dimensions + 8, 0x12345678);
+    call(cpu, "glGetRenderbufferParameteriv_2", {GL_RENDERBUFFER, GL_RENDERBUFFER_WIDTH, dimensions});
+    call(cpu, "glGetRenderbufferParameteriv_2", {GL_RENDERBUFFER, GL_RENDERBUFFER_HEIGHT, dimensions + 4});
+    require(cpu.read_u32(dimensions) == 8 && cpu.read_u32(dimensions + 4) == 8 &&
+            cpu.read_u32(dimensions + 8) == 0x12345678,
+            "renderbuffer dimensions did not reach the guest output pointers");
+    call(cpu, "glBindRenderbuffer_2", {GL_RENDERBUFFER, depth});
+    call(cpu, "glRenderbufferStorage_2", {GL_RENDERBUFFER, GL_DEPTH_COMPONENT16, 8, 8});
+    const uint32_t framebuffer_name = cpu.alloc(4);
+    call(cpu, "glGenFramebuffers_2", {1, framebuffer_name});
+    const uint32_t framebuffer = cpu.read_u32(framebuffer_name);
+    call(cpu, "glBindFramebuffer_2", {GL_FRAMEBUFFER, framebuffer});
+    call(cpu, "glFramebufferRenderbuffer_2", {GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, color});
+    call(cpu, "glFramebufferRenderbuffer_2", {GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, depth});
+    call(cpu, "glCheckFramebufferStatus_2", {GL_FRAMEBUFFER});
+    require(cpu.reg(UC_ARM_REG_R0) == GL_FRAMEBUFFER_COMPLETE,
+            "guest color/depth renderbuffers did not produce a complete framebuffer");
+    call(cpu, "glViewport_2", {0, 0, 8, 8});
+    call(cpu, "glDisable_2", {GL_SCISSOR_TEST});
+    call(cpu, "glDisable_2", {GL_DEPTH_TEST});
+    call(cpu, "glDisable_2", {GL_BLEND});
+    floats(cpu, "glClearColor_2", {1, 0, 0, 1});
+    call(cpu, "glClear_2", {GL_COLOR_BUFFER_BIT});
+
+    const uint32_t vertex = shader(cpu, GL_VERTEX_SHADER,
+        "attribute vec2 position; uniform vec2 shift;"
+        "void main(){gl_Position=vec4(position+shift,0.0,1.0);}");
+    const uint32_t fragment = shader(cpu, GL_FRAGMENT_SHADER,
+        "precision mediump float; uniform vec4 tint; uniform float gain;"
+        "void main(){gl_FragColor=tint*gain;}");
+    call(cpu, "glCreateProgram_2");
+    const uint32_t program = cpu.reg(UC_ARM_REG_R0);
+    call(cpu, "glAttachShader_2", {program, vertex});
+    call(cpu, "glAttachShader_2", {program, fragment});
+    call(cpu, "glLinkProgram_2", {program});
+    call(cpu, "glUseProgram_2", {program});
+    const uint32_t mutable_name = cpu.alloc(32);
+    cpu.write_mem(mutable_name, "position", 9);
+    call(cpu, "glGetAttribLocation_2", {program, mutable_name});
+    const uint32_t original_attribute = cpu.reg(UC_ARM_REG_R0);
+    call(cpu, "glGetAttribLocation_2", {program, mutable_name});
+    require(cpu.reg(UC_ARM_REG_R0) == original_attribute, "repeated attribute lookup changed location");
+    call(cpu, "glBindAttribLocation_2", {program, 3, mutable_name});
+    call(cpu, "glGetAttribLocation_2", {program, mutable_name});
+    require(cpu.reg(UC_ARM_REG_R0) == original_attribute, "pending attribute binding took effect before relink");
+    cpu.write_mem(mutable_name, "replacement", 12);
+    call(cpu, "glGetUniformLocation_2", {program, mutable_name});
+    require(cpu.reg(UC_ARM_REG_R0) == uint32_t(-1), "missing uniform returned a location");
+    cpu.write_mem(mutable_name, "gain", 5);
+    call(cpu, "glGetUniformLocation_2", {program, mutable_name});
+    require(cpu.reg(UC_ARM_REG_R0) != uint32_t(-1), "mutable uniform name reused a stale lookup");
+    const uint32_t replacement_source = text(cpu,
+        "precision mediump float; uniform vec4 tint; uniform float replacement;"
+        "void main(){gl_FragColor=tint*replacement;}");
+    call(cpu, "glShaderSource_2", {fragment, 1, copy(cpu, &replacement_source, sizeof replacement_source), 0});
+    call(cpu, "glCompileShader_2", {fragment});
+    call(cpu, "glLinkProgram_2", {program});
+    call(cpu, "glGetUniformLocation_2", {program, mutable_name});
+    require(cpu.reg(UC_ARM_REG_R0) == uint32_t(-1), "relink retained a removed uniform");
+    cpu.write_mem(mutable_name, "replacement", 12);
+    call(cpu, "glGetUniformLocation_2", {program, mutable_name});
+    require(cpu.reg(UC_ARM_REG_R0) != uint32_t(-1), "relink retained a missing uniform lookup");
+    cpu.write_mem(mutable_name, "position", 9);
+    call(cpu, "glGetAttribLocation_2", {program, mutable_name});
+    require(cpu.reg(UC_ARM_REG_R0) == 3, "relink retained an old attribute location");
+    const auto location = [&](const char* name) {
+        call(cpu, "glGetUniformLocation_2", {program, text(cpu, name)});
+        require(cpu.reg(UC_ARM_REG_R0) != uint32_t(-1), "test uniform was optimized out");
+        return cpu.reg(UC_ARM_REG_R0);
+    };
+    uniform_floats(cpu, "glUniform1f_2", location("replacement"), {1});
+    uniform_floats(cpu, "glUniform2f_2", location("shift"), {0.5f, 0});
+    uniform_floats(cpu, "glUniform4f_2", location("tint"), {0, 1, 0, 1});
+    call(cpu, "glGetAttribLocation_2", {program, text(cpu, "position")});
+    const uint32_t attribute = cpu.reg(UC_ARM_REG_R0);
+    const float triangle[] = {-1,-1, 3,-1, -1,3};
+    call(cpu, "glVertexAttribPointer_2", {attribute, 2, GL_FLOAT, 0, 0, copy(cpu, triangle, sizeof triangle)});
+    call(cpu, "glEnableVertexAttribArray_2", {attribute});
+    call(cpu, "glDrawArrays_2", {GL_TRIANGLES, 0, 3});
+    require(glGetError() == GL_NO_ERROR, "renderbuffer/uniform draw generated a GL error");
+    pixel(0, 3, {255, 0, 0});
+    pixel(4, 3, {0, 255, 0});
+
+    // Odd-width rows exercise PACK_ALIGNMENT. Padding and the bytes outside
+    // the destination must survive, including the last row's trailing bytes.
+    const uint32_t readback = cpu.alloc(40);
+    const std::array<uint8_t, 40> canary = [] {
+        std::array<uint8_t, 40> value{};
+        value.fill(0xcc);
+        return value;
+    }();
+    cpu.write_mem(readback, canary.data(), canary.size());
+    call(cpu, "glPixelStorei_2", {GL_PACK_ALIGNMENT, 8});
+    call(cpu, "glReadPixels_2", {3, 2, 3, 2, GL_RGBA, GL_UNSIGNED_BYTE, readback + 4});
+    std::array<uint8_t, 40> pixels;
+    cpu.read_mem(readback, pixels.data(), pixels.size());
+    for (size_t i = 0; i < pixels.size(); ++i) {
+        const bool written = (i >= 4 && i < 16) || (i >= 20 && i < 32);
+        const uint8_t expected = written ? ((i % 4 == 1 || i % 4 == 3) ? 255 : 0) : 0xcc;
+        require(pixels[i] == expected, "guest pixel readback corrupted pixels, padding or guards");
+    }
+    call(cpu, "glPixelStorei_2", {GL_PACK_ALIGNMENT, 4});
+    call(cpu, "glDisableVertexAttribArray_2", {attribute});
+    const uint32_t invalid_source = text(cpu, "invalid shader source");
+    call(cpu, "glShaderSource_2", {fragment, 1, copy(cpu, &invalid_source, sizeof invalid_source), 0});
+    call(cpu, "glCompileShader_2", {fragment});
+    call(cpu, "glLinkProgram_2", {program});
+    cpu.write_mem(mutable_name, "replacement", 12);
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        call(cpu, "glGetUniformLocation_2", {program, mutable_name});
+        require(cpu.reg(UC_ARM_REG_R0) == uint32_t(-1) && glGetError() == GL_INVALID_OPERATION,
+                "failed relink hid the lookup error or returned a cached location");
+    }
+    call(cpu, "glUseProgram_2", {0});
+    call(cpu, "glDeleteProgram_2", {program});
+    call(cpu, "glGetUniformLocation_2", {program, mutable_name});
+    require(cpu.reg(UC_ARM_REG_R0) == uint32_t(-1) && glGetError() == GL_INVALID_VALUE,
+            "deleted program retained a cached uniform location");
+    call(cpu, "glDeleteShader_2", {vertex});
+    call(cpu, "glDeleteShader_2", {fragment});
+    call(cpu, "glBindFramebuffer_2", {GL_FRAMEBUFFER, 0});
+    call(cpu, "glDeleteFramebuffers_2", {1, framebuffer_name});
+    call(cpu, "glDeleteRenderbuffers_2", {2, names});
+    require(cpu.read_u32(names) == color && cpu.read_u32(names + 4) == depth,
+            "renderbuffer deletion overwrote the guest name array");
+    require(glGetError() == GL_NO_ERROR, "renderbuffer cleanup generated a GL error");
 }
 
 void render(Cpu& cpu, int api) {
@@ -724,6 +877,9 @@ int main(int argc, char** argv) {
         cpu.hard_float = std::string(argv[2]) == "hard";
         egl_test(cpu);
         if (api == 1) fixed_test(cpu);
+        // This probe replaces shaders/arrays. Build the shared texture fixture
+        // afterwards so the later resize checks retain their original state.
+        if (api == 2) renderbuffer_uniform_test(cpu);
         render(cpu, api);
         format_query_test(cpu, api);
         resize_test(cpu, api, window);

@@ -76,7 +76,18 @@ void player_test(Cpu& cpu) {
     }}});
     for (const uint32_t object : {owner, other_owner}) cpu.write_u32(object + 12, vtable);
     constexpr const char* construct = "_ZN3Osp5Media6Player9ConstructERKNS0_20IPlayerEventListenerEPKNS_8Graphics10BufferInfoE";
-    for (const uint32_t object : {first, second}) call(cpu, "_ZN3Osp5Media6PlayerC1Ev", {object});
+    const uint8_t video[] = {'R','I','F','F',4,0,0,0,'A','V','I',' '};
+    const uint32_t buffer = cpu.alloc(36);
+    call(cpu, "_ZN3Osp4Base10ByteBufferC1Ev", {buffer});
+    call(cpu, "_ZN3Osp4Base10ByteBuffer9ConstructEi", {buffer, sizeof video});
+    cpu.write_mem(call(cpu, "_ZNK3Osp4Base10ByteBuffer10GetPointerEv", {buffer}), video, sizeof video);
+    for (const uint32_t object : {first, second}) {
+        call(cpu, "_ZN3Osp5Media6PlayerC1Ev", {object});
+        require(call(cpu, "_ZN3Osp5Media6Player4PlayEv", {object}) != 0, "unopened Player started");
+        require(call(cpu, "_ZN3Osp5Media6Player10OpenBufferERKNS_4Base10ByteBufferEb", {object, buffer, 0}) == 0,
+                "intro-video placeholder did not open");
+    }
+    call(cpu, "_ZN3Osp4Base10ByteBufferD1Ev", {buffer});
     call(cpu, construct, {first, owner + 12, 0});
     call(cpu, construct, {second, other_owner + 12, 0});
     call(cpu, "_ZN3Osp5Media6Player10SetLoopingEb", {second, 1});
@@ -100,7 +111,10 @@ void player_test(Cpu& cpu) {
     require(cpu.read_u32(owner + 4) == 1 &&
             call(cpu, "_ZNK3Osp5Media6Player8GetStateEv", {first}) == 5,
             "paused media completed behind the app's back");
-    for (const uint32_t object : {first, second}) call(cpu, "_ZN3Osp5Media6Player5CloseEv", {object});
+    for (const uint32_t object : {first, second}) {
+        call(cpu, "_ZN3Osp5Media6Player5CloseEv", {object});
+        call(cpu, "_ZN3Osp5Media6PlayerD1Ev", {object});
+    }
 }
 
 void watchdog_test(Cpu& cpu) {

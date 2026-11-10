@@ -57,11 +57,58 @@ and presentation. These figures do not measure Android hardware GLES speed.
 Fruit Ninja measured about 6.8 FPS in the same restricted software-rendering
 comparison.
 
+## Music playback
+
+Tower Bloxx uses `Osp::Media::Player` for its MP3 music. The old Player only
+simulated a 300 ms video clip: `OpenFile` and `OpenBuffer` ignored their input,
+volume/mute/seek were success stubs, and asynchronous opens never notified the
+registered listener. No compressed audio reached SDL.
+
+Player now decodes MP3 and WAV with the pinned dr_libs memory decoders and mixes
+them through the same SDL playback device as `AudioOut`. The audio callback
+reads host-owned encoded bytes into fixed 1024-frame PCM blocks, resamples to
+the device rate and advances playback independently of the guest frame loop.
+It supports pause/resume, looping, volume, mute and seeking. `OpenFile` uses
+the package's case-insensitive path lookup; `OpenBuffer` copies the bytes before
+the game can reuse or destroy them.
+
+Encoded audio is limited to 16 MiB per clip and 64 MiB across at most 64 open
+clips, with a maximum one-hour duration. There is no full-song PCM allocation.
+Unsupported AVI/MP4 intros retain their short completion placeholder; only
+their container header is read, including for movies larger than the audio
+limit. Closing or destroying a Player releases its input and invalidates queued
+callbacks. Open, seek and completion listeners run on the emulation thread,
+preserving the listener subobject and its Thumb adjustment thunk.
+
+Native disk-audio probes verify the actual MP3/WAV samples, stereo channel
+order, resampling, source ownership, seeking after EOF, suspension, pause,
+looping, volume/mute, clipping while mixing with `AudioOut`, and callback
+invalidation after close/destruction. The synthesized 100 ms MP3 fixture is
+original test data, including LAME delay/padding metadata; an independent
+mpg123 decode confirmed its 4410 stereo frames at 44.1 kHz.
+
+The game opens `/Res/19.mp3` for menu music and `/Res/22.mp3` in Quick Game,
+with WAV effects opened from ByteBuffers. The end-to-end run recorded 80.448
+seconds of 48 kHz stereo S16 output, including 74.981 seconds with samples above
+32 in either channel. Every one-second window contained audio; the short WAV
+effects alone cannot account for this continuous output. The game accepted
+repeated drops and reached a tower counter of two. It exited normally after
+103.0 seconds with no recorded guest faults, peaking at 247.7 MiB for the
+emulator, Xvfb and capture tools together. Screenshots are in
+`/root/emulator photo gallery`, and the run used copied saves in an isolated
+test package.
+
+Late-game median performance remained 4.6 FPS and 219.3 ms of busy frame time
+on this restricted software-rendering host. Fruit Ninja completed a further
+180-frame regression run normally in 49.6 seconds with no recorded guest
+faults, peaking at 230.6 MiB.
+
 ## Validation
 
 The title, mode menu and Quick Game render correctly. Touch input enters the
 game and responds to repeated drops, including a tower counter of two.
-The final unprofiled run exited normally after 108.2 seconds and peaked at
+The earlier startup/rendering verification exited normally after 108.2 seconds
+and peaked at
 269.8 MiB for the emulator, Xvfb and capture tools together. Captures are saved
 in `/root/emulator photo gallery`.
 

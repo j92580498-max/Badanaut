@@ -79,7 +79,8 @@ Runs the **unmodified ARM binaries** end to end:
   translated guest→VBO/VAO).
 - **3D Tower Bloxx Deluxe** (hard-float, GL ES 2.0) boots to its title and mode
   menus, enters Quick Game and accepts touch input to drop blocks. The
-  [compatibility notes](TOWER_BLOXX.md) cover its startup and frame-time fixes.
+  MP3 soundtrack and WAV effects play through the shared SDL mixer. The
+  [compatibility notes](TOWER_BLOXX.md) cover its startup, frame-time and music fixes.
 
 This exercises the whole stack: ARM emulation, custom ELF load/reloc, the Osp
 framework HLE (App/Ui/Frame/Timer with synthesized guest vtables), GL/EGL

@@ -23,6 +23,7 @@ SDL2_image. CI uses `actions/checkout` with `submodules: recursive`.
 | [pugixml](https://github.com/zeux/pugixml) | 1.13 — `a0e064336317c9347a91224112af9933598714e9` | Bada package XML metadata |
 | [PowerVR Native SDK](https://github.com/powervr-graphics/Native_SDK) | `2b1bf2f14d3365d0bb801e2a6a131a319d3a2e48` | Only `framework/PVRCore/texture/PVRTDecompress.cpp` and its header are used |
 | [TLSF](https://github.com/mattconte/tlsf) | `deff9ab509341f264addbd3c8ada533678591905` | Shared guest heap allocator |
+| [dr_libs](https://github.com/mackron/dr_libs) | MP3 0.7.5 / WAV 0.14.7 — `4ffbded724cc3e3d2838eebca70858bf5984385a` | Memory MP3/WAV decoders for Osp Media Player |
 | [Nuklear](https://github.com/Immediate-Mode-UI/Nuklear) | 4.13.3 + upstream changes — `0dbc52f86404f9e1f26ce0df3015ed23ff54a726` | Desktop Bada control overlay and SDL/OpenGL 2 backend |
 
 `cmake/Dependencies.cmake` configures these sources for desktop, Android and
@@ -33,6 +34,11 @@ SDL2_image uses its built-in PNG/JPEG codecs; optional external image formats
 are disabled. Android obtains SDL Java sources directly from the same SDL2
 submodule used by its native build. Native runtime libraries are copied beside
 the desktop engine for packaging.
+
+Only the MP3 and WAV memory decoders from dr_libs are compiled, through
+`cmake/audio_decoders.c`. Encoded Player input is bounded and owned by the host;
+the shared SDL mixer decodes fixed PCM blocks without accessing the guest.
+The same decoder is used on Android, Windows and Linux.
 
 When updating a pin, keep the dependency worktree clean, review upstream changes
 and run the relevant builds. Keep the Bada engine's upstream attribution and

@@ -855,6 +855,8 @@ void c_fclose(Cpu& c) {
 } // namespace
 
 namespace hle {
+std::string resolve_package_path(const std::string& guest) { return resolve(guest); }
+
 void set_package_root(const std::string& root) {
     g_pkg_root = root;
     g_home = root + "/Home";

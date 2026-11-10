@@ -14,6 +14,7 @@ set(BADA_ROOT "${REPO_ROOT}/third_party/bada-hle/src")
 include("${REPO_ROOT}/cmake/Dependencies.cmake")
 badanaut_add_sdl()
 badanaut_add_support_libraries()
+badanaut_add_audio_decoders()
 option(BADA_BUILD_UNICORN "Build the pinned ARM32 CPU engine" ON)
 if(BADA_BUILD_UNICORN)
     badanaut_add_unicorn()
@@ -40,7 +41,7 @@ add_library(bada-test-engine STATIC ${BADA_TEST_SOURCES}
 target_compile_definitions(bada-test-engine PRIVATE BADA_GLES_BACKEND=1)
 target_include_directories(bada-test-engine PUBLIC "${BADA_ROOT}")
 target_link_libraries(bada-test-engine PUBLIC
-    bada-sdl ${BADA_CPU_TARGET} bada-pvr bada-tlsf PkgConfig::GLES1 PkgConfig::GLES2 Threads::Threads
+    bada-sdl ${BADA_CPU_TARGET} bada-pvr bada-tlsf bada-audio-decoders PkgConfig::GLES1 PkgConfig::GLES2 Threads::Threads
 )
 
 enable_testing()
@@ -59,6 +60,10 @@ add_executable(bada-runtime-test runtime_test.cpp)
 target_link_libraries(bada-runtime-test PRIVATE bada-test-engine)
 add_test(NAME runtime-audio COMMAND bada-runtime-test)
 set_tests_properties(runtime-audio PROPERTIES TIMEOUT 30)
+add_executable(bada-player-audio-test player_audio_test.cpp)
+target_link_libraries(bada-player-audio-test PRIVATE bada-test-engine)
+add_test(NAME runtime-player COMMAND bada-player-audio-test)
+set_tests_properties(runtime-player PROPERTIES TIMEOUT 30)
 add_executable(bada-file-test file_test.cpp)
 target_link_libraries(bada-file-test PRIVATE bada-test-engine)
 add_test(NAME runtime-files COMMAND bada-file-test)
@@ -106,7 +111,7 @@ endforeach()
 add_library(bada-desktop-test-engine STATIC ${BADA_TEST_SOURCES})
 target_include_directories(bada-desktop-test-engine PUBLIC "${BADA_ROOT}")
 target_link_libraries(bada-desktop-test-engine PUBLIC
-    bada-sdl ${BADA_CPU_TARGET} bada-pvr bada-tlsf PkgConfig::DESKTOP_GL Threads::Threads
+    bada-sdl ${BADA_CPU_TARGET} bada-pvr bada-tlsf bada-audio-decoders PkgConfig::DESKTOP_GL Threads::Threads
 )
 add_executable(bada-desktop-render-test gl_render_test.cpp)
 target_compile_definitions(bada-desktop-render-test PRIVATE BADA_TEST_DESKTOP=1)

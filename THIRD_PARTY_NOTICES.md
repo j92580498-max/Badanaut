@@ -53,6 +53,15 @@ public domain terms. See `third_party/nuklear/LICENSE`. The single header
 `third_party/nuklear/nuklear.h` also retains the notices for its embedded stb
 code and ProggyClean font. Both files are included in distribution notices.
 
+## MP3 and WAV audio decoders
+
+The unmodified `dr_mp3.h` and `dr_wav.h` decoders from
+[dr_libs](https://github.com/mackron/dr_libs) are available under public domain
+or MIT No Attribution terms, copyright 2020 David Reid. The pinned revision is
+documented in `third_party/README.md`; see `third_party/dr_libs/LICENSE` and the
+notices retained in each header. The license is included in desktop and Android
+distribution notices.
+
 ## New desktop UI dependencies
 
 The desktop application uses dynamically linked Qt/PySide6 through

@@ -14,6 +14,7 @@ badanaut_add_unicorn()
 badanaut_add_support_libraries()
 badanaut_add_sdl_image()
 badanaut_add_nuklear()
+badanaut_add_audio_decoders()
 
 add_executable(bada-hle
     src/main.cpp src/control.cpp src/elf_loader.cpp src/cpu.cpp src/pixel_accel.cpp
@@ -22,7 +23,7 @@ add_executable(bada-hle
 )
 target_include_directories(bada-hle PRIVATE src)
 target_link_libraries(bada-hle PRIVATE bada-sdl SDL2_image::SDL2_image unicorn
-    bada-pugixml bada-cxxopts bada-pvr bada-tlsf bada-nuklear OpenGL::GL Threads::Threads)
+    bada-pugixml bada-cxxopts bada-pvr bada-tlsf bada-nuklear bada-audio-decoders OpenGL::GL Threads::Threads)
 set_target_properties(bada-hle PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/native"
     RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_BINARY_DIR}/native"

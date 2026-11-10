@@ -17,6 +17,7 @@
 #define NK_INCLUDE_DEFAULT_FONT
 #define NK_IMPLEMENTATION
 #define NK_SDL_GL2_IMPLEMENTATION
+#include "render_queue.h"
 #include <nuklear.h>
 #include <nuklear_sdl_gl2.h>
 
@@ -51,6 +52,7 @@ void device_to_window(SDL_Window* win, int dx, int dy, float* wx, float* wy) {
 namespace overlay {
 
 void init(SDL_Window* win) {
+    if (render::active() && !render::on_thread()) { render::sync([win] { init(win); }); return; }
     g_win = win;
     g_ctx = nk_sdl_init(win);
     nk_font_atlas* atlas = nullptr;
@@ -59,6 +61,7 @@ void init(SDL_Window* win) {
 }
 
 void shutdown() {
+    if (render::active() && !render::on_thread()) { render::sync([] { shutdown(); }); return; }
     if (g_ctx) {
         nk_sdl_shutdown();
         g_ctx = nullptr;
@@ -95,6 +98,7 @@ bool handle_event(SDL_Event& e) {
 }
 
 void draw(SDL_Window* win) {
+    if (render::active() && !render::on_thread()) { render::sync([win] { draw(win); }); return; }
     if (!g_ctx) {
         return;
     }
@@ -235,6 +239,7 @@ void draw(SDL_Window* win) {
 
 void begin_frame() { g_drawn_in_frame = false; }
 void present_idle(SDL_Window* win) {
+    if (render::active() && !render::on_thread()) { render::sync([win] { present_idle(win); }); return; }
     if (!g_drawn_in_frame && active()) {
         draw(win);
         SDL_GL_SwapWindow(win);

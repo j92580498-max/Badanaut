@@ -8,11 +8,16 @@ class Cpu;
 namespace hle {
 
 using Handler = void (*)(Cpu&);
+struct DispatchEntry;
 
 void register_handler(const char* name, Handler h);
 void init_dispatch(); // wires up libc/gl/osp tables
 void call(const std::string& name, Cpu& cpu);
+DispatchEntry* resolve_call(const std::string& name); // once when binding imports
+void call(DispatchEntry& entry, Cpu& cpu);
 void dump_stats(); // viability report: call counts
+void profile_start();
+std::string profile_report();
 
 // Runtime call trace: when on, every dispatched guest symbol whose (mangled)
 // name contains `filter` is logged live to the console (empty filter = all).
@@ -51,6 +56,7 @@ void set_locale(const std::string& spec); // override reported system locale (--
 // to re-enter the guest, so it's called from the frame loop (not a handler).
 void player_pump(Cpu& cpu);
 void audio_pump(Cpu& cpu); // completed PCM buffers -> guest AudioOut listener
+bool audio_needs_service(); // queried only from the emulation thread
 void audio_pause(bool pause);
 void audio_shutdown();
 bool byte_buffer_view(uint32_t object, uint32_t& data, uint32_t& length);

@@ -1,5 +1,6 @@
 #include "dispatch.h"
 #include "cpu.h"
+#include "performance.h"
 #include <algorithm>
 #include <cctype>
 #include <cstdio>
@@ -19,16 +20,59 @@
 
 namespace hle {
 
-static std::unordered_map<std::string, Handler> g_handlers;
-static std::map<std::string, uint64_t> g_calls; // name -> count
-static std::unordered_map<std::string, bool> g_warned_unknown;
+struct DispatchEntry {
+    Handler handler = nullptr;
+    performance::CallMetrics metrics;
+    std::string name;
+    uint64_t diagnostic_calls = 0;
+    bool warned = false, constructor = false;
+};
+static std::unordered_map<std::string, DispatchEntry> g_handlers;
+static bool is_ctor_name(const std::string& name);
 
 // Runtime call trace state (set_trace / trace_count).
 static bool g_rt_trace = false;
 static std::string g_rt_filter;
 static uint64_t g_rt_count = 0;
 
-void register_handler(const char* name, Handler h) { g_handlers[name] = h; }
+void register_handler(const char* name, Handler h) {
+    auto& entry = g_handlers[name];
+    entry.handler = h;
+    entry.name = name;
+    entry.metrics.work = performance::classify(name);
+}
+
+DispatchEntry* resolve_call(const std::string& name) {
+    auto found = g_handlers.find(name);
+    if (found != g_handlers.end()) return &found->second;
+    auto& entry = g_handlers[name];
+    entry.name = name;
+    entry.constructor = is_ctor_name(name);
+    entry.metrics.work = performance::classify(name.c_str());
+    return &entry;
+}
+
+void profile_start() {
+    for (auto& entry : g_handlers) {
+        entry.second.metrics.calls = entry.second.metrics.nanoseconds = 0;
+    }
+    performance::start();
+}
+std::string profile_report() {
+    std::vector<const std::pair<const std::string, DispatchEntry>*> entries;
+    for (const auto& entry : g_handlers) if (entry.second.metrics.calls) entries.push_back(&entry);
+    std::sort(entries.begin(), entries.end(), [](auto* a, auto* b) {
+        return a->second.metrics.nanoseconds > b->second.metrics.nanoseconds;
+    });
+    puts("[profile] HLE totals since profile start (includes handler time, excludes ARM JIT and outer dispatch)");
+    for (const auto* entry : entries) {
+        const auto& metrics = entry->second.metrics;
+        printf("[profile] calls=%llu total_ms=%.3f mean_us=%.3f symbol=%s\n",
+            static_cast<unsigned long long>(metrics.calls), metrics.nanoseconds / 1'000'000.0,
+            metrics.nanoseconds / (1000.0 * metrics.calls), entry->first.c_str());
+    }
+    return "profile written to log";
+}
 
 // ---- log timestamps ----
 // A steady clock (not SDL_GetTicks) so this stays usable from the HLE modules.
@@ -418,7 +462,17 @@ static bool is_ctor_name(const std::string& n) {
 }
 
 void call(const std::string& name, Cpu& cpu) {
+    call(*resolve_call(name), cpu);
+}
+
+void call(DispatchEntry& entry, Cpu& cpu) {
     static const bool g_trace = getenv("BADA_TRACE") != nullptr;
+    static const bool g_stats = getenv("BADA_CALL_STATS") != nullptr;
+    if (entry.handler && !g_trace && !g_stats && !g_rt_trace && !performance::enabled()) {
+        entry.handler(cpu);
+        return;
+    }
+    const auto& name = entry.name;
     if (g_trace) {
         fprintf(stderr, "[call] %s\n", name.c_str());
     }
@@ -428,23 +482,23 @@ void call(const std::string& name, Cpu& cpu) {
         printf("%s\n", line.c_str());
         trace_log_push(line); // also buffer for retrieval via `tracelog`
     }
-    g_calls[name]++;
-    auto it = g_handlers.find(name);
-    if (it != g_handlers.end()) {
-        it->second(cpu);
+    if (g_trace || g_stats || g_rt_trace) ++entry.diagnostic_calls;
+    performance::Scope sample(entry.metrics.work, &entry.metrics);
+    if (entry.handler) {
+        entry.handler(cpu);
         return;
     }
 
     // Default behaviour: Osp::* and everything else -> log once, return 0.
-    if (!g_warned_unknown[name]) {
-        g_warned_unknown[name] = true;
+    if (!entry.warned) {
+        entry.warned = true;
         printf("[hle] STUB %s\n", demangle(name).c_str());
     }
     // Unhandled constructor: leave a valid no-op vtable on `this` (r0) and return
     // it, so a later virtual call on the object lands on a no-op instead of
     // jumping through an uninitialized vtable (e.g. Asphalt's Slider/OverlayPanel
     // built by BVideoPlayer -> wild PC). Mirrors stub_ctor for registered stubs.
-    if (is_ctor_name(name)) {
+    if (entry.constructor) {
         uint32_t self = cpu.reg(UC_ARM_REG_R0);
         if (self) {
             cpu.write_u32(self, cpu.noop_vtable());
@@ -456,16 +510,17 @@ void call(const std::string& name, Cpu& cpu) {
 }
 
 void dump_stats() {
+    std::vector<const DispatchEntry*> entries;
+    for (const auto& pair : g_handlers) if (pair.second.diagnostic_calls) entries.push_back(&pair.second);
+    if (entries.empty()) return;
     printf("\n===== HLE call report (viability trace) =====\n");
     // Sort by count desc.
-    std::vector<std::pair<std::string, uint64_t>> v(g_calls.begin(), g_calls.end());
-    std::sort(v.begin(), v.end(), [](auto& a, auto& b) { return a.second > b.second; });
-    for (auto& [name, cnt] : v) {
-        bool handled = g_handlers.count(name) > 0;
-        printf("  %8llu  %-7s %s\n", (unsigned long long)cnt,
-               handled ? "[impl]" : "[stub]", demangle(name).c_str());
+    std::sort(entries.begin(), entries.end(), [](const auto* a, const auto* b) { return a->diagnostic_calls > b->diagnostic_calls; });
+    for (const auto* entry : entries) {
+        printf("  %8llu  %-7s %s\n", (unsigned long long)entry->diagnostic_calls,
+               entry->handler ? "[impl]" : "[stub]", demangle(entry->name).c_str());
     }
-    printf("  total distinct symbols called: %zu\n", v.size());
+    printf("  total distinct symbols called: %zu\n", entries.size());
 }
 
 } // namespace hle

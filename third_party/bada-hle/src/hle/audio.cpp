@@ -1,10 +1,11 @@
 #include "cpu.h"
 #include "dispatch.h"
+#include "performance.h"
+#include "audio_ring.h"
 #include <SDL2/SDL.h>
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
-#include <deque>
 #include <map>
 #include <vector>
 
@@ -14,19 +15,13 @@ constexpr uint32_t invalid_state = 0x80000000;
 constexpr int sample_s16 = 5; // bada AUDIO_SAMPLE_TYPE_16BIT
 constexpr int mono = 1, stereo = 2;
 
-struct Block {
-    std::vector<int16_t> samples;
-    size_t position = 0; // input sample frames, independent of the host rate
-};
-
 struct AudioOut {
     uint32_t listener = 0;
     uint64_t generation = 0;
     bool prepared = false, playing = false;
     int rate = 44100, channels = mono, volume = 100;
     uint32_t phase = 0, completed = 0;
-    size_t queued_frames = 0;
-    std::deque<Block> blocks;
+    PcmRing ring;
 };
 
 // Android's SDL backend has one playback device. Mix AudioOut instances into
@@ -43,28 +38,18 @@ struct AudioLock {
 };
 
 void reset(AudioOut& out) {
-    out.blocks.clear();
+    out.ring.clear();
     out.phase = out.completed = 0;
-    out.queued_frames = 0;
     out.generation = ++next_generation;
 }
 
 int sample(const AudioOut& out, int channel, bool next) {
-    const auto& block = out.blocks.front();
-    size_t position = block.position + (next ? 1 : 0);
-    const Block* source = &block;
-    if (position * out.channels >= block.samples.size()) {
-        if (out.blocks.size() > 1) {
-            source = &out.blocks[1];
-            position = 0;
-        } else {
-            position = block.position;
-        }
-    }
-    return source->samples[position * out.channels + (out.channels == mono ? 0 : channel)];
+    return out.ring.sample(channel, next);
 }
 
 void mix(void*, Uint8* bytes, int length) {
+    performance::Scope sample_time(performance::Work::audio_mix);
+    uint64_t missing_frames = 0;
     SDL_memset(bytes, 0, length);
     if (suspended) return;
     auto* destination = reinterpret_cast<int16_t*>(bytes);
@@ -73,7 +58,8 @@ void mix(void*, Uint8* bytes, int length) {
         int left = 0, right = 0;
         for (auto& entry : outputs) {
             auto& out = entry.second;
-            if (!out.playing || out.blocks.empty()) continue;
+            if (!out.playing) continue;
+            if (out.ring.empty()) { ++missing_frames; continue; }
             int values[2];
             for (int channel = 0; channel < stereo; ++channel) {
                 const int current = sample(out, channel, false);
@@ -85,25 +71,23 @@ void mix(void*, Uint8* bytes, int length) {
             left += values[0];
             right += values[1];
             out.phase += out.rate;
-            while (out.phase >= static_cast<uint32_t>(device_spec.freq) && !out.blocks.empty()) {
+            while (out.phase >= static_cast<uint32_t>(device_spec.freq) && !out.ring.empty()) {
                 out.phase -= device_spec.freq;
-                auto& block = out.blocks.front();
-                ++block.position;
-                --out.queued_frames;
-                if (block.position * out.channels == block.samples.size()) {
-                    out.blocks.pop_front();
-                    ++out.completed;
-                }
+                out.completed += out.ring.consume();
             }
-            if (out.blocks.empty()) out.phase = 0;
+            if (out.ring.empty()) out.phase = 0;
         }
         destination[frame * stereo] = static_cast<int16_t>(std::clamp(left, -32768, 32767));
         destination[frame * stereo + 1] = static_cast<int16_t>(std::clamp(right, -32768, 32767));
     }
+    performance::audio_underrun(missing_frames);
 }
 
 bool ensure_device() {
     if (device) return true;
+#ifdef __ANDROID__
+    if (!SDL_getenv("SDL_AUDIODRIVER")) SDL_SetHint(SDL_HINT_AUDIODRIVER, "aaudio,openslES,android");
+#endif
     if (SDL_InitSubSystem(SDL_INIT_AUDIO) != 0) return false;
     SDL_AudioSpec desired{};
     desired.freq = 48000;
@@ -160,6 +144,7 @@ void audio_prepare(Cpu& cpu) {
     out.playing = false;
     out.rate = rate;
     out.channels = channels;
+    out.ring.prepare(rate, channels); // retain the existing one-second queue bound
     cpu.set_ret32(0);
 }
 
@@ -170,19 +155,20 @@ void audio_write(Cpu& cpu) {
         return;
     }
     // The game can overwrite or destroy the ByteBuffer as soon as this returns.
-    Block block;
-    block.samples.resize(length / sizeof(int16_t));
-    cpu.read_mem(data, block.samples.data(), length & ~1u);
     AudioLock lock;
     auto& out = outputs[cpu.arg32(0)];
-    const size_t frames = block.samples.size() / out.channels;
+    const size_t frames = length / (out.channels * sizeof(int16_t));
     if (!out.prepared || length % (out.channels * sizeof(int16_t)) || !frames ||
-        out.queued_frames + frames > static_cast<size_t>(out.rate)) {
+        out.ring.size() + frames > out.ring.capacity()) {
         cpu.set_ret32(invalid_state);
         return;
     }
-    out.queued_frames += frames;
-    out.blocks.push_back(std::move(block));
+    out.ring.append(frames, [&](int16_t* destination, size_t offset, size_t samples) {
+        const uint32_t address = data + offset * sizeof(int16_t);
+        const uint32_t bytes = samples * sizeof(int16_t);
+        if (const auto* source = cpu.memory_ptr(address, bytes)) std::memcpy(destination, source, bytes);
+        else cpu.read_mem(address, destination, bytes);
+    });
     cpu.set_ret32(0);
 }
 
@@ -240,11 +226,19 @@ void register_audio() {
     register_handler("_ZNK3Osp5Media8AudioOut16GetMinBufferSizeEv", minimum_buffer);
 }
 
+bool audio_needs_service() {
+    AudioLock lock;
+    for (const auto& entry : outputs) if (entry.second.playing && !suspended) return true;
+    return false;
+}
 void audio_pump(Cpu& cpu) {
+    // Buffers are refilled by guest callbacks, always on the emulation thread.
     struct Completion { uint32_t object, listener, count; uint64_t generation; };
-    std::vector<Completion> pending;
+    static std::vector<Completion> pending;
+    pending.clear();
     {
         AudioLock lock;
+        if (pending.capacity() < outputs.size()) pending.reserve(outputs.size());
         for (auto& entry : outputs) {
             auto& out = entry.second;
             const uint32_t count = std::min(out.completed, 8u);

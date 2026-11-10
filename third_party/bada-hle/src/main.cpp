@@ -28,6 +28,7 @@
 #include <pugixml.hpp>
 #include "control.h"
 #include "cpu.h"
+#include "performance.h"
 #include "elf_loader.h"
 #include "guest.h"
 #include "hle/dispatch.h"
@@ -35,6 +36,7 @@
 #include "ui_overlay.h"
 #include "display.h"
 #include "touch_input.h"
+#include "render_gl.h"
 namespace fs = std::filesystem;
 
 // ---- stdin command interface (for scripted control: screenshots, quit) ----
@@ -607,6 +609,14 @@ std::string run_command(Cpu& cpu, SDL_Window* win, std::string c, bool& quit) {
         bool ok = cpu.run_guest(addr, a, r);
         snprintf(buf, sizeof buf, "%s r0=0x%x (%d)", ok ? "ok" : "FAULT", r, (int)r);
         return buf;
+    } else if (verb == "profile") {
+        if (arg == "start" || arg == "reset") { hle::profile_start(); return "profiling"; }
+        if (arg == "stop") { performance::stop(); return "profiling stopped"; }
+        return hle::profile_report();
+    } else if (verb == "blocks") {
+        if (arg == "start") return cpu.profile_blocks_start() ? "block profiling" : "hook failed";
+        cpu.profile_blocks_report();
+        return "blocks written to log";
     } else if (verb == "quit" || verb == "q") {
         quit = true;
         return "bye";
@@ -742,6 +752,9 @@ int main(int argc, char** argv) {
         ("filter", "Canvas filtering: nearest or linear", cxxopts::value<std::string>()->default_value("nearest"))
         ("vsync", "synchronize presentation", cxxopts::value<bool>()->default_value("true"))
         ("fullscreen", "start games fullscreen (default: windowed)", cxxopts::value<bool>()->default_value("false"))
+        ("profile", "log presentation FPS and CPU/GL/audio/GC metrics once per second", cxxopts::value<bool>()->default_value("false"))
+        ("render-thread", "execute GL on a dedicated thread (experimental)", cxxopts::value<bool>()->default_value("false"))
+        ("internal-resolution", "3D resolution: 100, 75 or 50 percent", cxxopts::value<int>()->default_value("100"))
         ("h,help", "show this help");
 #ifdef __ANDROID__
     opts.add_options()("log-file", "capture native diagnostics", cxxopts::value<std::string>()->default_value(""));
@@ -751,8 +764,8 @@ int main(int argc, char** argv) {
     opts.positional_help("<app-dir-or-exe> [AppId] [maxFrames]");
 
     std::string input, appid, locale, libstdcxx;
-    int max_frames = 0;
-    bool fullscreen = false, vsync = true;
+    int max_frames = 0, internal_percent = 100;
+    bool fullscreen = false, vsync = true, render_thread = false;
     try {
         auto res = opts.parse(argc, argv);
 #ifdef __ANDROID__
@@ -770,6 +783,12 @@ int main(int argc, char** argv) {
         libstdcxx = res["libstdcxx"].as<std::string>();
         fullscreen = res["fullscreen"].as<bool>();
         vsync = res["vsync"].as<bool>();
+        render_thread = res["render-thread"].as<bool>();
+        internal_percent = res["internal-resolution"].as<int>();
+        if (internal_percent != 100 && internal_percent != 75 && internal_percent != 50)
+            throw std::invalid_argument("3D resolution must be 100, 75 or 50 percent");
+        if (const char* value = getenv("BADA_RENDER_THREAD")) render_thread = std::strcmp(value, "0") != 0;
+        if (res["profile"].as<bool>() || getenv("BADA_PROFILE")) hle::profile_start();
         const auto resolution = res["resolution"].as<std::string>();
         if (resolution != "native") {
             const std::vector<std::string> presets = {"240x400", "480x800", "540x960", "720x1280", "1080x1920"};
@@ -888,11 +907,16 @@ int main(int argc, char** argv) {
                                                                                                                               : "es/other");
     }
     hle::gl_set_window(win); // sglSwapBuffers -> SDL_GL_SwapWindow
+    hle::gl_set_internal_resolution(internal_percent);
+    render::Session render_session;
+    if (render_thread && !render::start(win, glctx))
+        printf("[gl] render-thread context handoff unavailable: %s\n", SDL_GetError());
 #ifdef __ANDROID__
     // Runtimes such as Marmalade import both GL APIs. The actual game selects
     // its API at sglCreateContext, after the wrapper has shown its Canvas UI.
     int active_gles_version = gles_version;
     hle::gl_set_context_factory([&](int version) {
+        return render::sync([&] {
         if (version == active_gles_version) return true;
         SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, version);
         SDL_GLContext next = SDL_GL_CreateContext(win);
@@ -903,9 +927,12 @@ int main(int argc, char** argv) {
         }
         SDL_GL_DeleteContext(glctx);
         glctx = next;
+        render::context_changed(next);
+        hle::gl_context_changed();
         active_gles_version = version;
         SDL_GL_SetSwapInterval(vsync ? 1 : 0);
         return true;
+        });
     });
 #endif
     overlay::init(win);
@@ -1173,13 +1200,9 @@ int main(int argc, char** argv) {
         bool bootstrap_tick = !cpu.timer_active;
         int frames = 0;
         uint32_t fps_t0 = SDL_GetTicks(); // window-title FPS counter
-        int fps_frames = 0;
+        uint64_t fps_presentations = performance::presentations();
         uint32_t busy_ms = 0; // accumulated per-frame work time (diag)
-#ifdef __ANDROID__
-        const bool trace_fps = true;
-#else
         const bool trace_fps = getenv("BADA_TRACE_FPS") != nullptr;
-#endif
         input::TouchInput touch_input;
         const input::TouchInput::Sink deliver_touch = [&](const input::TouchEvent& event) {
             const int kind = event.kind == input::TouchKind::pressed ? TK_PRESSED :
@@ -1306,6 +1329,7 @@ int main(int argc, char** argv) {
             hle::audio_pump(cpu);      // consumed PCM buffers -> AudioOut listener
             if (!cpu.pump_threads()) break;
             overlay::present_idle(win);
+            if (performance::enabled()) performance::poll(cpu.allocated_memory());
             if (ticked && ++frames == 1) {
                 printf("[boot] first frame drawn\n");
             }
@@ -1321,7 +1345,9 @@ int main(int argc, char** argv) {
                 SDL_Delay(wake - now);
             }
             // Count what the app actually drew, not how often the host loop ran.
-            if (uint32_t dt = SDL_GetTicks() - fps_t0; fps_frames += ticked, dt >= 500) {
+            if (uint32_t dt = SDL_GetTicks() - fps_t0; dt >= 500) {
+                const uint64_t presented = performance::presentations();
+                const uint64_t fps_frames = presented - fps_presentations;
                 int n = fps_frames ? fps_frames : 1; // a single slow tick can span the window
 #ifndef __ANDROID__
                 // Android has no visible window title. Updating it would post
@@ -1331,13 +1357,13 @@ int main(int argc, char** argv) {
                          (int)(fps_frames * 1000.0 / dt + 0.5), (double)busy_ms / n);
                 SDL_SetWindowTitle(win, title);
 #endif
-                if (trace_fps) {
+                if (trace_fps && !performance::enabled()) {
                     printf("[perf] frames=%d fps=%.1f busy=%.1f ms/frame timer=%u ms canvas-upload=%u bytes\n",
                            frames, fps_frames * 1000.0 / dt, static_cast<double>(busy_ms) / n, cpu.timer_interval_ms,
                            hle::gl_canvas_upload_info().bytes);
                 }
                 fps_t0 += dt;
-                fps_frames = 0;
+                fps_presentations = presented;
                 busy_ms = 0;
             }
             if (max_frames && frames >= max_frames) {
@@ -1351,8 +1377,10 @@ int main(int argc, char** argv) {
     }
 
     hle::dump_stats();
+    performance::stop();
     hle::audio_shutdown();
     overlay::shutdown();
+    render::stop();
     SDL_GL_DeleteContext(glctx);
     SDL_DestroyWindow(win);
     SDL_Quit();

@@ -1,4 +1,5 @@
 #include "cpu.h"
+#include "performance.h"
 #include "display.h"
 #include "hle/dispatch.h"
 #include "hle/gl_api.h"
@@ -12,6 +13,7 @@
 #include <cstring>
 #include <new>
 #include <vector>
+#include "render_gl.h"
 
 namespace {
 GLuint program_id = 0;
@@ -316,6 +318,8 @@ void gles_present_canvas(Cpu& cpu, void* sdl_window, uint32_t pixels, int width,
         glUseProgram(old_program);
     }
     SDL_GL_SwapWindow(window);
+    performance::presented();
+    performance::texture_upload(upload_info.bytes);
     glBindBuffer(GL_ARRAY_BUFFER, old_buffer);
     glBindTexture(GL_TEXTURE_2D, old_texture);
     glActiveTexture(old_active_texture);
@@ -326,6 +330,7 @@ void gles_present_canvas(Cpu& cpu, void* sdl_window, uint32_t pixels, int width,
     if (cull) glEnable(GL_CULL_FACE);
     if (scissor) glEnable(GL_SCISSOR_TEST);
     glViewport(old_viewport[0], old_viewport[1], old_viewport[2], old_viewport[3]);
+    render::flush(); // local client arrays must outlive the queued draw
 }
 
 }

@@ -25,6 +25,10 @@ endif()
 set(BADA_TEST_SOURCES
     "${BADA_ROOT}/cpu.cpp"
     "${BADA_ROOT}/pixel_accel.cpp"
+    "${BADA_ROOT}/math_accel.cpp"
+    "${BADA_ROOT}/performance.cpp"
+    "${BADA_ROOT}/render_queue.cpp"
+    "${BADA_ROOT}/internal_resolution.cpp"
     "${BADA_ROOT}/elf_loader.cpp"
     "${BADA_ROOT}/hle/dispatch.cpp"
     "${BADA_ROOT}/hle/libc.cpp"
@@ -44,6 +48,9 @@ target_link_libraries(bada-test-engine PUBLIC
 )
 
 enable_testing()
+add_executable(bada-audio-ring-test audio_ring_test.cpp)
+target_include_directories(bada-audio-ring-test PRIVATE "${BADA_ROOT}")
+add_test(NAME audio-ring COMMAND bada-audio-ring-test)
 add_executable(bada-display-test display_test.cpp)
 target_include_directories(bada-display-test PRIVATE "${BADA_ROOT}")
 target_link_libraries(bada-display-test PRIVATE bada-sdl)

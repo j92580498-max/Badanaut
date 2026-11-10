@@ -10,6 +10,8 @@
 #include <utility>
 #include <vector>
 
+class MathAccelerator;
+
 // Wraps a Unicorn ARM core configured for HLE: ELF mapped, trampolines bound,
 // VFP enabled, plus host<->guest calling-convention helpers used by HLE handlers.
 class Cpu {
@@ -96,17 +98,33 @@ class Cpu {
     std::string symbolize(uint32_t addr, uint32_t* off = nullptr) const;
     void print_backtrace(const char* tag);             // scan guest stack for code return addrs
     void add_observer(uint32_t addr, hle::Handler fn); // log-only hook at a guest addr
+    bool profile_blocks_start();
+    void profile_blocks_report(); // removes the diagnostic hook before reporting
 
     // Conditional patch of an internal binary function: fn runs at the entry; if
     // it returns true the call is short-circuited (set r0, return to LR), else
     // the original body runs normally.
     using PatchFn = bool (*)(Cpu&);
     void patch(uint32_t addr, PatchFn fn);
+    bool install_math_kernel(uint32_t address); // verified loaded ARM code, between runs
+    void invalidate_code(uint32_t address, uint32_t bytes);
+    void wait_for_render(uint64_t ticket); // yield a completed HLE call at a GL barrier
     void do_return(); // force PC=LR (used by patches)
 
     bool hard_float = true; // VFP float args (FruitNinja) vs soft-float (GlesCube)
 
   private:
+    friend class MathAccelerator;
+    std::unique_ptr<MathAccelerator> math_accel_;
+    unsigned emulation_depth_ = 0;
+    unsigned call_depth_ = 0;
+    bool servicing_audio_ = false;
+    uint64_t render_wait_ = 0;
+    std::vector<uc_context*> paused_contexts_;
+    std::vector<std::pair<uint32_t, uint32_t>> invalidated_code_;
+    struct Patch { uint32_t address; PatchFn function; uc_hook hook; };
+    std::vector<Patch> patches_;
+    static void patch_hook(uc_engine*, uint64_t, uint32_t, void*);
     struct GuestThread {
         uint32_t object = 0, runnable = 0, entry = 0, stack = 0, stack_size = 0;
         uint32_t deadline = 0, semaphore = 0, joining = 0;
@@ -137,12 +155,18 @@ class Cpu {
     // Trampoline slots are keyed by symbol name and shared by all images, so the
     // same import in two images lands on one slot and one HLE handler.
     std::vector<std::string> slots_;
+    std::vector<hle::DispatchEntry*> dispatch_entries_;
     std::unordered_map<std::string, uint32_t> slot_of_;
     uint32_t synth_base_ = 0;         // first slot index used by synth_
     std::vector<hle::Handler> synth_; // synthetic handlers (slot = synth_base_ + index)
     uint32_t noop_tramp_ = 0;
     uint32_t noop_vtable_ = 0;
     bool native_abi_ = false;
+    struct BlockSample { uint32_t address = 0, bytes = 0; uint64_t calls = 0; };
+    std::vector<BlockSample> block_samples_;
+    uc_hook block_profile_hook_ = 0;
+    uint64_t block_profile_dropped_ = 0;
+    static void profile_block_hook(uc_engine*, uint64_t, uint32_t, void*);
     uint32_t import_slot(const std::string& name); // slot address for an import
     bool map_image(std::string& err);
     void apply_relocs();

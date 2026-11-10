@@ -1,11 +1,15 @@
 #include "cpu.h"
+#include "performance.h"
 #include "guest.h"
 #include "hle/dispatch.h"
 #include "pixel_accel.h"
+#include "math_accel.h"
+#include "render_queue.h"
 #include "tlsf.h"
 #include <SDL2/SDL.h>
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstdio>
@@ -58,6 +62,8 @@ struct Cpu::Watchdog {
     std::mutex mutex;
     std::condition_variable changed;
     bool stopping = false, expired = false;
+    bool cooperative = false;
+    std::atomic<bool> slice_requested{false};
     unsigned depth = 0;
     uint64_t generation = 0;
     std::chrono::steady_clock::time_point deadline;
@@ -72,11 +78,13 @@ struct Cpu::Watchdog {
         changed.notify_one();
         worker.join();
     }
-    void arm(uint64_t timeout_us) {
+    void arm(uint64_t timeout_us, bool service_audio = false) {
         {
             std::lock_guard<std::mutex> lock(mutex);
             if (!depth++) {
                 expired = false;
+                cooperative = service_audio;
+                slice_requested.store(false, std::memory_order_relaxed);
                 ++generation;
                 deadline = std::chrono::steady_clock::now() + std::chrono::microseconds(timeout_us);
             }
@@ -89,15 +97,32 @@ struct Cpu::Watchdog {
         changed.notify_one();
         return expired;
     }
+    bool take_slice() {
+        const bool requested = slice_requested.exchange(false, std::memory_order_relaxed);
+        if (requested) changed.notify_one();
+        return requested;
+    }
+    bool expired_now() { std::lock_guard<std::mutex> lock(mutex); return expired; }
     void run() {
         std::unique_lock<std::mutex> lock(mutex);
         while (!stopping) {
             changed.wait(lock, [this] { return stopping || depth; });
             if (stopping) break;
             const uint64_t current = generation;
-            if (changed.wait_until(lock, deadline, [this, current] {
+            const auto wake = cooperative ? std::min(deadline, std::chrono::steady_clock::now() + std::chrono::milliseconds(8)) : deadline;
+            if (changed.wait_until(lock, wake, [this, current] {
                     return stopping || !depth || generation != current;
                 })) continue;
+            if (std::chrono::steady_clock::now() < deadline) {
+                slice_requested.store(true, std::memory_order_relaxed);
+                while (!stopping && depth && generation == current && slice_requested.load(std::memory_order_relaxed)) {
+                    uc_emu_stop(engine);
+                    changed.wait_for(lock, std::chrono::milliseconds(1), [this, current] {
+                        return stopping || !depth || generation != current || !slice_requested.load(std::memory_order_relaxed);
+                    });
+                }
+                continue;
+            }
             expired = true;
             // A very short deadline can expire before uc_emu_start has entered
             // the JIT. Retry only after expiry so its startup cannot lose the
@@ -112,9 +137,10 @@ struct Cpu::Watchdog {
     }
 };
 
-Cpu::Cpu() = default;
+Cpu::Cpu() : math_accel_(std::make_unique<MathAccelerator>(*this)) {}
 
 Cpu::~Cpu() {
+    for (auto* context : paused_contexts_) uc_context_free(context);
     if (scheduler_context_) uc_context_free(scheduler_context_);
     for (auto& thread : threads_) if (thread->context) uc_context_free(thread->context);
     watchdog_.reset();
@@ -228,6 +254,8 @@ bool Cpu::init(ElfImage& image, std::string& err, ElfImage* lib) {
 
     apply_relocs();
     hle::init_dispatch();
+    dispatch_entries_.reserve(slots_.size());
+    for (const auto& name : slots_) dispatch_entries_.push_back(hle::resolve_call(name));
     pixel_accel::install(*this, image);
     return true;
 }
@@ -356,16 +384,19 @@ void Cpu::hook_code(uc_engine*, uint64_t addr, uint32_t, void* user) {
         return;
     }
     self->dispatch(guest::tramp_index(a));
+    if ((!self->invalidated_code_.empty() || self->watchdog_->slice_requested.load(std::memory_order_relaxed)) &&
+        self->reg(UC_ARM_REG_PC) == a) self->do_return(); // do not repeat a completed HLE call after a slice
 }
 
 static void synth_noop(Cpu& c) { c.set_ret32(0); }
 
 void Cpu::dispatch(uint32_t idx) {
+    performance::Scope sample(performance::Work::hle);
     if (idx < synth_base_) {
         // A host exception escaping a handler would unwind through Unicorn and
         // kill the process with no context. Name the handler and stop cleanly.
         try {
-            hle::call(slots_[idx], *this);
+            hle::call(*dispatch_entries_[idx], *this);
         } catch (const std::exception& ex) {
             printf("[hle] EXCEPTION in %s: %s\n", hle::demangle(slots_[idx]).c_str(), ex.what());
             print_backtrace("bt");
@@ -462,12 +493,64 @@ bool Cpu::run_guest(uint32_t addr, const std::vector<uint32_t>& args, uint32_t& 
 }
 
 bool Cpu::run_slice(uint32_t addr, uint32_t& ret, uint64_t timeout_us) {
+    if (!call_depth_ && !emulation_depth_) math_accel_->scan();
+    const size_t pause_slot = call_depth_++;
+    const bool service_audio = !running_thread_ && !servicing_audio_ && hle::audio_needs_service();
     // Keep the generous wall-clock guard for asset initialization. Passing
     // zero here disables Unicorn's busy polling timer; our worker owns the
     // deadline and reports expiry as failure instead of accepting partial init.
-    if (timeout_us) watchdog_->arm(timeout_us);
-    uc_err e = uc_emu_start(uc, addr, guest::HLE_RETURN, 0, 0);
+    if (timeout_us) watchdog_->arm(timeout_us, service_audio);
+    uc_err e = UC_ERR_OK;
+    for (;;) {
+        ++emulation_depth_;
+        const uint64_t profile_start = performance::enabled() ? performance::now_ns() : 0;
+        e = uc_emu_start(uc, addr, guest::HLE_RETURN, 0, 0);
+        --emulation_depth_;
+        if (profile_start) performance::emulated(performance::now_ns() - profile_start);
+        const bool sliced = watchdog_->take_slice();
+        if (e || (invalidated_code_.empty() && !render_wait_ && !sliced)) break;
+        addr = reg(UC_ARM_REG_PC);
+        for (const auto& region : invalidated_code_)
+            uc_ctl_remove_cache(uc, region.first, static_cast<uint64_t>(region.first) + region.second);
+        invalidated_code_.clear();
+        const uint64_t render_ticket = render_wait_;
+        render_wait_ = 0;
+        if (render_ticket || (sliced && service_audio && addr != guest::HLE_RETURN)) {
+            if (paused_contexts_.size() <= pause_slot) paused_contexts_.resize(pause_slot + 1, nullptr);
+            uc_context* saved = paused_contexts_[pause_slot];
+            if (!saved) {
+                if (uc_context_alloc(uc, &saved) != UC_ERR_OK) { e = UC_ERR_NOMEM; break; }
+                paused_contexts_[pause_slot] = saved;
+            }
+            if (uc_context_save(uc, saved) != UC_ERR_OK) { e = UC_ERR_EXCEPTION; break; }
+            const bool was_servicing = servicing_audio_;
+            servicing_audio_ = true;
+            do {
+                if (!was_servicing) {
+                    hle::audio_pump(*this);
+                    if (!running_thread_ && !pump_threads()) { e = UC_ERR_EXCEPTION; break; }
+                }
+                if (!render_ticket || render::ready(render_ticket)) break;
+                if (watchdog_->expired_now()) break;
+                SDL_Delay(2); // sleep during GPU waits, with regular audio service
+            } while (true);
+            servicing_audio_ = was_servicing;
+            uc_context_restore(uc, saved);
+            if (e || watchdog_->expired_now()) break;
+            if (render_ticket) {
+                try { render::wait(render_ticket); }
+                catch (const std::exception& ex) {
+                    printf("[gl] render command failed: %s\n", ex.what());
+                    e = UC_ERR_EXCEPTION;
+                    break;
+                }
+            }
+        }
+        if (addr == guest::HLE_RETURN) break;
+        addr |= (reg(UC_ARM_REG_CPSR) >> 5) & 1u; // Unicorn selects ARM/Thumb from the resume address
+    }
     const bool expired = timeout_us && watchdog_->disarm();
+    --call_depth_;
     if (e || expired) {
         uint32_t pc;
         uc_reg_read(uc, UC_ARM_REG_PC, &pc);
@@ -674,7 +757,57 @@ void Cpu::add_observer(uint32_t addr, hle::Handler fn) {
     uc_ctl_remove_cache(uc, a, a + 4);
 }
 
-static std::vector<std::pair<uint32_t, Cpu::PatchFn>> g_patches;
+void Cpu::profile_block_hook(uc_engine*, uint64_t address, uint32_t bytes, void* user) {
+    auto& cpu = *static_cast<Cpu*>(user);
+    const size_t mask = cpu.block_samples_.size() - 1;
+    size_t slot = (address ^ (address >> 16)) & mask;
+    for (size_t probe = 0; probe <= mask; ++probe, slot = (slot + 1) & mask) {
+        auto& sample = cpu.block_samples_[slot];
+        if (!sample.calls || sample.address == address) {
+            sample.address = address;
+            sample.bytes = bytes;
+            ++sample.calls;
+            return;
+        }
+    }
+    ++cpu.block_profile_dropped_;
+}
+bool Cpu::profile_blocks_start() {
+    if (block_profile_hook_) uc_hook_del(uc, block_profile_hook_);
+    block_profile_hook_ = 0;
+    block_samples_.assign(65536, {});
+    block_profile_dropped_ = 0;
+    if (uc_hook_add(uc, &block_profile_hook_, UC_HOOK_BLOCK, reinterpret_cast<void*>(&Cpu::profile_block_hook), this, 1, 0) != UC_ERR_OK)
+        return false;
+    uc_ctl_flush_tb(uc);
+    puts("[blocks] diagnostic basic-block counts enabled; exclude this run from FPS comparisons");
+    return true;
+}
+void Cpu::profile_blocks_report() {
+    if (block_profile_hook_) {
+        uc_hook_del(uc, block_profile_hook_);
+        block_profile_hook_ = 0;
+        uc_ctl_flush_tb(uc);
+    }
+    std::vector<const BlockSample*> samples;
+    uint64_t calls = 0;
+    for (const auto& sample : block_samples_) if (sample.calls) { samples.push_back(&sample); calls += sample.calls; }
+    std::sort(samples.begin(), samples.end(), [](const auto* a, const auto* b) { return a->calls * a->bytes > b->calls * b->bytes; });
+    printf("[blocks] total=%llu distinct=%zu dropped=%llu (bytes are a workload proxy, not instruction counts)\n",
+        static_cast<unsigned long long>(calls), samples.size(), static_cast<unsigned long long>(block_profile_dropped_));
+    for (size_t i = 0; i < std::min<size_t>(samples.size(), 60); ++i) {
+        const auto& sample = *samples[i];
+        const auto name = symbolize(sample.address);
+        printf("[blocks] pc=0x%08x calls=%llu bytes=%u symbol=%s code=", sample.address,
+            static_cast<unsigned long long>(sample.calls), sample.bytes, name.c_str());
+        uint8_t bytes[64]{};
+        const uint32_t size = std::min<uint32_t>(sample.bytes, sizeof bytes);
+        read_mem(sample.address, bytes, size);
+        for (uint32_t j = 0; j < size; ++j) printf("%02x", bytes[j]);
+        puts("");
+    }
+}
+
 void Cpu::do_return() {
     uint32_t lr = reg(UC_ARM_REG_LR);
     uint32_t cpsr;
@@ -690,11 +823,11 @@ void Cpu::do_return() {
     uint32_t pc = lr;
     uc_reg_write(uc, UC_ARM_REG_PC, &pc);
 }
-static void patch_hook(uc_engine*, uint64_t addr, uint32_t, void* user) {
+void Cpu::patch_hook(uc_engine*, uint64_t addr, uint32_t, void* user) {
     Cpu* self = static_cast<Cpu*>(user);
-    for (auto& [a, fn] : g_patches) {
-        if (a == (uint32_t)addr) {
-            if (fn(*self)) {
+    for (const auto& patch : self->patches_) {
+        if (patch.address == (uint32_t)addr) {
+            if (patch.function(*self)) {
                 self->do_return();
             }
             return;
@@ -703,10 +836,29 @@ static void patch_hook(uc_engine*, uint64_t addr, uint32_t, void* user) {
 }
 void Cpu::patch(uint32_t addr, PatchFn fn) {
     uint32_t a = addr & ~1u;
-    g_patches.push_back({a, fn});
+    for (auto& patch : patches_) if (patch.address == a) { patch.function = fn; return; }
     uc_hook h;
-    uc_hook_add(uc, &h, UC_HOOK_CODE, (void*)&patch_hook, this, a, a);
-    uc_ctl_remove_cache(uc, a, a + 4); // see add_observer
+    if (uc_hook_add(uc, &h, UC_HOOK_CODE, (void*)&Cpu::patch_hook, this, a, a) == UC_ERR_OK) {
+        patches_.push_back({a, fn, h});
+        uc_ctl_remove_cache(uc, a, a + 4); // install only between Unicorn runs
+    }
+}
+bool Cpu::install_math_kernel(uint32_t address) { return math_accel_->install(address); }
+void Cpu::invalidate_code(uint32_t address, uint32_t bytes) {
+    if (!bytes) return;
+    if (!emulation_depth_) {
+        uc_ctl_remove_cache(uc, address, static_cast<uint64_t>(address) + bytes);
+        return;
+    }
+    invalidated_code_.push_back({address, bytes});
+    uc_emu_stop(uc); // flush and resume at a safe Unicorn boundary
+}
+void Cpu::wait_for_render(uint64_t ticket) {
+    if (!ticket || render::ready(ticket)) { render::wait(ticket); return; }
+    if (!emulation_depth_) { render::wait(ticket); return; }
+    render_wait_ = ticket;
+    do_return();
+    uc_emu_stop(uc);
 }
 
 void Cpu::print_backtrace(const char* tag) {
@@ -793,7 +945,7 @@ uint32_t Cpu::read_u32(uint32_t a) {
     uc_mem_read(uc, a, &v, 4);
     return v;
 }
-void Cpu::write_u32(uint32_t a, uint32_t v) { uc_mem_write(uc, a, &v, 4); }
+void Cpu::write_u32(uint32_t a, uint32_t v) { write_mem(a, &v, 4); }
 const uint8_t* Cpu::memory_ptr(uint32_t a, uint32_t n) const {
     if (!heap_storage_ || a < guest::HEAP_BASE ||
         static_cast<uint64_t>(a) + n > static_cast<uint64_t>(guest::HEAP_BASE) + guest::HEAP_SIZE)
@@ -805,7 +957,9 @@ void Cpu::read_mem(uint32_t a, void* d, uint32_t n) {
     if (const auto* p = memory_ptr(a, n)) std::memcpy(d, p, n);
     else uc_mem_read(uc, a, d, n);
 }
-void Cpu::write_mem(uint32_t a, const void* s, uint32_t n) { uc_mem_write(uc, a, s, n); }
+void Cpu::write_mem(uint32_t a, const void* s, uint32_t n) {
+    if (uc_mem_write(uc, a, s, n) == UC_ERR_OK) math_accel_->written(a, n);
+}
 std::string Cpu::read_cstr(uint32_t a, uint32_t max) {
     if (const auto* p = memory_ptr(a, max)) {
         const auto* end = static_cast<const uint8_t*>(std::memchr(p, 0, max));
@@ -842,6 +996,8 @@ uint32_t Cpu::alloc(uint32_t size, uint32_t align) {
         static_cast<uint8_t*>(block) - static_cast<uint8_t*>(heap_storage_));
     if (!matching_alignment) p = (p + align - 1) & ~(align - 1);
     allocations_[p] = {size, block};
+    math_accel_->allocated(p, size);
+    performance::allocation(size);
     // The previous zero-backed heap always supplied cleared storage. Keep
     // that behavior when TLSF reuses a block, as touchHLE's Mem::alloc does.
     // Fruit Ninja leaves optional HUD fields at their initial zero values;
@@ -859,6 +1015,7 @@ uint32_t Cpu::alloc(uint32_t size, uint32_t align) {
 void Cpu::free(uint32_t address) {
     const auto allocation = allocations_.find(address);
     if (allocation == allocations_.end()) return; // includes free(nullptr)
+    math_accel_->freed(address);
     tlsf_free(heap_pool_, allocation->second.block);
     allocations_.erase(allocation);
 }

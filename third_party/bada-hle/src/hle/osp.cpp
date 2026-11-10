@@ -834,7 +834,7 @@ void user_event_pump(Cpu& cpu) {
         UserEvent e = g_user_events.front();
         g_user_events.pop_front();
         uint32_t ret = 0;
-        printf("[osp] user event %u -> OnUserEventReceivedN\n", e.id);
+        if (getenv("BADA_TRACE_EVENTS")) printf("[osp] user event %u -> OnUserEventReceivedN\n", e.id);
         cpu.run_guest(cb, {cpu.app_instance, e.id, e.args}, ret);
     }
 }

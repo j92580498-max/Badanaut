@@ -16,9 +16,11 @@ badanaut_add_sdl_image()
 badanaut_add_nuklear()
 
 add_executable(bada-hle
-    src/main.cpp src/control.cpp src/elf_loader.cpp src/cpu.cpp src/pixel_accel.cpp
+    src/main.cpp src/control.cpp src/elf_loader.cpp src/cpu.cpp src/pixel_accel.cpp src/math_accel.cpp src/performance.cpp
     src/hle/dispatch.cpp src/hle/libc.cpp src/hle/gl.cpp src/hle/osp.cpp
     src/hle/io.cpp src/hle/audio.cpp src/hle/ui.cpp src/ui_overlay.cpp
+    src/render_queue.cpp
+    src/internal_resolution.cpp
 )
 target_include_directories(bada-hle PRIVATE src)
 target_link_libraries(bada-hle PRIVATE bada-sdl SDL2_image::SDL2_image unicorn

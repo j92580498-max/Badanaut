@@ -565,6 +565,33 @@ void h_uidivmod(Cpu& c) {
     c.set_reg(UC_ARM_REG_R1, b ? a % b : 0);
 }
 
+static uint64_t lbits(Cpu& c, int i) {
+    return uint64_t(c.arg32(2 * i)) | (uint64_t(c.arg32(2 * i + 1)) << 32);
+}
+static void ldiv_result(Cpu& c, uint64_t quotient, uint64_t remainder) {
+    // The base ARM ABI applies even to hard-float guests: quotient in r0:r1,
+    // remainder in r2:r3. No VFP registers participate in integer division.
+    c.set_ret64(quotient);
+    c.set_reg(UC_ARM_REG_R2, static_cast<uint32_t>(remainder));
+    c.set_reg(UC_ARM_REG_R3, static_cast<uint32_t>(remainder >> 32));
+}
+void h_uldivmod(Cpu& c) {
+    const uint64_t a = lbits(c, 0), b = lbits(c, 1);
+    ldiv_result(c, b ? a / b : 0, b ? a % b : 0);
+}
+void h_ldivmod(Cpu& c) {
+    const uint64_t a = lbits(c, 0), b = lbits(c, 1);
+    const bool negative_a = (a >> 63) != 0, negative_b = (b >> 63) != 0;
+    const uint64_t magnitude_a = negative_a ? uint64_t(0) - a : a;
+    const uint64_t magnitude_b = negative_b ? uint64_t(0) - b : b;
+    uint64_t quotient = magnitude_b ? magnitude_a / magnitude_b : 0;
+    uint64_t remainder = magnitude_b ? magnitude_a % magnitude_b : 0;
+    // Unsigned magnitudes also define INT64_MIN / -1 without host overflow.
+    if (negative_a != negative_b) quotient = uint64_t(0) - quotient;
+    if (negative_a) remainder = uint64_t(0) - remainder;
+    ldiv_result(c, quotient, remainder);
+}
+
 // ---- __aeabi soft-float runtime (single + double precision) ----
 // Soft-float binaries pass float/double args as integer bit patterns in core
 // registers and call these helpers for every arithmetic op.
@@ -615,7 +642,7 @@ void h_f2d(Cpu& c) { dret(c, (double)f_of(c.arg32(0))); }
 // even in a hard-float binary: the long long rides in r0:r1, the double comes
 // back in r0:r1.
 static int64_t larg(Cpu& c, int i) {
-    return (int64_t)((uint64_t)c.arg32(2 * i) | ((uint64_t)c.arg32(2 * i + 1) << 32));
+    return static_cast<int64_t>(lbits(c, i));
 }
 void h_l2d(Cpu& c) { dret(c, (double)larg(c, 0)); }
 void h_ul2d(Cpu& c) { dret(c, (double)(uint64_t)larg(c, 0)); }
@@ -773,6 +800,8 @@ void register_libc() {
     register_handler("__aeabi_uidiv", h_uidiv);
     register_handler("__aeabi_idivmod", h_idivmod);
     register_handler("__aeabi_uidivmod", h_uidivmod);
+    register_handler("__aeabi_ldivmod", h_ldivmod);
+    register_handler("__aeabi_uldivmod", h_uldivmod);
 
     register_handler("__aeabi_fadd", h_fadd);
     register_handler("__aeabi_fsub", h_fsub);

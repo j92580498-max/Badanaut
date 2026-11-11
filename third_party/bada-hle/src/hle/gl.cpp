@@ -740,6 +740,7 @@ void g1_scalex(Cpu& c) { glScalef(fixed(c.arg32(0)), fixed(c.arg32(1)), fixed(c.
 void g1_activetexture(Cpu& c) { host<void (*)(GLenum)>("glActiveTexture")(c.arg32(0)); }
 void g1_clientactivetexture(Cpu& c) { host<void (*)(GLenum)>("glClientActiveTexture")(c.arg32(0)); }
 void g1_bindtexture(Cpu& c) { glBindTexture(c.arg32(0), c.arg32(1)); }
+void g1_istexture(Cpu& c) { c.set_ret32(glIsTexture(c.arg32(0))); }
 void g1_texparameteri(Cpu& c) { glTexParameteri(c.arg32(0), c.arg32(1), c.arg32(2)); }
 void g1_texenvi(Cpu& c) { glTexEnvi(c.arg32(0), c.arg32(1), c.arg32(2)); }
 void g1_texenvf(Cpu& c) { glTexEnvf(c.arg32(0), c.arg32(1), c.argf32(c.hard_float ? 0 : 2)); }
@@ -1505,6 +1506,7 @@ void register_gl() {
     register_handler("glFlush_2", g1_flush);
     register_handler("glActiveTexture_2", g1_activetexture);
     register_handler("glBindTexture_2", g1_bindtexture);
+    register_handler("glIsTexture_2", g1_istexture);
     register_handler("glTexParameteri_2", g1_texparameteri);
     register_handler("glGenTextures_2", g1_gentextures);
     register_handler("glDeleteTextures_2", g1_deletetextures);
@@ -1593,6 +1595,7 @@ void register_gl() {
     register_handler("glTexEnvi_1", g1_texenvi);
     register_handler("glTexEnvf_1", g1_texenvf);
     register_handler("glGenTextures_1", g1_gentextures);
+    register_handler("glIsTexture_1", g1_istexture);
     register_handler("glDeleteTextures_1", g1_deletetextures);
     register_handler("glTexImage2D_1", g1_teximage2d);
     register_handler("glTexSubImage2D_1", g1_texsubimage2d);

@@ -2,6 +2,7 @@
 #include "elf_loader.h"
 #include "hle/dispatch.h" // hle::Handler
 #include <cstdint>
+#include <deque>
 #include <initializer_list>
 #include <memory>
 #include <string>
@@ -34,7 +35,9 @@ class Cpu {
     // Cooperative Bada workers share memory, but retain separate ARM/VFP
     // contexts and stacks. Pump only from the host, outside uc_emu_start.
     bool construct_thread(uint32_t object, uint32_t runnable, uint32_t stack_size);
+    bool construct_thread_type(uint32_t object, uint32_t type, uint32_t stack_size);
     bool start_thread(uint32_t object);
+    bool stop_thread(uint32_t object);
     bool join_thread(uint32_t object);
     bool destroy_thread(uint32_t object);
     bool pump_threads();
@@ -44,6 +47,15 @@ class Cpu {
     void create_semaphore(uint32_t object, int count);
     bool acquire_semaphore(uint32_t object, int32_t timeout);
     void release_semaphore(uint32_t object);
+
+    // One-shot timers dispatch through the registered ITimerEventListener,
+    // including an event-driven worker's own stack and current-thread identity.
+    bool construct_timer(uint32_t object, uint32_t listener);
+    bool start_timer(uint32_t object, uint32_t milliseconds);
+    void cancel_timer(uint32_t object);
+    void destroy_timer(uint32_t object);
+    bool has_timers() const;
+    bool pump_timers(uint32_t& dispatched);
 
     // --- Calling-convention accessors (for HLE handlers) ---
     uint32_t arg32(int i); // i-th integer/pointer arg (r0-r3, then stack)
@@ -84,9 +96,8 @@ class Cpu {
     bool exec_requested = false;
     void request_exit(); // stop emulation, return control to the host loop
 
-    // --- Timer-driven render loop (host calls OnTimerExpired each frame) ---
+    // --- Application and earliest active timer (host wake/diagnostics) ---
     uint32_t app_instance = 0; // the real app object (factory result)
-    uint32_t timer_obj = 0;    // the guest Timer object
     bool timer_active = false;
     uint32_t timer_interval_ms = 0; // last Timer::Start(msec); 0 = never armed
     uint32_t timer_deadline_ms = 0; // SDL monotonic clock at Start(), not after Draw()
@@ -108,10 +119,29 @@ class Cpu {
     bool hard_float = true; // VFP float args (FruitNinja) vs soft-float (GlesCube)
 
   private:
+    struct TimerEvent {
+        uint32_t object;
+        uint64_t generation;
+    };
+    struct GuestTimer {
+        uint32_t listener = 0, owner = 0, interval = 0, deadline = 0;
+        uint64_t generation = 0;
+        bool active = false;
+    };
+    std::unordered_map<uint32_t, GuestTimer> timers_;
+    uint64_t timer_generation_ = 0;
+    void refresh_timer_deadline();
+    void cancel_thread_timers(uint32_t object);
+    bool timer_callback(const TimerEvent& event, uint32_t& entry, uint32_t& listener);
+    bool construct_thread_impl(uint32_t object, uint32_t runnable, uint32_t size, bool event_driven);
+    enum class ThreadCall { run, start, timer, stop };
     struct GuestThread {
         uint32_t object = 0, runnable = 0, entry = 0, stack = 0, stack_size = 0;
         uint32_t deadline = 0, semaphore = 0, joining = 0;
         bool started = false, finished = false, suspended = false, timed = false;
+        bool event_driven = false, initialized = false, callback_active = false, stopping = false;
+        ThreadCall call = ThreadCall::run;
+        std::deque<TimerEvent> pending_timers;
         uc_context* context = nullptr;
     };
     std::vector<std::unique_ptr<GuestThread>> threads_;

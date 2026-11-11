@@ -409,30 +409,44 @@ void locale_get_system(Cpu& c) {
 void locale_lang(Cpu& c) { c.set_ret32((uint32_t)g_locale_lang_enum); }
 void locale_country(Cpu& c) { c.set_ret32((uint32_t)g_locale_country_enum); }
 
-// --- Timer: host drives OnTimerExpired; Construct stashes the timer, Start arms it ---
-void timer_construct(Cpu& c) {
-    c.timer_obj = c.arg32(0);
+// --- Timer: register its listener and arm a one-shot event ---
+void timer_dtor(Cpu& c) {
+    c.destroy_timer(c.arg32(0));
     c.set_ret32(0);
+}
+void timer_delete(Cpu& c) {
+    const uint32_t object = c.arg32(0);
+    c.destroy_timer(object);
+    c.free(object);
+    c.set_ret32(0);
+}
+void timer_ctor(Cpu& c) {
+    const uint32_t object = c.arg32(0);
+    c.destroy_timer(object);
+    if (object) c.write_u32(object, c.make_vtable(64, {{0, timer_dtor}, {1, timer_delete}}));
+    c.set_ret32(object);
+}
+void timer_construct(Cpu& c) {
+    c.set_ret32(c.construct_timer(c.arg32(0), c.arg32(1)) ? 0 : 0xa0000000u + 1909);
 }
 // Timer::Start(msec) is one-shot: the app re-arms it at the end of every
 // OnTimerExpired with the time left in its own period. Honour that interval --
 // driving OnTimerExpired once per rendered frame instead runs the app's whole
 // clock at the host's frame rate (PvZ asks for 100 ms and ran ~6x too fast).
 void timer_start(Cpu& c) {
-    c.timer_active = true;
     uint32_t iv = c.arg32(1);
+    if (iv > 0x7fffffffu) { c.set_ret32(0xa0000000u + 1909); return; }
+    if (!c.start_timer(c.arg32(0), iv)) { c.set_ret32(0xa0000000u + 1926); return; }
     static bool said = false;
     if (!said) { // the app's target rate. It re-arms with the time left in its
         said = true; // period after that, so the value drifts every tick.
         printf("[osp] Timer::Start(%u ms) -> the app wants %.1f ticks/s\n", iv,
                iv ? 1000.0 / iv : 0.0);
     }
-    c.timer_interval_ms = iv;
-    c.timer_deadline_ms = SDL_GetTicks() + std::max(iv, 1u);
     c.set_ret32(0);
 }
 void timer_cancel(Cpu& c) {
-    c.timer_active = false;
+    c.cancel_timer(c.arg32(0));
     c.set_ret32(0);
 }
 
@@ -535,8 +549,10 @@ void register_osp() {
     register_handler("_ZN3Osp2Ui9Container10AddControlERKNS_7ControlE", ret_ok);
 
     // Timer (Base::Runtime)
-    register_handler("_ZN3Osp4Base7Runtime5TimerC1Ev", stub_ctor); // Timer()
-    register_handler("_ZN3Osp4Base7Runtime5TimerC2Ev", stub_ctor);
+    register_handler("_ZN3Osp4Base7Runtime5TimerC1Ev", timer_ctor); // Timer()
+    register_handler("_ZN3Osp4Base7Runtime5TimerC2Ev", timer_ctor);
+    register_handler("_ZN3Osp4Base7Runtime5TimerD1Ev", timer_dtor);
+    register_handler("_ZN3Osp4Base7Runtime5TimerD2Ev", timer_dtor);
     register_handler("_ZN3Osp4Base7Runtime5Timer9ConstructERKNS1_19ITimerEventListenerE", timer_construct);
     register_handler("_ZN3Osp4Base7Runtime5Timer5StartEi", timer_start);
     register_handler("_ZN3Osp4Base7Runtime5Timer6CancelEv", timer_cancel);
@@ -574,9 +590,19 @@ void register_osp() {
     register_handler("_ZN3Osp4Base7Runtime6Thread9ConstructERNS1_9IRunnableElNS1_14ThreadPriorityE", [](Cpu& c) {
         c.set_ret32(c.construct_thread(c.arg32(0), c.arg32(1), c.arg32(2)) ? 0 : 0xa0000000u + 1909);
     });
+    register_handler("_ZN3Osp4Base7Runtime6Thread9ConstructENS1_10ThreadTypeElNS1_14ThreadPriorityE", [](Cpu& c) {
+        c.set_ret32(c.construct_thread_type(c.arg32(0), c.arg32(1), c.arg32(2)) ? 0 : 0xa0000000u + 1909);
+    });
     register_handler("_ZN3Osp4Base7Runtime6Thread5StartEv", [](Cpu& c) {
         c.set_ret32(c.start_thread(c.arg32(0)) ? 0 : 0xa0000000u + 1926);
     });
+    register_handler("_ZN3Osp4Base7Runtime6Thread4StopEv", [](Cpu& c) {
+        c.set_ret32(c.stop_thread(c.arg32(0)) ? 0 : 0xa0000000u + 1926);
+    });
+    register_handler("_ZN3Osp4Base7Runtime6Thread3RunEv", ret_ok);
+    register_handler("_ZN3Osp4Base7Runtime6Thread7OnStartEv", ret_true);
+    register_handler("_ZN3Osp4Base7Runtime6Thread6OnStopEv", ret_ok);
+    register_handler("_ZN3Osp4Base7Runtime6Thread20OnUserEventReceivedNElPNS0_10Collection5IListE", ret_ok);
     register_handler("_ZN3Osp4Base7Runtime6Thread4JoinEv", [](Cpu& c) { c.set_ret32(c.join_thread(c.arg32(0)) ? 0 : 0xa0000000u + 1926); });
     register_handler("_ZN3Osp4Base7Runtime6ThreadD1Ev", [](Cpu& c) { c.destroy_thread(c.arg32(0)); c.set_ret32(0); });
     register_handler("_ZN3Osp4Base7Runtime6ThreadD2Ev", [](Cpu& c) { c.destroy_thread(c.arg32(0)); c.set_ret32(0); });

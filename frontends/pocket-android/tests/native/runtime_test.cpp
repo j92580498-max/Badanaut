@@ -27,8 +27,24 @@ uint32_t call(Cpu& cpu, const char* symbol, std::initializer_list<uint32_t> args
 }
 
 void timer_test(Cpu& cpu) {
+    const uint32_t timer = cpu.alloc(32), other = cpu.alloc(32);
+    const uint32_t listener = cpu.alloc(32), other_listener = cpu.alloc(32);
+    const uint32_t table = cpu.make_vtable(3, {{2, [](Cpu& c) {
+        const uint32_t object = c.arg32(0), timer = c.arg32(1);
+        c.write_u32(object + 4, c.read_u32(object + 4) + 1);
+        c.write_u32(object + 8, timer);
+        if (c.read_u32(object + 16)) c.destroy_timer(c.read_u32(object + 16));
+        c.set_ret32(0);
+    }}});
+    cpu.write_u32(listener, table);
+    cpu.write_u32(other_listener, table);
+    for (const auto& entry : {std::make_pair(timer, listener), std::make_pair(other, other_listener)}) {
+        call(cpu, "_ZN3Osp4Base7Runtime5TimerC1Ev", {entry.first});
+        require(call(cpu, "_ZN3Osp4Base7Runtime5Timer9ConstructERKNS1_19ITimerEventListenerE",
+                     {entry.first, entry.second}) == 0, "Timer::Construct lost the registered listener");
+    }
     const uint32_t before = SDL_GetTicks();
-    call(cpu, "_ZN3Osp4Base7Runtime5Timer5StartEi", {0, 30});
+    call(cpu, "_ZN3Osp4Base7Runtime5Timer5StartEi", {timer, 30});
     require(cpu.timer_active && cpu.timer_interval_ms == 30, "timer was not armed");
     require(static_cast<int32_t>(cpu.timer_deadline_ms - before) >= 30 &&
             static_cast<int32_t>(cpu.timer_deadline_ms - before) < 50, "timer deadline does not start at Timer::Start");
@@ -38,8 +54,40 @@ void timer_test(Cpu& cpu) {
     SDL_Delay(40);
     require(cpu.timer_deadline_ms == deadline &&
             static_cast<int32_t>(SDL_GetTicks() - deadline) >= 0, "render work moved the timer deadline");
-    call(cpu, "_ZN3Osp4Base7Runtime5Timer6CancelEv", {0});
+    uint32_t dispatched = 0;
+    require(cpu.pump_timers(dispatched) && dispatched == 1 && !cpu.timer_active &&
+            cpu.read_u32(listener + 4) == 1 && cpu.read_u32(listener + 8) == timer,
+            "one-shot timer did not call its own listener with its own Timer object");
+    require(cpu.pump_timers(dispatched) && dispatched == 0, "timer repeated without Start");
+
+    call(cpu, "_ZN3Osp4Base7Runtime5Timer5StartEi", {timer, 30});
+    const uint32_t next_deadline = cpu.timer_deadline_ms;
+    call(cpu, "_ZN3Osp4Base7Runtime5Timer5StartEi", {other, 1});
+    require(static_cast<int32_t>(cpu.timer_deadline_ms - next_deadline) < 0, "host did not wake for the earliest timer");
+    call(cpu, "_ZN3Osp4Base7Runtime5Timer6CancelEv", {other});
+    require(cpu.timer_active && cpu.timer_deadline_ms == next_deadline, "canceling one timer canceled another");
+    call(cpu, "_ZN3Osp4Base7Runtime5Timer6CancelEv", {timer});
     require(!cpu.timer_active, "Timer::Cancel was overridden by a success stub");
+    require(call(cpu, "_ZN3Osp4Base7Runtime5Timer5StartEi", {timer, 0xffffffffu}) != 0 && !cpu.timer_active,
+            "negative interval armed a timer");
+
+    // A callback can destroy another timer while the host is dispatching its
+    // snapshot. Destruction must remove its event and update the host wake.
+    cpu.write_u32(listener + 16, other);
+    call(cpu, "_ZN3Osp4Base7Runtime5Timer5StartEi", {other, 1000});
+    call(cpu, "_ZN3Osp4Base7Runtime5Timer5StartEi", {timer, 1});
+    SDL_Delay(3);
+    require(cpu.pump_timers(dispatched) && dispatched == 1 && !cpu.timer_active &&
+            cpu.read_u32(listener + 4) == 2 && cpu.read_u32(other_listener + 4) == 0,
+            "callback destruction left a live timer or skipped its listener");
+    require(call(cpu, "_ZN3Osp4Base7Runtime5Timer5StartEi", {other, 1}) != 0, "destroyed timer could be restarted");
+    const uint32_t deleting_dtor = cpu.read_u32(cpu.read_u32(timer) + 4);
+    uint32_t result = 0;
+    require(cpu.run_guest(deleting_dtor, {timer}, result) && !cpu.allocation_size(timer) && !cpu.has_timers(),
+            "virtual Timer destruction retained its event or guest allocation");
+    cpu.free(other);
+    cpu.free(listener);
+    cpu.free(other_listener);
 }
 
 void boolean_reference_test(Cpu& cpu) {

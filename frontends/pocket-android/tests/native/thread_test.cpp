@@ -21,6 +21,20 @@ void code(Cpu& cpu, uint32_t address, std::vector<uint32_t> words, size_t load, 
     words.push_back(target);
     cpu.write_mem(address, words.data(), words.size() * 4);
 }
+uint32_t invoke(Cpu& cpu, const char* name, std::initializer_list<uint32_t> args) {
+    int index = 0;
+    for (uint32_t value : args) cpu.set_reg(UC_ARM_REG_R0 + index++, value);
+    hle::call(name, cpu);
+    return cpu.reg(UC_ARM_REG_R0);
+}
+uint32_t thunk(Cpu& cpu, uint32_t address, uint16_t adjustment, hle::Handler handler) {
+    // A real Thumb multiple-inheritance thunk adjusts the interface pointer
+    // before tail-calling the host test callback.
+    const uint16_t instructions[] = {static_cast<uint16_t>(0x3800 | adjustment), 0x4b01, 0x4718, 0xbf00};
+    cpu.write_mem(address, instructions, sizeof instructions);
+    cpu.write_u32(address + 8, cpu.bind_trampoline(handler));
+    return address | 1;
+}
 void workers(Cpu& cpu) {
     const uint32_t sleep = cpu.bind_trampoline([](Cpu& c) {
         hle::call("_ZN3Osp4Base7Runtime6Thread5SleepEl", c);
@@ -98,6 +112,113 @@ void semaphores(Cpu& cpu) {
     require(cpu.acquire_semaphore(semaphore, 0), "timeout consumed a future token");
     require(cpu.destroy_thread(worker), "timed worker cleanup failed");
 }
+
+void event_threads(Cpu& cpu) {
+    constexpr const char* construct = "_ZN3Osp4Base7Runtime6Thread9ConstructENS1_10ThreadTypeElNS1_14ThreadPriorityE";
+    constexpr const char* start = "_ZN3Osp4Base7Runtime6Thread5StartEv";
+    constexpr const char* stop = "_ZN3Osp4Base7Runtime6Thread4StopEv";
+    constexpr const char* timer_start = "_ZN3Osp4Base7Runtime5Timer5StartEi";
+    constexpr const char* timer_construct = "_ZN3Osp4Base7Runtime5Timer9ConstructERKNS1_19ITimerEventListenerE";
+    const uint32_t owner = cpu.alloc(64), worker = owner + 4, listener = owner + 8, timer = cpu.alloc(32);
+    cpu.write_u32(owner + 24, timer);
+    const uint32_t run = thunk(cpu, 0x100380, 4, [](Cpu& c) {
+        const uint32_t object = c.arg32(0);
+        c.write_u32(object + 40, c.read_u32(object + 40) + 1);
+        c.set_ret32(0);
+    });
+    const uint32_t on_start = thunk(cpu, 0x1003a0, 4, [](Cpu& c) {
+        const uint32_t object = c.arg32(0);
+        c.write_u32(object + 12, c.read_u32(object + 12) + 1);
+        c.write_u32(object + 16, c.current_thread());
+        c.write_u32(object + 52, c.start_timer(c.read_u32(object + 24), 1));
+        c.set_ret32(1);
+    });
+    const uint32_t on_stop = thunk(cpu, 0x1003c0, 4, [](Cpu& c) {
+        const uint32_t object = c.arg32(0);
+        c.write_u32(object + 44, c.read_u32(object + 44) + 1);
+        c.write_u32(object + 48, c.current_thread());
+        c.cancel_timer(c.read_u32(object + 24));
+        c.set_ret32(0);
+    });
+    const uint32_t on_timer = thunk(cpu, 0x1003e0, 8, [](Cpu& c) {
+        const uint32_t object = c.arg32(0), timer = c.arg32(1);
+        c.write_u32(object + 20, c.read_u32(object + 20) + 1);
+        c.write_u32(object + 28, timer);
+        c.write_u32(object + 32, c.current_thread());
+        c.write_u32(object + 36, c.reg(UC_ARM_REG_SP));
+        c.set_ret32(0);
+    });
+    const uint32_t table = cpu.make_vtable(6);
+    cpu.write_u32(table + 8, run);
+    cpu.write_u32(table + 12, on_start);
+    cpu.write_u32(table + 16, on_stop);
+    cpu.write_u32(worker, table);
+    const uint32_t timer_table = cpu.make_vtable(3);
+    cpu.write_u32(timer_table + 8, on_timer);
+    cpu.write_u32(listener, timer_table);
+    invoke(cpu, "_ZN3Osp4Base7Runtime5TimerC1Ev", {timer});
+    require(invoke(cpu, timer_construct, {timer, listener}) == 0, "worker timer construction failed");
+    require(invoke(cpu, construct, {worker, 2, 65536, 1}) != 0, "invalid ThreadType was accepted");
+    require(invoke(cpu, construct, {worker, 1, 0xffffffffu, 1}) != 0, "negative thread stack size was accepted");
+    require(invoke(cpu, construct, {worker, 1, 65536, 1}) == 0, "event-driven Thread::Construct is missing");
+    require(invoke(cpu, construct, {worker, 1, 65536, 1}) != 0, "event-driven thread was constructed twice");
+    require(invoke(cpu, start, {worker}) == 0 && cpu.read_u32(owner + 12) == 0, "Start ran OnStart inside an HLE callback");
+    const uint32_t main_stack = cpu.reg(UC_ARM_REG_SP), main_thread = cpu.current_thread();
+    cpu.set_reg(UC_ARM_REG_R5, 0x89abcdef);
+    require(cpu.pump_threads() && cpu.read_u32(owner + 12) == 1 && cpu.read_u32(owner + 40) == 0 &&
+            cpu.read_u32(owner + 16) == worker && cpu.read_u32(owner + 52) == 1,
+            "event thread used Run or lost the adjusted OnStart pointer/current-thread identity");
+    require(!cpu.join_thread(worker), "event loop finished when OnStart returned true");
+    uint32_t dispatched = 0;
+    SDL_Delay(3);
+    require(cpu.pump_timers(dispatched) && dispatched == 1 && cpu.read_u32(owner + 20) == 0,
+            "worker timer callback ran on the main context");
+    require(cpu.pump_threads() && cpu.read_u32(owner + 20) == 1 && cpu.read_u32(owner + 28) == timer &&
+            cpu.read_u32(owner + 32) == worker && cpu.read_u32(owner + 36) != main_stack,
+            "timer lost its listener adjustment, Timer argument or worker stack");
+    require(cpu.current_thread() == main_thread && cpu.reg(UC_ARM_REG_SP) == main_stack &&
+            cpu.reg(UC_ARM_REG_R5) == 0x89abcdef, "event callback changed the main ARM context");
+
+    // Foreground code can restart the timer from the main thread without
+    // moving the listener out of its original event loop.
+    require(invoke(cpu, timer_start, {timer, 1}) == 0, "foreground timer restart failed");
+    SDL_Delay(3);
+    require(cpu.pump_timers(dispatched) && cpu.pump_threads() && cpu.read_u32(owner + 20) == 2 &&
+            cpu.read_u32(owner + 32) == worker, "foreground restart changed the timer owner");
+    invoke(cpu, timer_start, {timer, 1});
+    SDL_Delay(3);
+    require(cpu.pump_timers(dispatched) && dispatched == 1, "timer event was not queued");
+    invoke(cpu, "_ZN3Osp4Base7Runtime5Timer6CancelEv", {timer});
+    require(cpu.pump_threads() && cpu.read_u32(owner + 20) == 2, "Cancel delivered an already queued timer callback");
+
+    invoke(cpu, timer_start, {timer, 1});
+    SDL_Delay(3);
+    require(cpu.pump_timers(dispatched) && dispatched == 1, "destruction test did not queue a timer");
+    invoke(cpu, "_ZN3Osp4Base7Runtime5TimerD1Ev", {timer});
+    invoke(cpu, "_ZN3Osp4Base7Runtime5TimerC1Ev", {timer});
+    require(invoke(cpu, timer_construct, {timer, listener}) == 0, "Timer address could not be reused after destruction");
+    require(cpu.pump_threads() && cpu.read_u32(owner + 20) == 2, "destroyed Timer event reached a new object at the same address");
+    require(invoke(cpu, stop, {worker}) == 0 && cpu.read_u32(owner + 44) == 0, "Stop ran OnStop inside an HLE callback");
+    require(cpu.pump_threads() && cpu.read_u32(owner + 44) == 1 && cpu.read_u32(owner + 48) == worker &&
+            cpu.join_thread(worker) && cpu.destroy_thread(worker), "OnStop did not finish the event loop on its own context");
+
+    const uint32_t failed_start = thunk(cpu, 0x100400, 4, [](Cpu& c) {
+        const uint32_t object = c.arg32(0);
+        c.start_timer(c.read_u32(object + 24), 1);
+        c.set_ret32(0);
+    });
+    cpu.write_u32(table + 12, failed_start);
+    require(invoke(cpu, construct, {worker, 1, 65536, 1}) == 0 && invoke(cpu, start, {worker}) == 0 &&
+            cpu.pump_threads() && !cpu.timer_active && cpu.join_thread(worker) && cpu.destroy_thread(worker) &&
+            cpu.read_u32(owner + 44) == 1, "failed OnStart left a live event loop/timer or called OnStop");
+
+    require(invoke(cpu, construct, {worker, 0, 0, 1}) == 0 && invoke(cpu, start, {worker}) == 0 &&
+            cpu.pump_threads() && cpu.read_u32(owner + 40) == 1 && cpu.join_thread(worker) && cpu.destroy_thread(worker),
+            "ThreadType worker did not execute its virtual Run");
+    invoke(cpu, "_ZN3Osp4Base7Runtime5TimerD1Ev", {timer});
+    cpu.free(timer);
+    cpu.free(owner);
+}
 }
 int main() {
     try {
@@ -111,8 +232,9 @@ int main() {
         require(cpu.init(image, error), error.c_str());
         workers(cpu);
         semaphores(cpu);
+        event_threads(cpu);
         SDL_Quit();
-        puts("Worker suspension, ARM/VFP isolation, Join and semaphore token/timeout behavior passed");
+        puts("Worker/event-loop lifecycle, listener adjustment, timer ownership/cancellation, ARM/VFP isolation, Join and semaphores passed");
         return 0;
     } catch (const std::exception& error) {
         fprintf(stderr, "FAIL: %s\n", error.what());

@@ -1168,15 +1168,18 @@ int main(int argc, char** argv) {
         }
         if (!cpu.pump_threads()) return 1;
 
-        // ---- Timer-driven frame loop: each frame = one OnTimerExpired -> Draw ----
-        uint32_t ote = img.resolve_contains("14OnTimerExpiredE");
-        printf("[boot] OnTimerExpired @ 0x%x -- entering frame loop\n", ote);
+        // Timer callbacks use the registered listener's vtable. Looking up an
+        // arbitrary OnTimerExpired symbol can select a different class, and
+        // loses the listener's multiple-inheritance adjustment and thread.
+        // Retain the old single bootstrap for apps without a registered timer.
+        uint32_t bootstrap_callback = cpu.has_timers() ? 0 : img.resolve_contains("14OnTimerExpiredE");
+        printf("[boot] entering registered timer loop (bootstrap=0x%x)\n", bootstrap_callback);
         std::thread(stdin_reader).detach(); // scriptable: "screenshot <path>" / "quit"
         if (const char* cp = getenv("BADA_CONTROL_PORT")) { // localhost TCP control server
             start_control_server(atoi(cp), control_exec);
         }
         const uint32_t kFrameMs = 16;        // host loop granularity
-        bool bootstrap_tick = !cpu.timer_active;
+        bool bootstrap_tick = bootstrap_callback != 0;
         int frames = 0;
         uint32_t fps_t0 = SDL_GetTicks(); // window-title FPS counter
         int fps_frames = 0;
@@ -1294,31 +1297,25 @@ int main(int argc, char** argv) {
                 g_gesture.pop_front();
                 feed_touch(cpu, win, st.kind, st.x, st.y);
             }
-            // The app drives its own rate: OnTimerExpired ends by re-arming the
-            // one-shot timer with the time left in its period (PvZ asks for
-            // 100 ms). Firing it once per host frame instead runs the app's whole
-            // clock at our frame rate -- the game plays several times too fast.
-            bool ticked = false;
-            if (ote) {
-                if (bootstrap_tick || (cpu.timer_active &&
-                    (int32_t)(SDL_GetTicks() - cpu.timer_deadline_ms) >= 0)) {
-                    bootstrap_tick = false;
-                    cpu.timer_active = false; // one-shot; the callback may re-arm it
-                    uint32_t rr = 0;
-                    if (!cpu.run_guest(ote, {cpu.app_instance, cpu.timer_obj}, rr)) {
-                        guest_failed = true;
-                        break;
-                    }
-                    ticked = true;
+            uint32_t timer_events = 0;
+            if (!cpu.pump_timers(timer_events)) { guest_failed = true; break; }
+            bool ticked = timer_events != 0;
+            if (bootstrap_tick) {
+                bootstrap_tick = false;
+                uint32_t rr = 0;
+                if (!cpu.run_guest(bootstrap_callback, {cpu.app_instance, 0}, rr)) {
+                    guest_failed = true;
+                    break;
                 }
-            } else {
+                ticked = true;
+            } else if (!bootstrap_callback && !cpu.has_timers()) {
                 glClear(GL_COLOR_BUFFER_BIT);
                 SDL_GL_SwapWindow(win);
                 ticked = true;
             }
             overlay::pump(cpu);        // replay mocked-UI input into the app
             hle::user_event_pump(cpu); // deliver Control::SendUserEvent posts
-            hle::player_pump(cpu);     // signal no-op video clips as ended (intro skip)
+            hle::player_pump(cpu);     // Player open/seek/playback callbacks
             hle::audio_pump(cpu);      // consumed PCM buffers -> AudioOut listener
             if (!cpu.pump_threads()) { guest_failed = true; break; }
             overlay::present_idle(win);

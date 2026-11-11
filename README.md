@@ -43,7 +43,7 @@ The engine is written in C++17 and uses [Unicorn](https://github.com/unicorn-eng
 
 | Sky Force | Fruit Ninja |
 | :---: | :---: |
-| ![Sky Force](./proof/games/sky-force.jpg) | ![Fruit Ninja](./proof/games/fruit-ninja.jpg) |
+| ![Sky Force](./proof/games/sky-force.jpg) | ![Fruit Ninja](Screenshot_20261109_082249_Badanaut.jpg) |
 
 | N.O.V.A. | Exploration |
 | :---: | :---: |

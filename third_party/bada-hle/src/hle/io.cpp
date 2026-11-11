@@ -3,7 +3,9 @@
 #include <SDL2/SDL.h>
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <map>
@@ -59,6 +61,7 @@ struct Enumeration {
 };
 std::map<uint32_t, Enumeration> g_enumerators;
 std::map<uint32_t, std::string> g_entry_names;
+std::map<uint32_t, fs::directory_entry> g_entry_files;
 
 bool iequals(const std::string& a, const std::string& b) {
     if (a.size() != b.size()) {
@@ -160,6 +163,23 @@ std::string resolve(const std::string& guest) {
     return "";
 }
 
+bool binary_file_mode(std::string& mode) {
+    if (mode.empty() || (mode[0] != 'r' && mode[0] != 'w' && mode[0] != 'a')) return false;
+    bool update = false;
+    for (size_t i = 1; i < mode.size(); ++i) {
+        if (mode[i] == '+') {
+            if (update) return false;
+            update = true;
+        } else if (mode[i] != 'b' && mode[i] != 't') {
+            return false;
+        }
+    }
+    // Newlib text streams retain the file's bytes. In particular, "rt" must
+    // become "rb", rather than "rtb", which aborts the Windows CRT.
+    mode = mode.substr(0, 1) + (update ? "b+" : "b");
+    return true;
+}
+
 // Osp::Base::String: +0 vptr, +4 __capacity, +8 __length, +12 __pValue (mchar* UTF-16)
 std::string read_string(Cpu& c, uint32_t obj) {
     uint32_t pv = c.read_u32(obj + 12);
@@ -189,17 +209,21 @@ void directory_construct(Cpu& c) {
 void directory_dtor(Cpu& c) { g_directories.erase(c.arg32(0)); c.set_ret32(0); }
 void enumerator_next(Cpu& c) {
     auto found = g_enumerators.find(c.arg32(0));
-    if (found == g_enumerators.end() || found->second.position == found->second.entries.size()) {
+    if (found == g_enumerators.end() || found->second.position >= found->second.entries.size()) {
+        if (found != g_enumerators.end()) found->second.position = found->second.entries.size() + 1;
         c.set_ret32(0xa0000000u + 1926); // E_INVALID_STATE, end of enumeration
         return;
     }
     auto& enumeration = found->second;
-    g_entry_names[enumeration.entry] = enumeration.entries[enumeration.position++].path().filename().u8string();
+    const auto& entry = enumeration.entries[enumeration.position++];
+    g_entry_names[enumeration.entry] = entry.path().filename().u8string();
+    g_entry_files[enumeration.entry] = entry;
     c.set_ret32(0);
 }
 void enumerator_current(Cpu& c) {
     auto found = g_enumerators.find(c.arg32(0));
-    c.set_ret32(found == g_enumerators.end() || !found->second.position ? 0 : found->second.entry);
+    c.set_ret32(found == g_enumerators.end() || !found->second.position ||
+        found->second.position > found->second.entries.size() ? 0 : found->second.entry);
 }
 void enumerator_reset(Cpu& c) {
     auto found = g_enumerators.find(c.arg32(0));
@@ -210,6 +234,7 @@ void enumerator_dtor(Cpu& c) {
     auto found = g_enumerators.find(c.arg32(0));
     if (found != g_enumerators.end()) {
         g_entry_names.erase(found->second.entry);
+        g_entry_files.erase(found->second.entry);
         c.free(found->second.entry);
         g_enumerators.erase(found);
     }
@@ -255,6 +280,56 @@ void direntry_getname(Cpu& c) {
     const auto found = g_entry_names.find(c.arg32(1));
     const std::string name = found == g_entry_names.end() ? "" : found->second;
     hle::osp_string_set(c, output, name);
+    c.set_ret32(output);
+}
+void direntry_size(Cpu& c) {
+    const auto found = g_entry_files.find(c.arg32(0));
+    std::error_code error;
+    const uintmax_t size = found == g_entry_files.end() ? 0 : found->second.file_size(error);
+    c.set_ret32(error ? 0 : static_cast<uint32_t>(size));
+}
+void direntry_directory(Cpu& c) {
+    const auto found = g_entry_files.find(c.arg32(0));
+    std::error_code error;
+    c.set_ret32(found != g_entry_files.end() && found->second.is_directory(error));
+}
+void direntry_hidden(Cpu& c) {
+    const auto found = g_entry_names.find(c.arg32(0));
+    c.set_ret32(found != g_entry_names.end() && !found->second.empty() && found->second.front() == '.');
+}
+void direntry_readonly(Cpu& c) {
+    const auto found = g_entry_files.find(c.arg32(0));
+    std::error_code error;
+    if (found == g_entry_files.end()) { c.set_ret32(0); return; }
+    const auto permissions = found->second.status(error).permissions();
+    const auto writable = fs::perms::owner_write | fs::perms::group_write | fs::perms::others_write;
+    c.set_ret32(!error && (permissions & writable) == fs::perms::none);
+}
+void direntry_datetime(Cpu& c) {
+    const uint32_t output = c.arg32(0);
+    const auto found = g_entry_files.find(c.arg32(1));
+    std::tm time{};
+    time.tm_year = 1 - 1900;
+    time.tm_mday = 1;
+    uint32_t milliseconds = 0;
+    std::error_code error;
+    if (found != g_entry_files.end()) {
+        const auto modified = found->second.last_write_time(error);
+        if (!error) {
+            const auto system = std::chrono::system_clock::now() +
+                std::chrono::duration_cast<std::chrono::system_clock::duration>(
+                    modified - fs::file_time_type::clock::now());
+            const time_t seconds = std::chrono::system_clock::to_time_t(system);
+#ifdef _WIN32
+            localtime_s(&time, &seconds);
+#else
+            localtime_r(&seconds, &time);
+#endif
+            const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(system.time_since_epoch()).count();
+            milliseconds = static_cast<uint32_t>((ms % 1000 + 1000) % 1000);
+        }
+    }
+    hle::osp_datetime_set(c, output, time, milliseconds);
     c.set_ret32(output);
 }
 
@@ -449,7 +524,7 @@ void file_construct(Cpu& c) {
     std::string mode = read_string(c, c.arg32(2));
     // Reuse c_fopen's writable /Home mapping and the r/w/a modes described by
     // touchHLE's stdio.rs. Nova's New Game must truncate its previous save.
-    if (mode.empty() || (mode[0] != 'r' && mode[0] != 'w' && mode[0] != 'a')) {
+    if (!binary_file_mode(mode)) {
         c.set_ret32(0x80000000);
         return;
     }
@@ -460,7 +535,6 @@ void file_construct(Cpu& c) {
         c.set_ret32(0x80000000);
         return;
     }
-    if (mode.find('b') == std::string::npos) mode += 'b';
     FILE* f = fopen(host.c_str(), mode.c_str());
     if (!f) {
         c.set_ret32(0x80000000);
@@ -632,6 +706,9 @@ std::map<uint32_t, FILE*> g_cfiles;
 uint32_t g_cfile_next = 0x9000;
 void c_fopen(Cpu& c) {
     std::string path = c.read_cstr(c.arg32(0)), mode = c.read_cstr(c.arg32(1));
+    if (getenv("BADA_TRACE") || getenv("BADA_TRACE_IO"))
+        printf("[io] fopen(\"%s\", \"%s\")\n", path.c_str(), mode.c_str());
+    if (!binary_file_mode(mode)) { c.set_ret32(0); return; }
     bool writing = mode.find('w') != std::string::npos || mode.find('a') != std::string::npos;
     std::string host = writing ? write_path(path) : resolve(path);
     if (host.empty()) {
@@ -644,7 +721,7 @@ void c_fopen(Cpu& c) {
         c.set_ret32(0);
         return;
     }
-    FILE* f = fopen(host.c_str(), mode.find('b') != std::string::npos ? mode.c_str() : (mode + "b").c_str());
+    FILE* f = fopen(host.c_str(), mode.c_str());
     if (!f) {
         c.set_ret32(0);
         return;
@@ -752,6 +829,7 @@ void c_fflush(Cpu& c) {
 // defaulted to returning 0 -- access() said "exists", open() handed back fd 0
 // and read() gave no bytes, so every PNG decoded to nothing, silently.
 std::map<int, FILE*> g_fds;
+std::map<int, uint32_t> g_fd_access;
 int g_fd_next = 3;
 FILE* fdf(int fd) {
     auto it = g_fds.find(fd);
@@ -760,9 +838,25 @@ FILE* fdf(int fd) {
 void c_open(Cpu& c) {
     std::string path = c.read_cstr(c.arg32(0));
     uint32_t flags = c.arg32(1);
-    bool writing = (flags & 3) != 0 || (flags & 0100 /*O_CREAT*/) != 0;
-    std::string host = writing ? write_path(path) : resolve(path);
-    FILE* f = host.empty() ? nullptr : fopen(host.c_str(), writing ? "wb" : "rb");
+    // The guest uses newlib's flags, not the host OS's fcntl constants.
+    const uint32_t access = flags & 3;
+    const bool create = (flags & 0x200) != 0, truncate = (flags & 0x400) != 0;
+    const bool append = (flags & 8) != 0, exclusive = (flags & 0x800) != 0;
+    if (getenv("BADA_TRACE") || getenv("BADA_TRACE_IO"))
+        printf("[io] open(\"%s\", 0x%x)\n", path.c_str(), flags);
+    if (access == 3) { c.set_ret32(UINT32_MAX); return; }
+    std::string host = access ? ci_resolve(g_home, home_rel(path)) : resolve(path);
+    if (host.empty() && create) host = write_path(path);
+    std::error_code error;
+    const bool exists = !host.empty() && fs::exists(host, error);
+    if ((!exists && !create) || (exists && create && exclusive) || error) {
+        c.set_ret32(UINT32_MAX);
+        return;
+    }
+    const char* mode = !access && exists ? "rb" :
+        access && append ? (access == 2 ? "ab+" : "ab") :
+        !exists || (access && truncate) ? (access == 1 ? "wb" : "wb+") : "rb+";
+    FILE* f = host.empty() ? nullptr : fopen(host.c_str(), mode);
     if (!f) {
         printf("[io] open(\"%s\") NOT FOUND\n", path.c_str());
         c.set_ret32((uint32_t)-1);
@@ -770,11 +864,14 @@ void c_open(Cpu& c) {
     }
     int fd = g_fd_next++;
     g_fds[fd] = f;
+    g_fd_access[fd] = access;
     c.set_ret32((uint32_t)fd);
 }
 void c_read(Cpu& c) {
-    FILE* f = fdf((int)c.arg32(0));
+    const int fd = static_cast<int>(c.arg32(0));
+    FILE* f = fdf(fd);
     uint32_t ptr = c.arg32(1), n = c.arg32(2);
+    if (f && g_fd_access[fd] == 1) { c.set_ret32(UINT32_MAX); return; }
     if (!f || !n) {
         c.set_ret32(f ? 0 : (uint32_t)-1);
         return;
@@ -787,19 +884,21 @@ void c_read(Cpu& c) {
     c.set_ret32((uint32_t)got);
 }
 void c_write(Cpu& c) {
-    FILE* f = fdf((int)c.arg32(0));
+    const int fd = static_cast<int>(c.arg32(0));
+    FILE* f = fdf(fd);
     uint32_t ptr = c.arg32(1), n = c.arg32(2);
     if (!f) {
-        c.set_ret32(n); // stdout/stderr: pretend it went out
+        c.set_ret32(fd == 1 || fd == 2 ? n : UINT32_MAX);
         return;
     }
+    if (g_fd_access[fd] == 0) { c.set_ret32(UINT32_MAX); return; }
     std::vector<uint8_t> b(n);
     c.read_mem(ptr, b.data(), n);
     c.set_ret32((uint32_t)fwrite(b.data(), 1, n, f));
 }
 void c_lseek(Cpu& c) {
     FILE* f = fdf((int)c.arg32(0));
-    if (!f) {
+    if (!f || c.arg32(2) > 2) {
         c.set_ret32((uint32_t)-1);
         return;
     }
@@ -811,12 +910,20 @@ void c_close(Cpu& c) {
     if (FILE* f = fdf(fd)) {
         fclose(f);
         g_fds.erase(fd);
+        g_fd_access.erase(fd);
     }
     c.set_ret32(0);
 }
 void c_access(Cpu& c) {
     std::string path = c.read_cstr(c.arg32(0));
     c.set_ret32(resolve(path).empty() ? (uint32_t)-1 : 0);
+}
+void c_unlink(Cpu& c) {
+    const std::string host = ci_resolve(g_home, home_rel(c.read_cstr(c.arg32(0))));
+    std::error_code error;
+    if (host.empty() || fs::is_directory(host, error)) { c.set_ret32(UINT32_MAX); return; }
+    const bool removed = fs::remove(host, error);
+    c.set_ret32(removed && !error ? 0 : UINT32_MAX);
 }
 void c_getcwd(Cpu& c) {
     uint32_t buf = c.arg32(0);
@@ -880,6 +987,14 @@ void register_io() {
     register_handler("_ZN3Osp2Io9DirectoryD1Ev", directory_dtor);
     register_handler("_ZN3Osp2Io9Directory5ReadNEv", directory_read);
     register_handler("_ZNK3Osp2Io8DirEntry7GetNameEv", direntry_getname);
+    // Bada returns a reference here (r0 = this, result = entry pointer).
+    // The later Tizen API uses a value return with a different calling convention.
+    register_handler("_ZNK3Osp2Io13DirEnumerator18GetCurrentDirEntryEv", enumerator_current);
+    register_handler("_ZNK3Osp2Io8DirEntry11GetFileSizeEv", direntry_size);
+    register_handler("_ZNK3Osp2Io8DirEntry11IsDirectoryEv", direntry_directory);
+    register_handler("_ZNK3Osp2Io8DirEntry8IsHiddenEv", direntry_hidden);
+    register_handler("_ZNK3Osp2Io8DirEntry10IsReadOnlyEv", direntry_readonly);
+    register_handler("_ZNK3Osp2Io8DirEntry11GetDateTimeEv", direntry_datetime);
     register_handler("_ZN3Osp4Base10ByteBufferC1Ev", bb_ctor);
     register_handler("_ZN3Osp4Base10ByteBufferC2Ev", bb_ctor);
     register_handler("_ZN3Osp4Base10ByteBuffer9ConstructEi", bb_construct);
@@ -945,6 +1060,7 @@ void register_io() {
     register_handler("lseek", c_lseek);
     register_handler("close", c_close);
     register_handler("access", c_access);
+    register_handler("unlink", c_unlink);
     register_handler("getcwd", c_getcwd);
     register_handler("remove", c_remove);
     register_handler("rename", c_rename);

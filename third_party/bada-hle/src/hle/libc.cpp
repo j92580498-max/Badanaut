@@ -233,6 +233,7 @@ void h_strchr(Cpu& c) {
     uint32_t s = c.arg32(0);
     int ch = c.arg32(1);
     std::string str = c.read_cstr(s);
+    if (static_cast<char>(ch) == '\0') { c.set_ret32(s + str.size()); return; }
     auto p = str.find((char)ch);
     c.set_ret32(p == std::string::npos ? 0 : s + p);
 }
@@ -240,6 +241,7 @@ void h_strrchr(Cpu& c) {
     uint32_t s = c.arg32(0);
     int ch = c.arg32(1);
     std::string str = c.read_cstr(s);
+    if (static_cast<char>(ch) == '\0') { c.set_ret32(s + str.size()); return; }
     auto p = str.rfind((char)ch);
     c.set_ret32(p == std::string::npos ? 0 : s + p);
 }
@@ -323,6 +325,44 @@ void h_localtime(Cpu& c) {
         c.write_u32(buf + i * 4, v[i]);
     }
     c.set_ret32(buf);
+}
+void h_mktime(Cpu& c) {
+    const uint32_t object = c.arg32(0);
+    if (!object || !c.memory_mapped(object, 36)) { c.set_ret32(UINT32_MAX); return; }
+    std::tm time{};
+    int* fields[] = {&time.tm_sec, &time.tm_min, &time.tm_hour, &time.tm_mday,
+        &time.tm_mon, &time.tm_year, &time.tm_wday, &time.tm_yday, &time.tm_isdst};
+    for (uint32_t index = 0; index < 9; ++index)
+        *fields[index] = static_cast<int32_t>(c.read_u32(object + index * 4));
+    const time_t result = mktime(&time);
+    for (uint32_t index = 0; index < 9; ++index)
+        c.write_u32(object + index * 4, static_cast<uint32_t>(*fields[index]));
+    c.set_ret32(static_cast<uint32_t>(result));
+}
+void h_strftime(Cpu& c) {
+    const uint32_t output = c.arg32(0), capacity = c.arg32(1), object = c.arg32(3);
+    if (!output || !capacity || !c.memory_mapped(output, capacity) || !c.memory_mapped(object, 36)) {
+        c.set_ret32(0);
+        return;
+    }
+    std::tm time{};
+    int* fields[] = {&time.tm_sec, &time.tm_min, &time.tm_hour, &time.tm_mday,
+        &time.tm_mon, &time.tm_year, &time.tm_wday, &time.tm_yday, &time.tm_isdst};
+    for (uint32_t index = 0; index < 9; ++index)
+        *fields[index] = static_cast<int32_t>(c.read_u32(object + index * 4));
+    // Reject malformed guest fields before Windows' parameter validation.
+    if (time.tm_sec < 0 || time.tm_sec > 60 || time.tm_min < 0 || time.tm_min > 59 ||
+        time.tm_hour < 0 || time.tm_hour > 23 || time.tm_mday < 1 || time.tm_mday > 31 ||
+        time.tm_mon < 0 || time.tm_mon > 11 || time.tm_wday < 0 || time.tm_wday > 6 ||
+        time.tm_yday < 0 || time.tm_yday > 365 || time.tm_year < -1900 || time.tm_year > 8099) {
+        c.set_ret32(0);
+        return;
+    }
+    const std::string format = c.read_cstr(c.arg32(2));
+    std::vector<char> buffer(capacity);
+    const size_t length = std::strftime(buffer.data(), buffer.size(), format.c_str(), &time);
+    if (length || format.empty()) c.write_mem(output, buffer.data(), static_cast<uint32_t>(length + 1));
+    c.set_ret32(static_cast<uint32_t>(length));
 }
 void h_setlocale(Cpu& c) {
     static uint32_t s = 0;
@@ -565,6 +605,29 @@ void h_uidivmod(Cpu& c) {
     c.set_reg(UC_ARM_REG_R1, b ? a % b : 0);
 }
 
+void thumb_switch(Cpu& c, uint32_t width, bool signed_entry) {
+    const uint32_t lr = c.reg(UC_ARM_REG_LR);
+    const uint64_t address = uint64_t(lr & ~1u) + uint64_t(c.arg32(0)) * width;
+    if (address > UINT32_MAX || !c.memory_mapped(static_cast<uint32_t>(address), width))
+        throw std::runtime_error("unmapped Thumb switch table");
+    uint32_t offset = 0;
+    if (width == 1) {
+        uint8_t value = 0;
+        c.read_mem(static_cast<uint32_t>(address), &value, sizeof value);
+        offset = value;
+    } else {
+        uint16_t value = 0;
+        c.read_mem(static_cast<uint32_t>(address), &value, sizeof value);
+        offset = signed_entry ? static_cast<uint32_t>(static_cast<int16_t>(value)) : value;
+    }
+    // LR points at the inline table, with the Thumb bit set. The trampoline's
+    // BX LR must jump to the selected case, preserving the selector and r1.
+    c.set_reg(UC_ARM_REG_LR, lr + offset * 2);
+}
+void h_thumb_case_uqi(Cpu& c) { thumb_switch(c, 1, false); }
+void h_thumb_case_uhi(Cpu& c) { thumb_switch(c, 2, false); }
+void h_thumb_case_shi(Cpu& c) { thumb_switch(c, 2, true); }
+
 static uint64_t lbits(Cpu& c, int i) {
     return uint64_t(c.arg32(2 * i)) | (uint64_t(c.arg32(2 * i + 1)) << 32);
 }
@@ -635,6 +698,10 @@ void h_ddiv(Cpu& c) {
 void h_i2f(Cpu& c) { c.set_ret32(b_of((float)(int32_t)c.arg32(0))); }
 void h_ui2f(Cpu& c) { c.set_ret32(b_of((float)c.arg32(0))); }
 void h_f2iz(Cpu& c) { c.set_ret32((uint32_t)(int32_t)f_of(c.arg32(0))); }
+void h_f2uiz(Cpu& c) {
+    const float value = f_of(c.arg32(0));
+    c.set_ret32(!(value > 0) ? 0 : value >= 4294967296.0f ? UINT32_MAX : static_cast<uint32_t>(value));
+}
 void h_i2d(Cpu& c) { dret(c, (double)(int32_t)c.arg32(0)); }
 void h_d2iz(Cpu& c) { c.set_ret32((uint32_t)(int32_t)darg(c, 0)); }
 void h_f2d(Cpu& c) { dret(c, (double)f_of(c.arg32(0))); }
@@ -714,6 +781,7 @@ void register_libc() {
     register_handler("_Z12Osp_callocExjjPKci", h_calloc);    // Osp_callocEx(n,size,file,line)
     register_handler("_Z13Osp_reallocExPvjPKci", h_realloc); // Osp_reallocEx(ptr,size,file,line)
     register_handler("_Z8Osp_freePv", h_free);               // Osp_free(ptr)
+    register_handler("_Z10Osp_freeExPvPKci", h_free);        // Osp_freeEx(ptr,file,line)
     register_handler("free", h_free);
     register_handler("_Znwj", h_new);   // operator new(unsigned int)
     register_handler("_Znaj", h_new);   // operator new[](unsigned int)
@@ -742,6 +810,8 @@ void register_libc() {
     register_handler("atol", h_atol);
     register_handler("time", h_time);
     register_handler("localtime", h_localtime);
+    register_handler("mktime", h_mktime);
+    register_handler("strftime", h_strftime);
     register_handler("gmtime", h_localtime);
     register_handler("setlocale", h_setlocale);
     register_handler("vsnprintf", h_vsnprintf);
@@ -802,6 +872,9 @@ void register_libc() {
     register_handler("__aeabi_uidivmod", h_uidivmod);
     register_handler("__aeabi_ldivmod", h_ldivmod);
     register_handler("__aeabi_uldivmod", h_uldivmod);
+    register_handler("__gnu_thumb1_case_uqi", h_thumb_case_uqi);
+    register_handler("__gnu_thumb1_case_uhi", h_thumb_case_uhi);
+    register_handler("__gnu_thumb1_case_shi", h_thumb_case_shi);
 
     register_handler("__aeabi_fadd", h_fadd);
     register_handler("__aeabi_fsub", h_fsub);
@@ -814,6 +887,7 @@ void register_libc() {
     register_handler("__aeabi_i2f", h_i2f);
     register_handler("__aeabi_ui2f", h_ui2f);
     register_handler("__aeabi_f2iz", h_f2iz);
+    register_handler("__aeabi_f2uiz", h_f2uiz);
     register_handler("__aeabi_i2d", h_i2d);
     register_handler("__aeabi_d2iz", h_d2iz);
     register_handler("__aeabi_f2d", h_f2d);

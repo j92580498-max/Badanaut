@@ -115,6 +115,7 @@ struct Cpu::Watchdog {
 Cpu::Cpu() = default;
 
 Cpu::~Cpu() {
+    guest_calls_.clear();
     if (scheduler_context_) uc_context_free(scheduler_context_);
     for (auto& thread : threads_) if (thread->context) uc_context_free(thread->context);
     watchdog_.reset();
@@ -469,6 +470,48 @@ bool Cpu::run_guest(uint32_t addr, const std::vector<uint32_t>& args, uint32_t& 
     return run_slice(addr, ret, timeout_us);
 }
 
+void Cpu::jump_guest(uint32_t address) {
+    uint32_t cpsr = reg(UC_ARM_REG_CPSR);
+    cpsr = (cpsr & ~(1u << 5)) | ((address & 1u) << 5);
+    set_reg(UC_ARM_REG_CPSR, cpsr);
+    set_reg(UC_ARM_REG_PC, address);
+}
+
+void Cpu::call_guest_from_handler(uint32_t address, uint32_t object,
+                                  std::function<void(Cpu&, uint32_t)> finish) {
+    if (!address || !memory_mapped(address & ~1u, address & 1u ? 2 : 4))
+        throw std::runtime_error("unmapped guest callback");
+    if (!guest_call_return_) guest_call_return_ = bind_trampoline(finish_guest_call);
+    auto call = std::make_unique<GuestCall>();
+    if (uc_context_alloc(uc, &call->context) != UC_ERR_OK ||
+        uc_context_save(uc, call->context) != UC_ERR_OK)
+        throw std::runtime_error("cannot preserve guest callback context");
+    call->owner = running_thread_ ? running_thread_->object : 0;
+    call->resume = reg(UC_ARM_REG_LR);
+    call->finish = std::move(finish);
+    guest_calls_.push_back(std::move(call));
+    set_reg(UC_ARM_REG_R0, object);
+    set_reg(UC_ARM_REG_LR, guest_call_return_);
+    jump_guest(address);
+}
+
+void Cpu::finish_guest_call(Cpu& cpu) {
+    const uint32_t owner = cpu.running_thread_ ? cpu.running_thread_->object : 0;
+    for (size_t index = cpu.guest_calls_.size(); index; --index) {
+        if (cpu.guest_calls_[index - 1]->owner != owner) continue;
+        auto call = std::move(cpu.guest_calls_[index - 1]);
+        cpu.guest_calls_.erase(cpu.guest_calls_.begin() + index - 1);
+        const uint32_t result = cpu.reg(UC_ARM_REG_R0);
+        if (uc_context_restore(cpu.uc, call->context) != UC_ERR_OK)
+            throw std::runtime_error("cannot restore guest callback context");
+        if (call->finish) call->finish(cpu, result);
+        cpu.set_ret32(result);
+        cpu.jump_guest(call->resume);
+        return;
+    }
+    throw std::runtime_error("guest callback returned without a caller");
+}
+
 bool Cpu::run_slice(uint32_t addr, uint32_t& ret, uint64_t timeout_us) {
     // Keep the generous wall-clock guard for asset initialization. Passing
     // zero here disables Unicorn's busy polling timer; our worker owns the
@@ -479,6 +522,9 @@ bool Cpu::run_slice(uint32_t addr, uint32_t& ret, uint64_t timeout_us) {
     const bool expired = timeout_us && watchdog_->disarm();
     const bool handler_failed = handler_failures_ != previous_failures;
     if (e || expired || handler_failed) {
+        const uint32_t owner = running_thread_ ? running_thread_->object : 0;
+        guest_calls_.erase(std::remove_if(guest_calls_.begin(), guest_calls_.end(),
+            [owner](const auto& call) { return call->owner == owner; }), guest_calls_.end());
         uint32_t pc;
         uc_reg_read(uc, UC_ARM_REG_PC, &pc);
         uint32_t poff = 0;

@@ -27,6 +27,8 @@ cxxopts is distributed under the MIT license. See `third_party/cxxopts/LICENSE`.
 
 Unicorn and its bundled components retain their respective upstream terms. See `third_party/unicorn/COPYING`, `third_party/unicorn/COPYING.LGPL2`, and `third_party/unicorn/COPYING_GLIB`.
 
+Badanaut's Windows x64 build applies the JIT allocation fixes in `cmake/UnicornWindows.cmake` to a generated copy of the upstream source. Its original notices and license terms are retained.
+
 ## pugixml
 
 pugixml is distributed under the MIT license. See `third_party/pugixml/LICENSE.md`.

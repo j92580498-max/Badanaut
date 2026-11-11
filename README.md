@@ -41,11 +41,11 @@ The engine is written in C++17 and uses [Unicorn](https://github.com/unicorn-eng
 
 ## Games Tested
 
-| Sky Force | Fruit Ninja |
+| Sims 3 | Fruit Ninja |
 | :---: | :---: |
-| ![Sky Force](./proof/games/sky-force.jpg) | ![Fruit Ninja](Screenshot_20261109_082249_Badanaut.jpg) |
+| ![Sims 3](Screenshot_20261109_171657_Gallery.jpg) | ![Fruit Ninja](Screenshot_20261109_082249_Badanaut.jpg) |
 
-| N.O.V.A. | Exploration |
+| Rollercoaster Rush | N.O.V.A |
 | :---: | :---: |
-| ![N.O.V.A.](./proof/games/nova.jpg) | ![Exploration](./proof/games/exploration.jpg) |
+| ![N.O.V.A.](VideoCapture_20261111-205637.jpg) | ![Exploration](Screenshot_20261110_210333_Badanaut.jpg) |
 

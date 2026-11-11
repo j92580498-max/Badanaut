@@ -36,7 +36,7 @@ With the Android SDK and JDK configured, run from `frontends/pocket-android`:
 Use JDK 17, Android SDK Platform 34, Build Tools 34.0.0, NDK 26.1.10909125, and Android CMake 3.22.1. Set `ANDROID_SDK_ROOT`, then run from the repository root:
 
 ```bash
-git submodule update --init --recursive
+git submodule update --init --recursive --depth 1
 ./frontends/pocket-android/build-android.sh
 ```
 

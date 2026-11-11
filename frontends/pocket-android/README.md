@@ -17,7 +17,7 @@ Build with JDK 17, SDK Platform and Build Tools 34, NDK `26.1.10909125` and
 CMake `3.22.1`. Initialize native dependency submodules first:
 
 ```sh
-git submodule update --init --recursive
+git submodule update --init --recursive --depth 1
 ./frontends/pocket-android/build-android.sh
 cd frontends/pocket-android
 ./gradlew --no-daemon --max-workers=2 :app:testDebugUnitTest

@@ -37,8 +37,8 @@ pugixml is distributed under the MIT license. See `third_party/pugixml/LICENSE.m
 
 The unmodified decoder in `third_party/pvr/` comes from the PowerVR Native SDK,
 copyright (c) Imagination Technologies Ltd., under the MIT license. See
-`third_party/pvr/LICENSE.md`. The pinned SDK revision and decoder path are
-documented in `third_party/README.md`.
+`third_party/pvr/LICENSE.md`. The upstream revision and original decoder path
+are documented in `third_party/pvr/UPSTREAM.md`.
 
 The Bada game archive and firmware libraries are not included in this repository.
 

@@ -14,7 +14,7 @@ SPDX-License-Identifier: Apache-2.0 OR MIT
 </p>
 
 <p align="center">
-  <a href="https://discord.gg/YOUR_INVITE">
+  <a href="https://discord.gg/GamEKXvVjN">
     <img src="https://img.shields.io/badge/Discord-Join%20our%20Community-5865F2?style=for-the-badge&logo=discord&logoColor=white" alt="Join the Badanaut Discord community" />
   </a>
 </p>

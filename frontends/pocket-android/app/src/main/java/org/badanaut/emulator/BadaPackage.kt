@@ -156,7 +156,6 @@ object BadaPackage {
             (count >= 3 && header[0] == 255.toByte() && header[1] == 216.toByte() && header[2] == 255.toByte()) ||
             (count >= 12 && String(header, 0, 4, Charsets.US_ASCII) == "RIFF" && String(header, 8, 4, Charsets.US_ASCII) == "WEBP")
     }.getOrDefault(false)
-    }
 
     /** Reject Windows PE, Android ARM64 and host libraries before launching SDL. */
     fun isArmElf(file: File): Boolean {

@@ -83,6 +83,24 @@ class LibraryTests(unittest.TestCase):
         (root / ENTRY).write_text(json.dumps(metadata))
         self.assertEqual(base64.b64decode(self.library.list_games()[0]["icon"].split(",")[1]), png())
 
+    def test_icon_discovery_cannot_follow_symlinks_outside_the_package(self):
+        game_id = self.library.import_game(self.archive({"res/icon.png": png()}))
+        root = self.library.directory(game_id)
+        outside = self.root / "outside-icons"
+        outside.mkdir()
+        (outside / "MainMenu.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"outside artwork")
+        try:
+            (root / "_badanaut-icon.png").symlink_to(outside / "MainMenu.png")
+            (root / "Res/Icons").symlink_to(outside, target_is_directory=True)
+        except OSError as error:
+            self.skipTest(f"Symlinks are unavailable: {error}")
+        metadata = json.loads((root / ENTRY).read_text())
+        metadata["icon"] = "Res/Icons/MainMenu.png"
+        (root / ENTRY).write_text(json.dumps(metadata))
+        self.assertEqual(base64.b64decode(self.library.list_games()[0]["icon"].split(",")[1]), png())
+        (root / "Res/icon.png").unlink()
+        self.assertIsNone(self.library.list_games()[0]["icon"])
+
     def test_failed_import_does_not_leave_partial_installation(self):
         for name in ("../escape", "C:/escape", "Res/CON.txt", "Res/trailing.", "Res/save.dat ", "RES/SAVE.DAT"):
             with self.subTest(name=name), self.assertRaises((ValueError, OSError)):

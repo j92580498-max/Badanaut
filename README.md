@@ -6,7 +6,7 @@ SPDX-License-Identifier: Apache-2.0 OR MIT
 # Badanaut
 
 <p align="center">
-  <img src="./frontends/pocket-desktop/assets/badanaut-logo.png" width="25%" alt="Badanaut logo" />
+  <img src="frontends/pocket-android/app/src/main/res/mipmap-xxxhdpi/ic_launcher.png" width="25%" alt="Badanaut logo" />
 </p>
 
 <p align="center">

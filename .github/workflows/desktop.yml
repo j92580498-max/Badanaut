@@ -2,7 +2,7 @@ name: Desktop builds
 
 on:
   push:
-    branches: [main, 'codex/**']
+    branches: [main]
   pull_request:
   workflow_dispatch:
 

@@ -506,12 +506,27 @@ bool Cpu::run_slice(uint32_t addr, uint32_t& ret, uint64_t timeout_us) {
 }
 
 bool Cpu::construct_thread(uint32_t object, uint32_t runnable, uint32_t size) {
+    return construct_thread_impl(object, runnable, size, false);
+}
+
+bool Cpu::construct_thread_type(uint32_t object, uint32_t type, uint32_t size) {
+    if (type > 1) return false; // THREAD_TYPE_WORKER / THREAD_TYPE_EVENT_DRIVEN
+    return construct_thread_impl(object, object, size, type == 1);
+}
+
+bool Cpu::construct_thread_impl(uint32_t object, uint32_t runnable, uint32_t size, bool event_driven) {
     for (const auto& t : threads_) if (t->object == object) return false;
-    if (!object || !runnable || size > 8 * 1024 * 1024) return false;
+    if (!object || !runnable || size > 8 * 1024 * 1024 || !memory_mapped(runnable, 4)) return false;
+    const uint32_t table = read_u32(runnable);
+    if (!memory_mapped(table, event_driven ? 20 : 12)) return false;
     auto thread = std::make_unique<GuestThread>();
     thread->object = object;
     thread->runnable = runnable;
-    thread->entry = read_u32(read_u32(runnable) + 8); // IRunnable::Run, after D1/D0
+    // Thread has Run/OnStart/OnStop after D1/D0. Event threads start their
+    // event loop with OnStart; the inherited Run implementation is not used.
+    thread->entry = read_u32(table + (event_driven ? 12 : 8));
+    thread->event_driven = event_driven;
+    thread->call = event_driven ? ThreadCall::start : ThreadCall::run;
     if (!thread->entry) return false;
     thread->stack_size = std::max(size, 64u * 1024);
     thread->stack = alloc(thread->stack_size, 8);
@@ -527,11 +542,22 @@ bool Cpu::start_thread(uint32_t object) {
     }
     return false;
 }
+bool Cpu::stop_thread(uint32_t object) {
+    for (auto& thread : threads_) if (thread->object == object) {
+        if (!thread->event_driven || !thread->started || thread->finished || thread->stopping) return false;
+        thread->stopping = true;
+        thread->pending_timers.clear();
+        cancel_thread_timers(object);
+        return true;
+    }
+    return false;
+}
 bool Cpu::destroy_thread(uint32_t object) {
     for (auto it = threads_.begin(); it != threads_.end(); ++it) {
         const auto& thread = *it;
         if (thread->object != object) continue;
         if (thread->started && !thread->finished) return false;
+        cancel_thread_timers(object);
         if (thread->context) uc_context_free(thread->context);
         free(thread->stack);
         threads_.erase(it);
@@ -607,6 +633,109 @@ void Cpu::release_semaphore(uint32_t object) {
     ++semaphore->second;
 }
 
+bool Cpu::construct_timer(uint32_t object, uint32_t listener) {
+    if (!object || !memory_mapped(listener, 4) || timers_.count(object)) return false;
+    const uint32_t table = read_u32(listener);
+    if (!memory_mapped(table, 12) || !read_u32(table + 8)) return false;
+    GuestTimer timer;
+    timer.listener = listener;
+    timer.owner = running_thread_ && running_thread_->event_driven ? running_thread_->object : 0;
+    timer.generation = ++timer_generation_;
+    timers_.emplace(object, timer);
+    return true;
+}
+
+bool Cpu::start_timer(uint32_t object, uint32_t milliseconds) {
+    const auto found = timers_.find(object);
+    if (found == timers_.end() || milliseconds > 0x7fffffffu) return false;
+    auto& timer = found->second;
+    // Some apps construct their worker's Timer before starting that worker.
+    // Bind it when OnStart first arms it, and retain that owner across a
+    // foreground callback re-arming the same timer from the main thread.
+    if (!timer.owner && running_thread_ && running_thread_->event_driven)
+        timer.owner = running_thread_->object;
+    timer.interval = milliseconds;
+    timer.deadline = SDL_GetTicks() + std::max(milliseconds, 1u);
+    timer.generation = ++timer_generation_;
+    timer.active = true;
+    refresh_timer_deadline();
+    return true;
+}
+
+void Cpu::cancel_timer(uint32_t object) {
+    const auto found = timers_.find(object);
+    if (found == timers_.end()) return;
+    found->second.active = false;
+    found->second.generation = ++timer_generation_;
+    refresh_timer_deadline();
+}
+
+void Cpu::destroy_timer(uint32_t object) {
+    timers_.erase(object);
+    refresh_timer_deadline();
+}
+
+bool Cpu::has_timers() const { return !timers_.empty(); }
+
+void Cpu::refresh_timer_deadline() {
+    timer_active = false;
+    for (const auto& entry : timers_) {
+        const auto& timer = entry.second;
+        if (!timer.active) continue;
+        if (!timer_active || static_cast<int32_t>(timer.deadline - timer_deadline_ms) < 0) {
+            timer_deadline_ms = timer.deadline;
+            timer_interval_ms = timer.interval;
+        }
+        timer_active = true;
+    }
+}
+
+void Cpu::cancel_thread_timers(uint32_t object) {
+    for (auto& entry : timers_) if (entry.second.owner == object) {
+        entry.second.active = false;
+        entry.second.generation = ++timer_generation_;
+    }
+    refresh_timer_deadline();
+}
+
+bool Cpu::timer_callback(const TimerEvent& event, uint32_t& entry, uint32_t& listener) {
+    const auto found = timers_.find(event.object);
+    if (found == timers_.end() || found->second.generation != event.generation) return false;
+    listener = found->second.listener;
+    entry = read_u32(read_u32(listener) + 8); // ITimerEventListener::OnTimerExpired
+    return entry != 0;
+}
+
+bool Cpu::pump_timers(uint32_t& dispatched) {
+    dispatched = 0;
+    const uint32_t now = SDL_GetTicks();
+    std::vector<TimerEvent> due;
+    for (const auto& entry : timers_) if (entry.second.active &&
+            static_cast<int32_t>(now - entry.second.deadline) >= 0)
+        due.push_back({entry.first, entry.second.generation});
+    // Callbacks can cancel, restart, destroy or create timers. A generation
+    // check invalidates both this snapshot and events queued to a worker.
+    for (const auto& event : due) {
+        auto found = timers_.find(event.object);
+        if (found == timers_.end() || !found->second.active || found->second.generation != event.generation) continue;
+        const uint32_t owner = found->second.owner;
+        found->second.active = false; // one-shot, before entering the guest
+        refresh_timer_deadline();
+        if (owner) {
+            for (auto& thread : threads_) if (thread->object == owner && thread->started && !thread->finished && !thread->stopping) {
+                thread->pending_timers.push_back(event);
+                ++dispatched;
+                break;
+            }
+        } else {
+            uint32_t entry = 0, listener = 0, result = 0;
+            if (!timer_callback(event, entry, listener) || !run_guest(entry, {listener, event.object}, result)) return false;
+            ++dispatched;
+        }
+    }
+    return true;
+}
+
 bool Cpu::pump_threads() {
     bool active = false;
     for (const auto& thread : threads_) active |= thread->started && !thread->finished;
@@ -639,24 +768,59 @@ bool Cpu::pump_threads() {
             set_ret32(0xa0000000u + 3001); // E_TIMEOUT; no token was consumed
             if (uc_context_save(uc, thread->context) != UC_ERR_OK) { success = false; break; }
         }
+        std::vector<uint32_t> args = {thread->runnable};
+        if (thread->event_driven && !thread->callback_active) {
+            const uint32_t table = read_u32(thread->object);
+            if (!thread->initialized) {
+                thread->call = ThreadCall::start;
+                thread->entry = read_u32(table + 12);
+            } else if (thread->stopping) {
+                thread->call = ThreadCall::stop;
+                thread->entry = read_u32(table + 16);
+            } else {
+                thread->entry = 0;
+                while (!thread->pending_timers.empty()) {
+                    const auto event = thread->pending_timers.front();
+                    thread->pending_timers.pop_front();
+                    uint32_t listener = 0;
+                    if (!timer_callback(event, thread->entry, listener)) continue;
+                    thread->call = ThreadCall::timer;
+                    args = {listener, event.object};
+                    break;
+                }
+                if (!thread->entry) continue;
+            }
+            thread->callback_active = true;
+        }
         thread->timed = false;
         running_thread_ = thread;
+        const bool resume = thread->suspended;
         thread->suspended = false;
         uint32_t result = 0;
         bool ok;
-        if (thread->context) {
+        if (resume) {
             if (uc_context_restore(uc, thread->context) != UC_ERR_OK) { success = false; break; }
             uint32_t pc = reg(UC_ARM_REG_PC) | ((reg(UC_ARM_REG_CPSR) >> 5) & 1);
             ok = run_slice(pc, result, 120'000'000);
         } else {
-            if (uc_context_alloc(uc, &thread->context) != UC_ERR_OK || uc_context_restore(uc, host) != UC_ERR_OK) { success = false; break; }
+            if ((!thread->context && uc_context_alloc(uc, &thread->context) != UC_ERR_OK) ||
+                    uc_context_restore(uc, host) != UC_ERR_OK) { success = false; break; }
             set_reg(UC_ARM_REG_SP, thread->stack + thread->stack_size - 16);
-            ok = run_guest(thread->entry, {thread->runnable}, result);
+            ok = run_guest(thread->entry, args, result);
         }
         if (thread->suspended && ok) {
             if (uc_context_save(uc, thread->context) != UC_ERR_OK) { success = false; break; }
         }
-        else thread->finished = true;
+        else {
+            thread->callback_active = false;
+            if (!thread->event_driven || thread->call == ThreadCall::stop ||
+                    (thread->call == ThreadCall::start && !result)) thread->finished = true;
+            else if (thread->call == ThreadCall::start) thread->initialized = true;
+            if (thread->finished && thread->event_driven) {
+                thread->pending_timers.clear();
+                cancel_thread_timers(thread->object);
+            }
+        }
         if (!ok) { success = false; break; }
     }
     running_thread_ = nullptr;

@@ -109,7 +109,16 @@ void compressed_texture_test(Cpu& cpu, int api) {
     const uint32_t out = cpu.alloc(4);
     call(cpu, "glGenTextures" + suffix, {1, out});
     const uint32_t texture = cpu.read_u32(out);
+    call(cpu, "glIsTexture" + suffix, {texture});
+    require(cpu.reg(UC_ARM_REG_R0) == GL_FALSE, "generated texture name became an object before binding");
     call(cpu, "glBindTexture" + suffix, {GL_TEXTURE_2D, texture});
+    call(cpu, "glIsTexture" + suffix, {texture});
+    require(cpu.reg(UC_ARM_REG_R0) == GL_TRUE, "bound texture was rejected by glIsTexture");
+    for (uint32_t invalid : {0u, 0xffffffffu}) {
+        call(cpu, "glIsTexture" + suffix, {invalid});
+        require(cpu.reg(UC_ARM_REG_R0) == GL_FALSE && glGetError() == GL_NO_ERROR,
+                "invalid texture query returned true or generated an error");
+    }
     call(cpu, "glTexParameteri" + suffix, {GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST});
     call(cpu, "glGenFramebuffers" + fbo_suffix, {1, out});
     const uint32_t framebuffer = cpu.read_u32(out);
@@ -150,6 +159,8 @@ void compressed_texture_test(Cpu& cpu, int api) {
     call(cpu, "glBindTexture" + suffix, {GL_TEXTURE_2D, static_cast<uint32_t>(previous_texture)});
     cpu.write_u32(out, texture);
     call(cpu, "glDeleteTextures" + suffix, {1, out});
+    call(cpu, "glIsTexture" + suffix, {texture});
+    require(cpu.reg(UC_ARM_REG_R0) == GL_FALSE, "deleted texture still passed glIsTexture");
     require(glGetError() == GL_NO_ERROR, "compressed texture probe left a GL error");
 }
 

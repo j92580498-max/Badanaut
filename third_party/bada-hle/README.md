@@ -81,6 +81,11 @@ Runs the **unmodified ARM binaries** end to end:
   menus, enters Quick Game and accepts touch input to drop blocks. The
   MP3 soundtrack and WAV effects play through the shared SDL mixer. The
   [compatibility notes](TOWER_BLOXX.md) cover its startup, frame-time and music fixes.
+- **3D Rollercoaster Rush Jurassic** (hard-float, GL ES 2.0) reaches its title,
+  settings and Career map, enters a 3D track and accepts acceleration, braking
+  and restart input. Music and effects play when enabled in Settings. The
+  [compatibility notes](ROLLERCOASTER_RUSH.md) cover its event thread, timer
+  dispatch and verification on a restricted software-rendering host.
 
 This exercises the whole stack: ARM emulation, custom ELF load/reloc, the Osp
 framework HLE (App/Ui/Frame/Timer with synthesized guest vtables), GL/EGL

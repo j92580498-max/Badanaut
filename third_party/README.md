@@ -2,16 +2,20 @@
 
 The Bada engine in `bada-hle/` remains part of Badanaut so local HLE changes can
 be reviewed in this repository. Read its `README.md` and `UPSTREAM.md` before
-changing it. The other directories are unmodified upstream Git submodules.
+changing it. The PowerVR decoder in `pvr/` is vendored as two source files plus
+its license and upstream notice. The other libraries are unmodified upstream
+Git submodules.
 
 ```sh
-git clone --recurse-submodules https://github.com/j92580498-max/Badanaut.git
+git clone --recurse-submodules --shallow-submodules https://github.com/j92580498-max/Badanaut.git
 cd Badanaut
 ```
 
-For an existing clone, run `git submodule update --init --recursive` from the
-repository root. Git records exact commits rather than following upstream
-branches. Recursive checkout also initializes dependencies nested inside
+For an existing clone, run
+`git submodule update --init --recursive --depth 1` from the repository root.
+Git records exact commits rather than following upstream
+branches. The shallow options bound history downloads when resolving those
+pinned commits. Recursive checkout also initializes dependencies nested inside
 SDL2_image. CI uses `actions/checkout` with `submodules: recursive`.
 
 | Submodule | Upstream version / commit | Use |
@@ -21,7 +25,6 @@ SDL2_image. CI uses `actions/checkout` with `submodules: recursive`.
 | [Unicorn](https://github.com/unicorn-engine/unicorn) | 2.1.4 — `8028ec436f2d9376525352dd38ed9ed6b9f6be10` | ARM32 CPU execution on every host |
 | [cxxopts](https://github.com/jarro2783/cxxopts) | 3.1.1 — `eb787304d67ec22f7c3a184ee8b4c481d04357fd` | Command-line options |
 | [pugixml](https://github.com/zeux/pugixml) | 1.13 — `a0e064336317c9347a91224112af9933598714e9` | Bada package XML metadata |
-| [PowerVR Native SDK](https://github.com/powervr-graphics/Native_SDK) | `2b1bf2f14d3365d0bb801e2a6a131a319d3a2e48` | Only `framework/PVRCore/texture/PVRTDecompress.cpp` and its header are used |
 | [TLSF](https://github.com/mattconte/tlsf) | `deff9ab509341f264addbd3c8ada533678591905` | Shared guest heap allocator |
 | [dr_libs](https://github.com/mackron/dr_libs) | MP3 0.7.5 / WAV 0.14.7 — `4ffbded724cc3e3d2838eebca70858bf5984385a` | Memory MP3/WAV decoders for Osp Media Player |
 | [Nuklear](https://github.com/Immediate-Mode-UI/Nuklear) | 4.13.3 + upstream changes — `0dbc52f86404f9e1f26ce0df3015ed23ff54a726` | Desktop Bada control overlay and SDL/OpenGL 2 backend |
@@ -33,8 +36,13 @@ source with corrected exception-callback stack alignment and bounded page
 commits. `cmake/UnicornWindows.cmake` applies these fixes in the build directory;
 the pinned submodule stays unchanged. The `windows-unicorn-cache` CTest probe
 exercises small caches, growth beyond one commit batch and cache recycling.
-The PowerVR pin precedes its switch to private SSH dependencies. Its two
-decoder files match the previously vendored `63f0098` snapshot exactly.
+The PowerVR decoder is restored from Badanaut commit `7da03ef`. Its source and
+header are unmodified copies of upstream commit
+`63f0098acdc11ec9a072c30000d2fa670a955bee`; see `pvr/UPSTREAM.md` for provenance.
+These four files total about 30 KB. Keeping them in this repository avoids
+downloading the full PowerVR Native SDK during recursive clones.
+If an existing clone has the old PVR submodule initialized, run
+`git submodule deinit third_party/pvr` before switching from the old revision.
 SDL2_image uses its built-in PNG/JPEG codecs; optional external image formats
 are disabled. Android obtains SDL Java sources directly from the same SDL2
 submodule used by its native build. Native runtime libraries are copied beside

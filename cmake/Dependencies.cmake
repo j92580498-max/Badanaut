@@ -6,7 +6,7 @@ function(badanaut_require_submodule name source)
     if(NOT EXISTS "${BADANAUT_THIRD_PARTY}/${name}/${source}")
         message(FATAL_ERROR
             "Missing ${name} submodule. From the repository root, run "
-            "git submodule update --init --recursive, or clone with git clone --recurse-submodules.")
+            "git submodule update --init --recursive --depth 1, or clone with git clone --recurse-submodules --shallow-submodules.")
     endif()
 endfunction()
 
@@ -63,7 +63,6 @@ function(badanaut_add_support_libraries)
     badanaut_require_submodule(pugixml src/pugixml.cpp)
     badanaut_require_submodule(cxxopts include/cxxopts.hpp)
     badanaut_require_submodule(tlsf tlsf.c)
-    badanaut_require_submodule(pvr framework/PVRCore/texture/PVRTDecompress.cpp)
     set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
     add_library(bada-pugixml STATIC "${BADANAUT_THIRD_PARTY}/pugixml/src/pugixml.cpp")
@@ -73,8 +72,8 @@ function(badanaut_add_support_libraries)
     add_library(bada-tlsf STATIC "${BADANAUT_THIRD_PARTY}/tlsf/tlsf.c")
     target_include_directories(bada-tlsf PUBLIC "${BADANAUT_THIRD_PARTY}/tlsf")
 
-    # Use only the upstream texture decoder, without building the PowerVR SDK.
-    set(pvr_texture_dir "${BADANAUT_THIRD_PARTY}/pvr/framework/PVRCore/texture")
+    # The small upstream texture decoder is vendored without the PowerVR SDK.
+    set(pvr_texture_dir "${BADANAUT_THIRD_PARTY}/pvr")
     add_library(bada-pvr STATIC "${pvr_texture_dir}/PVRTDecompress.cpp")
     target_include_directories(bada-pvr PUBLIC "${pvr_texture_dir}")
     if(ANDROID)

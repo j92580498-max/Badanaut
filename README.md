@@ -58,11 +58,11 @@ Vsync depends on driver support. Changes apply at the next game launch.
 Clone the repository and its pinned native dependencies:
 
 ```sh
-git clone --recurse-submodules https://github.com/j92580498-max/Badanaut.git
+git clone --recurse-submodules --shallow-submodules https://github.com/j92580498-max/Badanaut.git
 cd Badanaut
 ```
 
-For an existing clone, run `git submodule update --init --recursive`.
+For an existing clone, run `git submodule update --init --recursive --depth 1`.
 
 **Desktop:** Python 3.12, CMake 3.22+, OpenGL and a C/C++17 compiler.
 Windows uses Visual Studio; SDL2, SDL2_image and the CPU engine build from
@@ -87,7 +87,7 @@ See [native dependency versions](third_party/README.md).
 - `frontends/pocket-android/` — Android host, package management and SDL activity.
 - `third_party/bada-hle/` — Bada HLE engine and upstream notice.
 - `cmake/Dependencies.cmake` — shared native dependency configuration.
-- `third_party/` — pinned upstream library submodules and dependency notices.
+- `third_party/` — pinned upstream library submodules, the vendored PowerVR decoder and dependency notices.
 - `.github/workflows/` — Windows, Linux and Android builds and validation.
 
 The new app picker is an original adaptation of HyperHLE-Reborn's visual approach;

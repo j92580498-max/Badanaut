@@ -14,11 +14,12 @@ separate windowed process. Game windows can be resized; F11 toggles fullscreen.
 ## Build and run
 
 Use Python 3.12, CMake 3.22+, a C/C++17 compiler and OpenGL. SDL2, SDL2_image
-and the other native libraries build from pinned submodules.
+and most other native libraries build from pinned submodules. The small PowerVR
+decoder is included as vendored source.
 On Ubuntu 22.04 or later:
 
 ```sh
-git submodule update --init --recursive
+git submodule update --init --recursive --depth 1
 sudo apt-get install cmake ninja-build libgl-dev libegl1 libopengl0 libasound2-dev libpulse-dev libudev-dev libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev libxss-dev libxinerama-dev libxxf86vm-dev libxcb-cursor0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-render-util0 libxcb-xinerama0 libxcb-shape0 libxcb-shm0 libxcb-sync1 libxcb-randr0 libxcb-render0 libxcb-xfixes0 libxcb-xkb1 libx11-xcb1 libxkbcommon-x11-0
 python3 -m venv .venv
 . .venv/bin/activate
@@ -31,7 +32,7 @@ python frontends/pocket-desktop/main.py
 On Windows with Visual Studio 2022:
 
 ```powershell
-git submodule update --init --recursive
+git submodule update --init --recursive --depth 1
 py -3.12 -m venv .venv
 .venv\Scripts\Activate.ps1
 python -m pip install -r frontends/pocket-desktop/requirements.txt

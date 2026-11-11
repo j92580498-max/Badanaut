@@ -98,12 +98,13 @@ multiple-inheritance thunk handling.
 
 ## Build
 
-C++17. SDL2, SDL2_image, Unicorn and the support libraries are pinned Git
-submodules in the parent Badanaut repository. A desktop OpenGL driver is
+C++17. SDL2, SDL2_image, Unicorn and most support libraries are pinned Git
+submodules in the parent Badanaut repository. The small PowerVR decoder is
+vendored in `third_party/pvr/`. A desktop OpenGL driver is
 required. From the Badanaut repository root:
 
 ```
-git submodule update --init --recursive
+git submodule update --init --recursive --depth 1
 cmake -S . -B build
 cmake --build build --config Release --parallel 2
 ```

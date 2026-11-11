@@ -819,6 +819,85 @@ void fixed_test(Cpu& cpu) {
     call(cpu, "glBindBuffer_1", {GL_ARRAY_BUFFER, 0});
 }
 
+void byte_arrays_test(Cpu& cpu) {
+    // GLES 1 permits signed bytes for positions and texture coordinates.
+    // Exploration packs its terrain meshes this way; desktop GL accepts
+    // different scalar types, so the HLE must retain their numeric values.
+    call(cpu, "glViewport_1", {0, 0, 64, 64});
+    call(cpu, "glMatrixMode_1", {GL_PROJECTION});
+    call(cpu, "glLoadIdentity_1");
+    call(cpu, "glMatrixMode_1", {GL_MODELVIEW});
+    call(cpu, "glLoadIdentity_1");
+    call(cpu, "glActiveTexture_1", {GL_TEXTURE0});
+    call(cpu, "glClientActiveTexture_1", {GL_TEXTURE0});
+    for (GLenum state : {GL_BLEND, GL_DEPTH_TEST, GL_ALPHA_TEST, GL_FOG, GL_LIGHTING})
+        call(cpu, "glDisable_1", {state});
+    call(cpu, "glEnable_1", {GL_TEXTURE_2D});
+    call(cpu, "glTexEnvi_1", {GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE});
+    call(cpu, "glDisableClientState_1", {GL_COLOR_ARRAY});
+    call(cpu, "glDisableClientState_1", {GL_NORMAL_ARRAY});
+    call(cpu, "glEnableClientState_1", {GL_VERTEX_ARRAY});
+    call(cpu, "glEnableClientState_1", {GL_TEXTURE_COORD_ARRAY});
+    const uint32_t names = cpu.alloc(12);
+    call(cpu, "glGenTextures_1", {1, names});
+    const uint32_t texture = cpu.read_u32(names);
+    call(cpu, "glBindTexture_1", {GL_TEXTURE_2D, texture});
+    for (GLenum parameter : {GL_TEXTURE_MIN_FILTER, GL_TEXTURE_MAG_FILTER})
+        call(cpu, "glTexParameteri_1", {GL_TEXTURE_2D, parameter, GL_NEAREST});
+    for (GLenum parameter : {GL_TEXTURE_WRAP_S, GL_TEXTURE_WRAP_T})
+        call(cpu, "glTexParameteri_1", {GL_TEXTURE_2D, parameter, GL_CLAMP_TO_EDGE});
+    const uint8_t texels[] = {255,0,0,255, 0,255,0,255, 0,0,255,255, 255,255,0,255};
+    call(cpu, "glTexImage2D_1", {GL_TEXTURE_2D, 0, GL_RGBA, 2, 2, 0,
+                               GL_RGBA, GL_UNSIGNED_BYTE, copy(cpu, texels, sizeof texels)});
+    const int8_t positions[] = {-1,-1, 1,-1, -1,1, 1,1};
+    const int8_t coordinates[] = {0,0, 1,0, 0,1, 1,1};
+    call(cpu, "glBindBuffer_1", {GL_ARRAY_BUFFER, 0});
+    call(cpu, "glBindBuffer_1", {GL_ELEMENT_ARRAY_BUFFER, 0});
+    call(cpu, "glVertexPointer_1", {2, GL_BYTE, 0, copy(cpu, positions, sizeof positions)});
+    call(cpu, "glTexCoordPointer_1", {2, GL_BYTE, 0, copy(cpu, coordinates, sizeof coordinates)});
+    call(cpu, "glDrawArrays_1", {GL_TRIANGLE_STRIP, 0, 4});
+    require(glGetError() == GL_NO_ERROR, "signed-byte client arrays generated a GL error");
+    pixel(16, 16, {255, 0, 0});
+    pixel(48, 16, {0, 255, 0});
+    pixel(16, 48, {0, 0, 255});
+    pixel(48, 48, {255, 255, 0});
+
+    // A negative coordinate clamps to the first texel; treating it as an
+    // unsigned byte instead samples the opposite corner.
+    const int8_t negative[] = {-1,-1, -1,-1, -1,-1, -1,-1};
+    call(cpu, "glTexCoordPointer_1", {2, GL_BYTE, 0, copy(cpu, negative, sizeof negative)});
+    call(cpu, "glDrawArrays_1", {GL_TRIANGLE_STRIP, 0, 4});
+    pixel(48, 48, {255, 0, 0});
+
+    // Interleaved VBOs have nonzero offsets and padding. Server-side indices
+    // exercise conversion when the draw does not supply a client vertex count.
+    const int8_t records[] = {99,-1,-1,99,0,0,99,99, 99,1,-1,99,1,0,99,99,
+                             99,-1,1,99,0,1,99,99, 99,1,1,99,1,1,99,99};
+    const uint16_t indices[] = {0,1,2, 2,1,3};
+    call(cpu, "glGenBuffers_1", {2, names + 4});
+    call(cpu, "glBindBuffer_1", {GL_ARRAY_BUFFER, cpu.read_u32(names + 4)});
+    call(cpu, "glBufferData_1", {GL_ARRAY_BUFFER, sizeof records, copy(cpu, records, sizeof records), GL_STATIC_DRAW});
+    call(cpu, "glVertexPointer_1", {2, GL_BYTE, 8, 1});
+    call(cpu, "glTexCoordPointer_1", {2, GL_BYTE, 8, 4});
+    call(cpu, "glBindBuffer_1", {GL_ELEMENT_ARRAY_BUFFER, cpu.read_u32(names + 8)});
+    call(cpu, "glBufferData_1", {GL_ELEMENT_ARRAY_BUFFER, sizeof indices, copy(cpu, indices, sizeof indices), GL_STATIC_DRAW});
+    call(cpu, "glDrawElements_1", {GL_TRIANGLES, 6, GL_UNSIGNED_SHORT, 0});
+    require(glGetError() == GL_NO_ERROR, "signed-byte VBO arrays generated a GL error");
+    pixel(16, 16, {255, 0, 0});
+    pixel(48, 16, {0, 255, 0});
+    pixel(16, 48, {0, 0, 255});
+    pixel(48, 48, {255, 255, 0});
+    call(cpu, "glGetIntegerv_1", {GL_TEXTURE_COORD_ARRAY_TYPE, names});
+    require(cpu.read_u32(names) == GL_BYTE, "byte conversion changed the guest array descriptor");
+    call(cpu, "glBindBuffer_1", {GL_ARRAY_BUFFER, 0});
+    call(cpu, "glBindBuffer_1", {GL_ELEMENT_ARRAY_BUFFER, 0});
+    const GLuint buffers[] = {cpu.read_u32(names + 4), cpu.read_u32(names + 8)};
+    reinterpret_cast<void (*)(GLsizei, const GLuint*)>(SDL_GL_GetProcAddress("glDeleteBuffers"))(2, buffers);
+    cpu.write_u32(names, texture);
+    call(cpu, "glDeleteTextures_1", {1, names});
+    call(cpu, "glDisableClientState_1", {GL_TEXTURE_COORD_ARRAY});
+}
+
 void orientation_test(Cpu& cpu) {
     const uint32_t form = cpu.alloc(32), listener = cpu.make_stub_object(16);
     cpu.write_u32(listener, cpu.make_vtable(3, {{2, [](Cpu& c) { c.write_u32(c.arg32(1) + 20, c.arg32(2)); }}}));
@@ -887,7 +966,10 @@ int main(int argc, char** argv) {
         cpu.set_reg(UC_ARM_REG_SP, cpu.reg(UC_ARM_REG_SP) - 256);
         cpu.hard_float = std::string(argv[2]) == "hard";
         egl_test(cpu);
-        if (api == 1) fixed_test(cpu);
+        if (api == 1) {
+            fixed_test(cpu);
+            byte_arrays_test(cpu);
+        }
         // This probe replaces shaders/arrays. Build the shared texture fixture
         // afterwards so the later resize checks retain their original state.
         if (api == 2) renderbuffer_uniform_test(cpu);

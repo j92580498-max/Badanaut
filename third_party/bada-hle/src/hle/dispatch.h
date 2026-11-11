@@ -2,6 +2,7 @@
 #include <functional>
 #include <cstdint>
 #include <string>
+#include <ctime>
 
 class Cpu;
 
@@ -45,6 +46,7 @@ void register_audio();
 void osp_string_set(Cpu& c, uint32_t obj, const std::string& utf8);
 std::string osp_string_get(Cpu& c, uint32_t obj);
 void set_locale(const std::string& spec); // override reported system locale (--locale / BADA_LOCALE)
+void osp_datetime_set(Cpu& cpu, uint32_t object, const std::tm& time, uint32_t milliseconds = 0);
 
 // Deliver Player callbacks on the emulation thread, after host audio playback
 // or the short placeholder for unsupported intro videos completes.

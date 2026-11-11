@@ -86,6 +86,9 @@ Runs the **unmodified ARM binaries** end to end:
   and restart input. Music and effects play when enabled in Settings. The
   [compatibility notes](ROLLERCOASTER_RUSH.md) cover its event thread, timer
   dispatch and verification on a restricted software-rendering host.
+- **Exploration 1.3.1** (soft-float, GL ES 1.x) boots, renders terrain and its
+  menus, and reopens a saved world. The [compatibility notes](EXPLORATION.md)
+  describe its framework, file, mesh and Windows JIT fixes and validation limits.
 
 This exercises the whole stack: ARM emulation, custom ELF load/reloc, the Osp
 framework HLE (App/Ui/Frame/Timer with synthesized guest vtables), GL/EGL

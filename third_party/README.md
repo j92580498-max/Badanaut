@@ -28,6 +28,11 @@ SDL2_image. CI uses `actions/checkout` with `submodules: recursive`.
 
 `cmake/Dependencies.cmake` configures these sources for desktop, Android and
 native regression probes. No native dependency is downloaded by CMake.
+The Windows x64 build compiles a generated copy of Unicorn's JIT allocation
+source with corrected exception-callback stack alignment and bounded page
+commits. `cmake/UnicornWindows.cmake` applies these fixes in the build directory;
+the pinned submodule stays unchanged. The `windows-unicorn-cache` CTest probe
+exercises small caches, growth beyond one commit batch and cache recycling.
 The PowerVR pin precedes its switch to private SSH dependencies. Its two
 decoder files match the previously vendored `63f0098` snapshot exactly.
 SDL2_image uses its built-in PNG/JPEG codecs; optional external image formats

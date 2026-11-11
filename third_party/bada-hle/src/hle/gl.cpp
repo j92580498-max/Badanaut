@@ -148,6 +148,7 @@ void ensure_vao() {
 // ============================ GL handlers ============================
 void gl_clearcolor(Cpu& c) { glClearColor(c.argf32(0), c.argf32(1), c.argf32(2), c.argf32(3)); }
 void gl_clear(Cpu& c) { glClear(c.arg32(0)); }
+void gl_clearstencil(Cpu& c) { glClearStencil(c.arg32(0)); }
 void gl_viewport(Cpu& c) {
     GLint x = c.arg32(0), y = c.arg32(1);
     GLsizei w = c.arg32(2), h = c.arg32(3);
@@ -744,6 +745,12 @@ void g1_istexture(Cpu& c) { c.set_ret32(glIsTexture(c.arg32(0))); }
 void g1_texparameteri(Cpu& c) { glTexParameteri(c.arg32(0), c.arg32(1), c.arg32(2)); }
 void g1_texenvi(Cpu& c) { glTexEnvi(c.arg32(0), c.arg32(1), c.arg32(2)); }
 void g1_texenvf(Cpu& c) { glTexEnvf(c.arg32(0), c.arg32(1), c.argf32(c.hard_float ? 0 : 2)); }
+void g1_texenvfv(Cpu& c) {
+    GLfloat values[4]{};
+    const uint32_t count = c.arg32(1) == GL_TEXTURE_ENV_COLOR ? 4 : 1;
+    c.read_mem(c.arg32(2), values, count * sizeof(GLfloat));
+    glTexEnvfv(c.arg32(0), c.arg32(1), values);
+}
 void g1_texparameterx(Cpu& c) { glTexParameteri(c.arg32(0), c.arg32(1), c.arg32(2)); }
 void g1_texenvx(Cpu& c) { glTexEnvi(c.arg32(0), c.arg32(1), c.arg32(2)); }
 void g1_gentextures(Cpu& c) {
@@ -1058,10 +1065,16 @@ void ff_bind_all(Cpu& c, uint32_t vcount) {
         const auto& a = *binding.array;
         if (!a.enabled || uploaded[slot] || (!a.vbo && !a.ptr)) continue;
 #ifndef BADA_GLES_BACKEND
-        // Desktop fixed-function arrays reject GL_FIXED. Convert the 16.16
-        // elements while retaining the guest descriptor for state queries.
-        if (a.type == 0x140C) {
+        // Desktop fixed-function arrays reject GL_FIXED, and position/UV
+        // arrays reject GL_BYTE. GLES accepts these as numeric values;
+        // convert them while retaining the guest descriptor for queries.
+        const auto needs_float = [](const Binding& view) {
+            return view.array->type == 0x140C || (view.array->type == GL_BYTE &&
+                (view.state == GL_VERTEX_ARRAY || view.state == GL_TEXTURE_COORD_ARRAY));
+        };
+        if (needs_float(binding)) {
             const uint32_t stride = stride_of(a);
+            const uint32_t scalar_size = type_size(a.type);
             uint32_t count = vcount;
             std::vector<uint8_t> source;
             if (a.vbo) {
@@ -1071,18 +1084,19 @@ void ff_bind_all(Cpu& c, uint32_t vcount) {
                 if (bytes > 0 && a.ptr < static_cast<uint32_t>(bytes)) {
                     source.resize(bytes - a.ptr);
                     host<void (*)(GLenum, GLintptr, GLsizeiptr, void*)>("glGetBufferSubData")(GL_ARRAY_BUFFER, a.ptr, source.size(), source.data());
-                    if (!count && source.size() >= static_cast<size_t>(a.size) * 4)
-                        count = 1 + (source.size() - a.size * 4) / stride;
+                    if (!count && source.size() >= static_cast<size_t>(a.size) * scalar_size)
+                        count = 1 + (source.size() - a.size * scalar_size) / stride;
                 }
             }
             std::vector<GLfloat> values(static_cast<size_t>(count) * a.size);
             for (uint32_t vertex = 0; vertex < count; ++vertex) for (int component = 0; component < a.size; ++component) {
                 uint32_t value = 0;
-                const size_t offset = static_cast<size_t>(vertex) * stride + component * 4;
+                const size_t offset = static_cast<size_t>(vertex) * stride + component * scalar_size;
                 if (a.vbo) {
-                    if (offset + 4 <= source.size()) memcpy(&value, source.data() + offset, 4);
-                } else value = c.read_u32(a.ptr + offset);
-                values[vertex * a.size + component] = fixed(value);
+                    if (offset + scalar_size <= source.size()) memcpy(&value, source.data() + offset, scalar_size);
+                } else c.read_mem(a.ptr + static_cast<uint32_t>(offset), &value, scalar_size);
+                values[vertex * a.size + component] = a.type == GL_BYTE ?
+                    static_cast<GLfloat>(static_cast<int8_t>(value)) : fixed(value);
             }
             auto& stream = g_ff_streams[slot];
             if (!stream.buffer) host<genfn>("glGenBuffers")(1, &stream.buffer);
@@ -1118,7 +1132,7 @@ void ff_bind_all(Cpu& c, uint32_t vcount) {
             const auto& other = *bindings[next].array;
             if (!other.enabled || other.vbo || !other.ptr || uploaded[next] || stride_of(other) != stride) continue;
 #ifndef BADA_GLES_BACKEND
-            if (other.type == 0x140C) continue;
+            if (needs_float(bindings[next])) continue;
 #endif
             const uint32_t first = std::min(base, other.ptr), final = std::max(last, other.ptr);
             if (final - first >= stride) continue;
@@ -1529,6 +1543,7 @@ void register_gl() {
     register_handler("glFramebufferRenderbuffer_2", gl_framebufferrenderbuffer);
     register_handler("glGetRenderbufferParameteriv_2", gl_getrenderbufferparameter);
     register_handler("glReadPixels_2", gl_readpixels);
+    register_handler("glClearStencil_2", gl_clearstencil);
 
     // ---- GL ES 1.x fixed-function (FruitNinja) ----
     register_handler("glClear_1", g1_clear);
@@ -1594,6 +1609,7 @@ void register_gl() {
     register_handler("glTexEnvx_1", g1_texenvx);
     register_handler("glTexEnvi_1", g1_texenvi);
     register_handler("glTexEnvf_1", g1_texenvf);
+    register_handler("glTexEnvfv_1", g1_texenvfv);
     register_handler("glGenTextures_1", g1_gentextures);
     register_handler("glIsTexture_1", g1_istexture);
     register_handler("glDeleteTextures_1", g1_deletetextures);
@@ -1620,6 +1636,8 @@ void register_gl() {
     register_handler("glDrawElements_1", g1_drawelements);
     register_handler("glGetIntegerv_1", g1_getintegerv);
     register_handler("glGetString_1", g1_getstring);
+    register_handler("glReadPixels_1", gl_readpixels);
+    register_handler("glClearStencil_1", gl_clearstencil);
 
     // EGL via Samsung sgl* wrapper
     register_handler("sglBindAPI", egl_true);

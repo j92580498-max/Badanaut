@@ -30,6 +30,8 @@ constexpr uint32_t STR_VPTR = 0, STR_CAP = 4, STR_LEN = 8, STR_PVAL = 12;
 int g_canvas_width = 480, g_canvas_height = 640;
 uint32_t g_orientation = 1;
 bool g_frame_oriented = false;
+std::map<uint32_t, uint32_t> g_form_orientations;
+std::map<uint32_t, uint32_t> g_control_parents;
 std::map<uint32_t, uint32_t> g_orientation_listeners;
 struct OrientationEvent { uint32_t source, listener, orientation; };
 std::deque<OrientationEvent> g_orientation_events;
@@ -245,31 +247,51 @@ void systemtime_getticks(Cpu& c) {
 
 // --- Osp::Base::DateTime / TimeSpan ---
 // TimeSpan has a virtual dtor, so: vptr@0, pad, __ticks@8 (ms). DateTime holds a
-// TmDateTime; the games only build one and read GetTime() off it, so back it
-// with the host clock and keep the guest side opaque.
+// TmDateTime stores year/month/day/hour/minute and packed seconds/milliseconds.
 constexpr uint32_t TS_TICKS = 8;
 void datetime_ctor(Cpu& c) {
     uint32_t o = c.arg32(0);
     if (o) {
         c.write_u32(o, c.noop_vtable());
+        const uint32_t fields[] = {1, 1, 1, 0, 0, 0, 0};
+        c.write_mem(o + 4, fields, sizeof fields);
     }
     c.set_ret32(o);
 }
 // DateTime::GetTime() const -> TimeSpan by value: r0 = &ret, r1 = this.
 void datetime_gettime(Cpu& c) {
     uint32_t ret = c.arg32(0);
-    time_t now = time(nullptr);
-    struct tm t {};
-#ifdef _WIN32
-    localtime_s(&t, &now);
-#else
-    localtime_r(&now, &t);
-#endif
-    int64_t ms = ((int64_t)t.tm_hour * 3600 + t.tm_min * 60 + t.tm_sec) * 1000;
+    const uint32_t object = c.arg32(1), seconds = c.read_u32(object + 24);
+    const int64_t ms = ((int64_t)c.read_u32(object + 16) * 3600 +
+        c.read_u32(object + 20) * 60 + (seconds >> 16)) * 1000 + (seconds & 0xffffu);
     c.write_u32(ret, c.noop_vtable());
     c.write_u32(ret + TS_TICKS, (uint32_t)ms);
     c.write_u32(ret + TS_TICKS + 4, (uint32_t)(ms >> 32));
     c.set_ret32(ret);
+}
+void systemtime_getcurrent(Cpu& c) {
+    const uint32_t mode = c.arg32(0), object = c.arg32(1);
+    if (mode > 2 || !object) { c.set_ret32(0xa0000000u + 1909); return; }
+    const auto now = std::chrono::system_clock::now();
+    time_t seconds = std::chrono::system_clock::to_time_t(now);
+    std::tm time{};
+#ifdef _WIN32
+    const bool ok = mode == 0 ? gmtime_s(&time, &seconds) == 0 : localtime_s(&time, &seconds) == 0;
+#else
+    const bool ok = (mode == 0 ? gmtime_r(&seconds, &time) : localtime_r(&seconds, &time)) != nullptr;
+#endif
+    if (!ok) { c.set_ret32(0xa0000000u + 1); return; }
+    if (mode == 1 && time.tm_isdst > 0) {
+        seconds -= 3600;
+#ifdef _WIN32
+        localtime_s(&time, &seconds);
+#else
+        localtime_r(&seconds, &time);
+#endif
+    }
+    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
+    hle::osp_datetime_set(c, object, time, static_cast<uint32_t>(ms % 1000));
+    c.set_ret32(0);
 }
 void timespan_getms(Cpu& c) {
     uint32_t o = c.arg32(0);
@@ -278,10 +300,21 @@ void timespan_getms(Cpu& c) {
 }
 
 // Application::GetAppFrame() -> IAppFrame whose GetFrame() (vtable slot 9) returns
-// a Frame (Container). Frame::AddControl (slot 24) and AppFrame's other slots fall
-// through to the no-op vtable, returning 0 == E_SUCCESS.
+// a Frame. Adding a control invokes its initialization callback before attachment.
 uint32_t g_appframe = 0, g_frame = 0;
 void frame_getframe(Cpu& c) { c.set_ret32(g_frame); }
+void control_add(Cpu& c) {
+    const uint32_t parent = c.arg32(0), child = c.arg32(1);
+    if (!child || !c.memory_mapped(child, 4)) { c.set_ret32(0xa0000000u + 1909); return; }
+    if (g_control_parents.count(child)) { c.set_ret32(0); return; }
+    const uint32_t table = c.read_u32(child);
+    if (!c.memory_mapped(table, 20)) { c.set_ret32(0xa0000000u + 1909); return; }
+    const uint32_t callback = c.read_u32(table + 16); // Control::OnInitializing
+    if (!callback) { g_control_parents[child] = parent; c.set_ret32(0); return; }
+    c.call_guest_from_handler(callback, child, [parent, child](Cpu&, uint32_t result) {
+        if (!result) g_control_parents[child] = parent;
+    });
+}
 // Application::GetInstance() -- the app object the factory built. Returning 0
 // here hands the caller a null `this`.
 void app_getinstance(Cpu& c) { c.set_ret32(c.app_instance); }
@@ -351,6 +384,7 @@ void control_senduserevent(Cpu& c) {
 void app_getappframe(Cpu& c) {
     if (!g_appframe) {
         g_frame = c.make_stub_object(256, 64);                  // the Frame/Container
+        c.write_u32(g_frame, c.make_vtable(64, {{24, control_add}}));
         uint32_t vt = c.make_vtable(64, {{5, appframe_addtouchlistener}, {9, frame_getframe}});
         g_appframe = c.alloc(64, 8);
         for (int i = 0; i < 64; i += 4) {
@@ -408,6 +442,11 @@ void locale_get_system(Cpu& c) {
 // enum value in r0 (this scalar return, not the sret String form).
 void locale_lang(Cpu& c) { c.set_ret32((uint32_t)g_locale_lang_enum); }
 void locale_country(Cpu& c) { c.set_ret32((uint32_t)g_locale_country_enum); }
+void locale_lang_string(Cpu& c) {
+    const uint32_t output = c.arg32(0);
+    string_construct(c, output, std::vector<uint16_t>(g_locale_lang.begin(), g_locale_lang.end()));
+    c.set_ret32(output);
+}
 
 // --- Timer: register its listener and arm a one-shot event ---
 void timer_dtor(Cpu& c) {
@@ -462,6 +501,22 @@ void control_getbounds(Cpu& c) {
     c.write_u32(c.arg32(4), g_frame_oriented ? g_canvas_height : 800); // width, height
     c.set_ret32(0);
 }
+void control_getbounds_value(Cpu& c) {
+    const uint32_t output = c.arg32(0);
+    int width = g_frame_oriented ? g_canvas_width : 480;
+    int height = g_frame_oriented ? g_canvas_height : 800;
+    const auto orientation = g_form_orientations.find(c.arg32(1));
+    if (orientation != g_form_orientations.end()) {
+        width = orientation->second == 2 || orientation->second == 4 ? 800 : 480;
+        height = orientation->second == 2 || orientation->second == 4 ? 480 : 800;
+    }
+    c.write_u32(output, c.noop_vtable());
+    c.write_u32(output + 4, 0);
+    c.write_u32(output + 8, 0);
+    c.write_u32(output + 12, width);
+    c.write_u32(output + 16, height);
+    c.set_ret32(output);
+}
 void frame_setorientation(Cpu& c) {
     const uint32_t orientation = c.arg32(1);
     if (orientation < 1 || orientation > 4) { c.set_ret32(0xa0000000u + 1909); return; }
@@ -482,9 +537,22 @@ void frame_setorientation(Cpu& c) {
 } // namespace
 
 namespace hle {
+void osp_datetime_set(Cpu& c, uint32_t object, const std::tm& time, uint32_t milliseconds) {
+    // DateTime's TmDateTime stores six ints after Object's vptr. Seconds and
+    // milliseconds share the high and low halves of the last field.
+    const uint32_t fields[] = {static_cast<uint32_t>(time.tm_year + 1900),
+        static_cast<uint32_t>(time.tm_mon + 1), static_cast<uint32_t>(time.tm_mday),
+        static_cast<uint32_t>(time.tm_hour), static_cast<uint32_t>(time.tm_min),
+        (static_cast<uint32_t>(time.tm_sec) << 16) | (milliseconds % 1000), 0};
+    c.write_u32(object, c.noop_vtable());
+    c.write_mem(object + 4, fields, sizeof fields);
+}
 void register_osp() {
     g_orientation = 1;
     g_frame_oriented = false;
+    g_form_orientations.clear();
+    g_control_parents.clear();
+    g_appframe = g_frame = 0;
     g_canvas_width = 480;
     g_canvas_height = 640;
     g_canvas_buffer = 0;
@@ -538,15 +606,28 @@ void register_osp() {
     register_handler("_ZN3Osp4Base8DateTimeC1Ev", datetime_ctor);
     register_handler("_ZN3Osp4Base8DateTimeC2Ev", datetime_ctor);
     register_handler("_ZNK3Osp4Base8DateTime7GetTimeEv", datetime_gettime);
+    register_handler("_ZNK3Osp4Base8DateTime7GetYearEv", [](Cpu& c) { c.set_ret32(c.read_u32(c.arg32(0) + 4)); });
+    register_handler("_ZNK3Osp4Base8DateTime8GetMonthEv", [](Cpu& c) { c.set_ret32(c.read_u32(c.arg32(0) + 8)); });
+    register_handler("_ZNK3Osp4Base8DateTime6GetDayEv", [](Cpu& c) { c.set_ret32(c.read_u32(c.arg32(0) + 12)); });
+    register_handler("_ZNK3Osp4Base8DateTime7GetHourEv", [](Cpu& c) { c.set_ret32(c.read_u32(c.arg32(0) + 16)); });
+    register_handler("_ZNK3Osp4Base8DateTime9GetMinuteEv", [](Cpu& c) { c.set_ret32(c.read_u32(c.arg32(0) + 20)); });
+    register_handler("_ZNK3Osp4Base8DateTime9GetSecondEv", [](Cpu& c) { c.set_ret32(c.read_u32(c.arg32(0) + 24) >> 16); });
+    register_handler("_ZN3Osp6System10SystemTime14GetCurrentTimeENS0_8TimeModeERNS_4Base8DateTimeE", systemtime_getcurrent);
     register_handler("_ZNK3Osp4Base8TimeSpan15GetMillisecondsEv", timespan_getms);
     register_handler("_ZN3Osp4Base8TimeSpanD1Ev", str_dtor);
     register_handler("_ZN3Osp4Base8TimeSpanD2Ev", str_dtor);
-    register_handler("_ZN3Osp2Ui8Controls4FormC1Ev", stub_ctor); // Form()
-    register_handler("_ZN3Osp2Ui8Controls4FormC2Ev", stub_ctor);
+    const auto form_ctor = +[](Cpu& c) {
+        g_form_orientations.erase(c.arg32(0));
+        g_control_parents.erase(c.arg32(0));
+        stub_ctor(c);
+    };
+    register_handler("_ZN3Osp2Ui8Controls4FormC1Ev", form_ctor);
+    register_handler("_ZN3Osp2Ui8Controls4FormC2Ev", form_ctor);
     register_handler("_ZN3Osp2Ui8Controls4Form9ConstructEm", ret_ok); // Form::Construct(ulong)
 
     // Container::AddControl(Control const&) -- also called directly (import).
     register_handler("_ZN3Osp2Ui9Container10AddControlERKNS_7ControlE", ret_ok);
+    register_handler("_ZN3Osp2Ui9Container10AddControlERKNS0_7ControlE", control_add);
 
     // Timer (Base::Runtime)
     register_handler("_ZN3Osp4Base7Runtime5TimerC1Ev", timer_ctor); // Timer()
@@ -559,11 +640,19 @@ void register_osp() {
 
     // Control::GetBounds(int&,int&,int&,int&) const -- viewport size for Draw()
     register_handler("_ZNK3Osp2Ui7Control9GetBoundsERiS2_S2_S2_", control_getbounds);
-    // Form::SetOrientation(Orientation) -- FruitNinja requests LANDSCAPE; the
-    // engine does its own rotation, so this only affects input mapping: no-op.
-    register_handler("_ZN3Osp2Ui8Controls4Form14SetOrientationENS0_11OrientationE", ret_ok);
+    register_handler("_ZNK3Osp2Ui7Control9GetBoundsEv", control_getbounds_value);
+    // Record the form's requested orientation for its layout queries.
+    register_handler("_ZN3Osp2Ui8Controls4Form14SetOrientationENS0_11OrientationE", [](Cpu& c) {
+        const uint32_t orientation = c.arg32(1);
+        if (orientation < 1 || orientation > 4) { c.set_ret32(0xa0000000u + 1909); return; }
+        g_form_orientations[c.arg32(0)] = orientation;
+        c.set_ret32(0);
+    });
     register_handler("_ZN3Osp2Ui8Controls5Frame14SetOrientationENS0_11OrientationE", frame_setorientation);
-    register_handler("_ZN3Osp2Ui8Controls4Form20GetOrientationStatusEv", [](Cpu& c) { c.set_ret32(g_orientation); });
+    register_handler("_ZN3Osp2Ui8Controls4Form20GetOrientationStatusEv", [](Cpu& c) {
+        const auto found = g_form_orientations.find(c.arg32(0));
+        c.set_ret32(found == g_form_orientations.end() ? g_orientation : found->second);
+    });
     register_handler("_ZN3Osp2Ui8Controls4Form27AddOrientationEventListenerERKNS0_25IOrientationEventListenerE", [](Cpu& c) {
         g_orientation_listeners[c.arg32(0)] = c.arg32(1);
         c.set_ret32(0);
@@ -639,6 +728,7 @@ void register_osp() {
     register_handler("_ZN3Osp7Locales13LocaleManagerD1Ev", ret_ok);
     register_handler("_ZN3Osp7Locales13LocaleManager15GetSystemLocaleEv", locale_get_system);
     register_handler("_ZNK3Osp7Locales6Locale15GetLanguageCodeEv", locale_lang);
+    register_handler("_ZNK3Osp7Locales6Locale21GetLanguageCodeStringEv", locale_lang_string);
     register_handler("_ZNK3Osp7Locales6Locale14GetCountryCodeEv", locale_country);
     register_handler("_ZN3Osp7Locales6LocaleD1Ev", ret_ok);
 

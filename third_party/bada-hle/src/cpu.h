@@ -32,6 +32,10 @@ class Cpu {
     void run_init_array(); // run DT_INIT_ARRAY constructors
     bool run_guest(uint32_t addr, const std::vector<uint32_t>& args, uint32_t& ret,
                    uint64_t timeout_us = 120'000'000);
+    // Enter a guest callback from an HLE handler in the existing emulation
+    // slice, then restore the caller and return the callback's result.
+    void call_guest_from_handler(uint32_t address, uint32_t object,
+                                 std::function<void(Cpu&, uint32_t)> finish = {});
     // Cooperative Bada workers share memory, but retain separate ARM/VFP
     // contexts and stacks. Pump only from the host, outside uc_emu_start.
     bool construct_thread(uint32_t object, uint32_t runnable, uint32_t stack_size);
@@ -150,6 +154,16 @@ class Cpu {
     uint32_t main_thread_ = 0;
     std::unordered_map<uint32_t, int> semaphores_;
     bool run_slice(uint32_t address, uint32_t& result, uint64_t timeout_us);
+    struct GuestCall {
+        uc_context* context = nullptr;
+        uint32_t owner = 0, resume = 0;
+        std::function<void(Cpu&, uint32_t)> finish;
+        ~GuestCall() { if (context) uc_context_free(context); }
+    };
+    std::vector<std::unique_ptr<GuestCall>> guest_calls_;
+    uint32_t guest_call_return_ = 0;
+    void jump_guest(uint32_t address);
+    static void finish_guest_call(Cpu& cpu);
     struct Watchdog;
     std::unique_ptr<Watchdog> watchdog_;
     void* heap_storage_ = nullptr;

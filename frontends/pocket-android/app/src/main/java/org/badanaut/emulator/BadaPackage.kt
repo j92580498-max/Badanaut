@@ -104,18 +104,58 @@ object BadaPackage {
     }
 
     fun iconFile(root: File, hint: String = "", executable: String = ""): File? {
+        val rootPath = root.canonicalFile.toPath()
         val candidates = mutableListOf(File(root, "_badanaut-icon.png"))
         if (hint.isNotBlank()) for (base in listOf(root, File(root, "Res"), File(root, "Info"))) {
-            val file = File(base, hint.replace('\\', '/'))
-            if (file.canonicalPath.startsWith(root.canonicalPath + File.separator)) candidates.add(file)
+            resolveIconPath(root, base, hint)?.let { candidates.add(it) }
         }
-        val stems = listOf("icon", "appicon", "mainmenuicon", File(executable.replace('\\', '/')).nameWithoutExtension.lowercase(Locale.ROOT))
-        for (directory in listOf(File(root, "Res"), File(root, "Info"), root)) candidates.addAll(
-            directory.listFiles().orEmpty().filter { it.nameWithoutExtension.lowercase(Locale.ROOT) in stems }
-                .sortedBy { it.name },
-        )
-        return candidates.firstOrNull { it.isFile && it.length() <= 2L * 1024 * 1024 && it.extension.lowercase(Locale.ROOT) in listOf("png", "jpg", "jpeg", "webp") }
+        val stems = listOf("icon", "appicon", "mainmenuicon", "mainmenu", File(executable.replace('\\', '/')).nameWithoutExtension.lowercase(Locale.ROOT))
+        val resources = listOf(File(root, "Res"), File(root, "Info"))
+        for (directory in resources + root) {
+            if (!directory.canonicalFile.toPath().startsWith(rootPath)) continue
+            candidates.addAll(directory.listFiles().orEmpty()
+                .filter { it.nameWithoutExtension.lowercase(Locale.ROOT) in stems }.sortedBy { it.name })
+        }
+        for (directory in resources) {
+            candidates.addAll(directory.walkTopDown().maxDepth(5)
+                .onEnter { it.canonicalFile.toPath().startsWith(rootPath) }
+                .filter { it.isFile && it.parentFile != directory && it.nameWithoutExtension.lowercase(Locale.ROOT) in stems }
+                .sortedBy { it.relativeTo(root).invariantSeparatorsPath }.toList())
+        }
+        return candidates.firstOrNull { it.canonicalFile.toPath().startsWith(rootPath) && isIconImage(it) }
     }
+
+    private fun resolveIconPath(root: File, base: File, hint: String): File? {
+        val path = hint.replace('\\', '/')
+        val parts = path.split('/')
+        if (path.startsWith('/') || parts.any { it.isBlank() || it == ".." || ':' in it }) return null
+        val rootPath = root.canonicalFile.toPath()
+        var file = base
+        for (part in parts) {
+            if (!file.isDirectory || !file.canonicalFile.toPath().startsWith(rootPath)) return null
+            file = File(file, part).takeIf { it.exists() } ?: file.listFiles().orEmpty()
+                .firstOrNull { it.name.equals(part, ignoreCase = true) } ?: return null
+        }
+        return file.takeIf { it.canonicalFile.toPath().startsWith(rootPath) }
+    }
+
+    private fun isIconImage(file: File): Boolean = runCatching {
+        if (!file.isFile || file.length() > 2L * 1024 * 1024 ||
+            file.extension.lowercase(Locale.ROOT) !in listOf("png", "jpg", "jpeg", "webp")) return@runCatching false
+        val header = ByteArray(12)
+        val count = file.inputStream().use { input ->
+            var count = 0
+            while (count < header.size) {
+                val read = input.read(header, count, header.size - count)
+                if (read < 0) break
+                count += read
+            }
+            count
+        }
+        (count >= 8 && header.copyOfRange(0, 8).contentEquals(byteArrayOf(137.toByte(), 80, 78, 71, 13, 10, 26, 10))) ||
+            (count >= 3 && header[0] == 255.toByte() && header[1] == 216.toByte() && header[2] == 255.toByte()) ||
+            (count >= 12 && String(header, 0, 4, Charsets.US_ASCII) == "RIFF" && String(header, 8, 4, Charsets.US_ASCII) == "WEBP")
+    }.getOrDefault(false)
 
     /** Reject Windows PE, Android ARM64 and host libraries before launching SDL. */
     fun isArmElf(file: File): Boolean {

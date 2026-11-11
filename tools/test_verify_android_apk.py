@@ -51,9 +51,9 @@ class ApkVerificationTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "browser interface"):
             self.verify(entries)
 
-    def test_rejects_the_truncated_copyright_string(self):
+    def test_rejects_a_truncated_launcher_string(self):
         entries = self.entries()
-        entries["assets/launcher.json"] = b'{"copyrightText": "Bada HLE engine\n    "trigger": [280, 0, 40, 28]}}'
+        entries["assets/launcher.json"] = b'{"settingsHelp": "Changes apply\n    "trigger": [280, 0, 40, 28]}}'
         with self.assertRaisesRegex(ValueError, "launcher.json is invalid"):
             self.verify(entries)
 

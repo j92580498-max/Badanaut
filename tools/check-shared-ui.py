@@ -36,10 +36,11 @@ def main():
             image.save(str(base / "icon.png"))
             header = bytearray(52)
             header[:7] = b"\x7fELF\x01\x01\x01"; header[16:20] = b"\x03\x00\x28\x00"
+            icon_hint = "ICONS\\MAINMENU.PNG" if i % 2 == 0 else ""
             with zipfile.ZipFile(base / "demo.zip", "w") as archive:
                 archive.writestr("Bin/Demo.exe", header)
-                archive.writestr("Info/Appinfo.sys", f'<Application AppId="demo-{i}" Name="Bada demo {i:02d}"><Icon>icon.png</Icon></Application>')
-                archive.writestr("Res/icon.png", (base / "icon.png").read_bytes())
+                archive.writestr("Info/Appinfo.sys", f'<Application AppId="demo-{i}" Name="Bada demo {i:02d}"><Icon>{icon_hint}</Icon></Application>')
+                archive.writestr("Res/Icons/MainMenu.png", (base / "icon.png").read_bytes())
             library.import_game(base / "demo.zip")
         window = QMainWindow()
         view = Launcher(assets(), window)
@@ -86,6 +87,7 @@ def main():
             image = view.grab().toImage()
             assert image.size().width() == 320 and image.size().height() == 480
             assert image.pixelColor(0, 0) == QColor("black")
+            assert image.pixelColor(47, 61).rgb() == QColor.fromHsl(190, 145, 100).rgb(), "Package icon pixels are missing"
             assert image.pixelColor(12, 392) == QColor("black"), "Removed bottom buttons are still visible"
             assert not any(key == "next" for key, _, _ in view.controls())
             assert len([key for key, _, _ in view.controls() if key.startswith("game:")]) == 16
@@ -97,7 +99,7 @@ def main():
             swipe(-1); assert view.page_index == 0 and view.visible_games()[0]["id"] == first
             swipe(-1); assert view.page_index == 0
             click("more"); assert view.menu_open
-            assert [key for key, _, _ in view.controls()] == ["more", "importGame", "copyright", "settings"]
+            assert [key for key, _, _ in view.controls()] == ["more", "importGame", "settings"]
             screenshot("library-menu.png")
             QTest.mouseClick(view, Qt.LeftButton, pos=QPoint(47, 61))
             assert not view.menu_open and view.pending is None, "Dismissing the menu must not launch an icon"
@@ -106,12 +108,18 @@ def main():
             screenshot("game-details.png")
             click("removeConfirm"); assert view.screen == "remove"
             click("cancelRemove"); click("back"); assert len(library.list_games()) == 25
-            menu("settings"); click("setting:resolution"); click("value:4")
+            menu("settings")
+            assert view.draft["fullscreen"]
+            assert [key for key, _, _ in view.controls() if key.startswith("setting:")] == [
+                "setting:scaling", "setting:filter", "setting:vsync", "setting:fullscreen"]
+            click("setting:scaling"); click("value:1")
             click("setting:filter"); click("value:1")
-            assert view.draft["resolution"] == "720x1280" and view.draft["filter"] == "linear"
+            click("setting:fullscreen"); click("value:1")
+            assert view.draft["scaling"] == "integer" and view.draft["filter"] == "linear"
             screenshot("reference-settings.png")
             click("saveSettings"); wait()
-            assert library.get_settings()["resolution"] == "720x1280"
+            assert "resolution" not in library.get_settings()
+            assert library.get_settings()["scaling"] == "integer"
             assert library.get_settings()["filter"] == "linear" and not library.get_settings()["fullscreen"]
             assert view.screen == "library"
             for w, h, name in ((390, 844, "phone"), (960, 720, "desktop")):
@@ -129,8 +137,6 @@ def main():
             assert view.screen == "details" and view.pending is None
             click("removeConfirm"); click("remove"); wait()
             assert len(view.games) == 24 and len(library.list_games()) == 24
-            menu("copyright"); assert view.screen == "copyright"
-            screenshot("copyright.png"); click("back")
             # A launch failure must become a readable native message, without hanging the picker.
             click("game:" + view.visible_games()[0]["id"]); wait()
             assert view.screen == "message" and "runtime" in view.message.lower()

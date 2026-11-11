@@ -12,9 +12,8 @@ import uuid
 import xml.etree.ElementTree as ET
 import zipfile
 
-RESOLUTIONS = ("native", "240x400", "480x800", "540x960", "720x1280", "1080x1920")
-DEFAULTS = dict(resolution="native", scaling="fit", filter="nearest", vsync=True,
-                fullscreen=False, iconStyle="glossy")
+DEFAULTS = dict(scaling="fit", filter="nearest", vsync=True,
+                fullscreen=True, iconStyle="glossy")
 ENTRY = ".badanaut-game.json"
 MAX_BYTES = 512 * 1024 * 1024
 MAX_ICON = 2 * 1024 * 1024
@@ -22,7 +21,7 @@ MAX_ICON = 2 * 1024 * 1024
 
 def settings(values):
     result = {**DEFAULTS, **{k: v for k, v in values.items() if k in DEFAULTS}}
-    for key, options in {"resolution": RESOLUTIONS, "scaling": ("fit", "integer"),
+    for key, options in {"scaling": ("fit", "integer"),
                          "filter": ("nearest", "linear"), "iconStyle": ("glossy", "flat")}.items():
         if result[key] not in options:
             raise ValueError(f"Unsupported {key}")
@@ -114,20 +113,50 @@ def inspect(extracted):
                       executable=executables[0].relative_to(root).as_posix(), icon=icon)
 
 
+def _resolve_icon_path(root, base, hint):
+    parts = hint.replace("\\", "/").split("/")
+    if any(not part or part == ".." or ":" in part for part in parts):
+        return None
+    path = base
+    for part in parts:
+        if not path.is_dir() or not path.resolve().is_relative_to(root):
+            return None
+        exact = path / part
+        path = exact if exact.exists() else next(
+            (p for p in path.iterdir() if p.name.casefold() == part.casefold()), None)
+        if path is None:
+            return None
+    return path if path.resolve().is_relative_to(root) else None
+
+
 def icon_data(root, hint, executable=""):
+    root = root.resolve()
     candidates = [root / "_badanaut-icon.png"]
     if hint:
         for base in (root, root / "Res", root / "Info"):
-            candidate = (base / hint.replace("\\", "/")).resolve()
-            if candidate.is_relative_to(root.resolve()):
+            candidate = _resolve_icon_path(root, base, hint)
+            if candidate is not None:
                 candidates.append(candidate)
-    stems = ("icon", "appicon", "mainmenuicon", Path(executable.replace("\\", "/")).stem.lower())
-    for directory in (root / "Res", root / "Info", root):
-        if directory.is_dir():
+    stems = ("icon", "appicon", "mainmenuicon", "mainmenu", Path(executable.replace("\\", "/")).stem.casefold())
+    resources = (root / "Res", root / "Info")
+    for directory in (*resources, root):
+        if directory.is_dir() and directory.resolve().is_relative_to(root):
             candidates.extend(sorted((p for p in directory.iterdir() if p.is_file() and
-                                      p.stem.lower() in stems), key=lambda p: p.name))
+                                      p.stem.casefold() in stems), key=lambda p: p.name))
+    for directory in resources:
+        if not directory.is_dir() or not directory.resolve().is_relative_to(root):
+            continue
+        nested = []
+        for current, dirs, files in os.walk(directory):
+            current = Path(current)
+            depth = len(current.relative_to(directory).parts)
+            if depth >= 4:
+                dirs.clear()
+            if depth:
+                nested.extend(current / name for name in files if Path(name).stem.casefold() in stems)
+        candidates.extend(sorted(nested, key=lambda p: p.relative_to(root).as_posix()))
     for path in candidates:
-        if not path.is_file() or path.stat().st_size > MAX_ICON:
+        if not path.resolve().is_relative_to(root) or not path.is_file() or path.stat().st_size > MAX_ICON:
             continue
         data = path.read_bytes()
         mime = "png" if data.startswith(b"\x89PNG\r\n\x1a\n") else "jpeg" if data.startswith(b"\xff\xd8\xff") else "webp" if data[:4] == b"RIFF" and data[8:12] == b"WEBP" else None
@@ -217,10 +246,8 @@ class Library:
             raise ValueError("Select a Bada runtime before launching")
         config = self.get_settings()
         args = ["--input", str(directory), "--libstdcxx", str(runtime), "--app-id", data["app_id"],
-                "--resolution", config["resolution"], "--scaling", config["scaling"], "--filter", config["filter"],
-                "--vsync=" + str(config["vsync"]).lower()]
-        if config["fullscreen"]:
-            args.append("--fullscreen")
+                "--scaling", config["scaling"], "--filter", config["filter"],
+                "--vsync=" + str(config["vsync"]).lower(), "--fullscreen=" + str(config["fullscreen"]).lower()]
         return args
 
     def played(self, game_id):

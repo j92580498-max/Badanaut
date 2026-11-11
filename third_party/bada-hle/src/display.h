@@ -5,19 +5,10 @@
 
 // Presentation preferences never change the guest's screen or GL state.
 namespace display {
-inline int output_width = 0, output_height = 0;
 inline bool integer_scaling = false, smooth = false;
 
 inline hle::SurfaceRect content_rect(int width, int height, int ow, int oh) {
-    int limit_w = ow, limit_h = oh;
-#ifdef __ANDROID__
-    if (output_width && output_height) {
-        const bool landscape = width > height;
-        limit_w = std::min(ow, landscape ? output_height : output_width);
-        limit_h = std::min(oh, landscape ? output_width : output_height);
-    }
-#endif
-    auto area = hle::fit_surface(width, height, limit_w, limit_h);
+    auto area = hle::fit_surface(width, height, ow, oh);
     if (integer_scaling && width > 0 && height > 0) {
         int scale = std::min(area.width / width, area.height / height);
         if (scale >= 1) {
@@ -34,11 +25,6 @@ inline void size_window(SDL_Window* window, int guest_width, int guest_height) {
 #ifndef __ANDROID__
     if (!window || SDL_GetWindowFlags(window) & (SDL_WINDOW_FULLSCREEN | SDL_WINDOW_FULLSCREEN_DESKTOP)) return;
     int w = guest_width, h = guest_height;
-    if (output_width && output_height) {
-        const bool landscape = guest_width > guest_height;
-        w = landscape ? output_height : output_width;
-        h = landscape ? output_width : output_height;
-    }
     SDL_Rect available;
     if (SDL_GetDisplayUsableBounds(SDL_GetWindowDisplayIndex(window), &available) == 0) {
         double scale = std::min({1.0, std::max(1, available.w - 64) / static_cast<double>(w),

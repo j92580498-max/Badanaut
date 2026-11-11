@@ -4,7 +4,7 @@ Android paints the native game picker with Canvas using the same reference
 layout and bundled fonts as Qt on Windows and Linux. `../shared-ui/` is packaged
 by Gradle. The four-column, 16-game grid is scaled and centered within the
 available screen; horizontal swipes change pages, with small dots showing the current page.
-The top-right ⋮ menu opens the file picker, copyright info or Settings. Tap an icon to
+The top-right ⋮ menu opens the file picker or Settings. Tap an icon to
 launch; hold it for details, custom artwork or removal. TalkBack exposes each
 control, including the long-click details action.
 
@@ -33,12 +33,12 @@ Import a Bada ZIP and select the ARM32 firmware C++ runtime separately. The
 package/runtime formats and hard/soft-float requirements are documented in the
 [root README](../../README.md). Packages use `filesDir/bada/games/<id>` inside the new application storage. New optional metadata fields are `icon` and `last_played`.
 
-Resolution limits the presentation area in physical pixels without changing
-native device resolution or guest screen dimensions. Larger choices fit the
-available screen. Scaling and touches share the same rectangle. Canvas filtering,
-vsync and fullscreen options are passed to the native engine at launch. Fullscreen
-is optional; the app uses normal system bars otherwise. The launch log remains
+Presentation fits the available screen without changing guest screen dimensions.
+Scaling and touches share the same rectangle. Canvas filtering, vsync and
+fullscreen options are passed to the native engine at launch. Games start
+fullscreen by default; turning the setting Off restores normal system bars.
+Existing saved fullscreen choices are preserved. The launch log remains
 available from the shared Settings screen.
 
 The native probes cover GLES pixels, timers, audio, ABI helpers, acceleration,
-logging, desktop scaling and Android output limits. See `tests/native/`.
+logging, desktop scaling and Android presentation. See `tests/native/`.

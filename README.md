@@ -38,17 +38,16 @@ Game files and firmware are not included in builds and must not be committed.
 
 ## Display settings
 
-The application and games start **windowed on Windows and Linux**. Game windows
-are resizable; **F11** toggles fullscreen. **Settings** offers:
+The desktop library opens in a resizable window. Games start **fullscreen by
+default** on all platforms; the setting remains user-changeable. **F11** toggles
+fullscreen on desktop. **Settings** offers:
 
-- Original automatic output, 240×400, 480×800, 540×960, 720×1280 and 1080×1920.
 - Fit or whole-pixel scaling, preserving aspect ratio.
 - Sharp or smooth Canvas filtering and vertical sync.
-- Optional fullscreen games.
+- Fullscreen or windowed games.
 
-Resolution follows each game's orientation. On desktop it sets the window size,
-constrained to the monitor; on Android it limits the presentation area in physical
-pixels inside the device screen. The guest always retains its original dimensions.
+Presentation follows each game's orientation and fits the available screen.
+The guest always retains its original dimensions.
 Whole-pixel scaling falls back to fitting when the screen is smaller than the
 guest. Filtering applies to Canvas output; the game controls its own GL textures.
 Vsync depends on driver support. Changes apply at the next game launch.

@@ -31,8 +31,8 @@ A firmware runtime remains a separate ARM32 library supplied by the user.
 
 Display preferences are presentation settings. Do not change guest bounds or
 texture state to implement them. `third_party/bada-hle/src/display.h` supplies
-the aspect-preserving rectangle for rendering and touch mapping. Desktop starts
-windowed and supports F11; Android presets limit physical presentation pixels.
+the aspect-preserving rectangle for rendering and touch mapping. Games start
+fullscreen by default on all hosts, with saved opt-outs preserved. Desktop supports F11.
 
 ## Validation and distribution
 

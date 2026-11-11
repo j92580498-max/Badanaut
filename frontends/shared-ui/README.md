@@ -22,7 +22,7 @@ status, display settings and platform. Package names are drawn as plain text.
 
 Visual reference: [HyperHLE-Reborn app picker](https://github.com/KlugKlugTG/HyperHLE-Reborn/blob/trunk/src/environment/app_picker.rs),
 derived from touchHLE, and the user's supplied screenshot. The ⋮ menu
-opens the file picker, copyright info or Badanaut settings. No upstream code or game artwork is bundled.
+opens the file picker or Badanaut settings. No upstream code or game artwork is bundled.
 
 Run `xvfb-run -a python tools/check-shared-ui.py --screenshots .build/ui-preview`
 with desktop requirements installed to check reference geometry, artwork,

@@ -5,19 +5,27 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class DisplaySettingsTest {
-    @Test fun gamesStartWindowedAndPreserveGuestResolution() {
+    @Test fun gamesStartFullscreenWithTheOtherDefaultsPreserved() {
         val defaults = DisplaySettings.validate(JSONObject())
-        assertFalse(defaults.getBoolean("fullscreen"))
-        assertEquals("native", defaults.getString("resolution"))
+        assertTrue(defaults.getBoolean("fullscreen"))
+        assertFalse(defaults.has("resolution"))
         assertEquals("fit", defaults.getString("scaling"))
+        assertEquals("nearest", defaults.getString("filter"))
+        assertTrue(defaults.getBoolean("vsync"))
+        assertEquals("glossy", defaults.getString("iconStyle"))
     }
     @Test fun supportedDisplayChoicesSurviveValidation() {
-        val config = JSONObject().put("resolution", "720x1280").put("filter", "linear").put("scaling", "integer").put("vsync", false)
-        assertEquals("720x1280", DisplaySettings.validate(config).getString("resolution"))
-        assertFalse(DisplaySettings.validate(config).getBoolean("vsync"))
+        val config = JSONObject().put("filter", "linear").put("scaling", "integer").put("vsync", false)
+            .put("fullscreen", false).put("iconStyle", "flat")
+        val settings = DisplaySettings.validate(config)
+        assertEquals("linear", settings.getString("filter"))
+        assertEquals("integer", settings.getString("scaling"))
+        assertFalse(settings.getBoolean("vsync"))
+        assertFalse(settings.getBoolean("fullscreen"))
+        assertEquals("flat", settings.getString("iconStyle"))
     }
-    @Test fun unsupportedResolutionAndStringSwitchAreRejected() {
-        for (config in listOf(JSONObject().put("resolution", "0x0"), JSONObject().put("fullscreen", "false"))) {
+    @Test fun unsupportedDisplayChoiceAndStringSwitchAreRejected() {
+        for (config in listOf(JSONObject().put("filter", "cubic"), JSONObject().put("fullscreen", "false"))) {
             try { DisplaySettings.validate(config); fail("Invalid setting accepted") } catch (_: IllegalArgumentException) { }
         }
     }

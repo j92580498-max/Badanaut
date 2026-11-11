@@ -30,3 +30,7 @@
 	path = third_party/pvr
 	url = https://github.com/powervr-graphics/Native_SDK.git
 	shallow = true
+[submodule "third_party/dr_libs"]
+	path = third_party/dr_libs
+	url = https://github.com/mackron/dr_libs.git
+	shallow = true

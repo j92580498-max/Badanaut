@@ -42,6 +42,81 @@ void timer_test(Cpu& cpu) {
     require(!cpu.timer_active, "Timer::Cancel was overridden by a success stub");
 }
 
+void boolean_reference_test(Cpu& cpu) {
+    const uint32_t key = cpu.alloc(32);
+    hle::osp_string_set(cpu, key, "SilentMode");
+    const uint32_t value = cpu.alloc(8);
+    cpu.write_u32(value, 0x123456ff);
+    require(call(cpu, "_ZN3Osp6System11SettingInfo8GetValueERKNS_4Base6StringERb", {key, value}) == 0 &&
+            cpu.read_u32(value) == 0x12345600,
+            "boolean output overwrote adjacent guest data");
+    const uint32_t handler = cpu.bind_trampoline([](Cpu& c) {
+        hle::call("_ZN3Osp6System11SettingInfo8GetValueERKNS_4Base6StringERb", c);
+    });
+    // Match the ABI boundary in the game's IsSilent: its one-byte output is
+    // just before the saved r4 word. A word store zeroed r4's low 24 bits.
+    const uint32_t code[] = {0xe92d4010, 0xe24dd018, 0xe28d1017, 0xe59f300c,
+                             0xe12fff33, 0xe28dd018, 0xe8bd8010, 0xe1a00000, handler};
+    cpu.write_mem(0x100200, code, sizeof code);
+    cpu.set_reg(UC_ARM_REG_R4, 0x89abcdef);
+    uint32_t returned = 0;
+    require(cpu.run_guest(0x100200, {key}, returned) && cpu.reg(UC_ARM_REG_R4) == 0x89abcdef,
+            "boolean output damaged the caller's saved register");
+    cpu.free(value);
+    puts("One-byte boolean output and adjacent saved-register preservation passed");
+}
+
+void player_test(Cpu& cpu) {
+    const uint32_t first = cpu.alloc(32), second = cpu.alloc(32);
+    const uint32_t owner = cpu.alloc(32), other_owner = cpu.alloc(32);
+    const uint32_t vtable = cpu.make_vtable(8, {{3, [](Cpu& c) {
+        const uint32_t listener = c.arg32(0);
+        c.write_u32(listener - 8, c.read_u32(listener - 8) + 1);
+        c.write_u32(listener - 4, listener);
+    }}});
+    for (const uint32_t object : {owner, other_owner}) cpu.write_u32(object + 12, vtable);
+    constexpr const char* construct = "_ZN3Osp5Media6Player9ConstructERKNS0_20IPlayerEventListenerEPKNS_8Graphics10BufferInfoE";
+    const uint8_t video[] = {'R','I','F','F',4,0,0,0,'A','V','I',' '};
+    const uint32_t buffer = cpu.alloc(36);
+    call(cpu, "_ZN3Osp4Base10ByteBufferC1Ev", {buffer});
+    call(cpu, "_ZN3Osp4Base10ByteBuffer9ConstructEi", {buffer, sizeof video});
+    cpu.write_mem(call(cpu, "_ZNK3Osp4Base10ByteBuffer10GetPointerEv", {buffer}), video, sizeof video);
+    for (const uint32_t object : {first, second}) {
+        call(cpu, "_ZN3Osp5Media6PlayerC1Ev", {object});
+        require(call(cpu, "_ZN3Osp5Media6Player4PlayEv", {object}) != 0, "unopened Player started");
+        require(call(cpu, "_ZN3Osp5Media6Player10OpenBufferERKNS_4Base10ByteBufferEb", {object, buffer, 0}) == 0,
+                "intro-video placeholder did not open");
+    }
+    call(cpu, "_ZN3Osp4Base10ByteBufferD1Ev", {buffer});
+    call(cpu, construct, {first, owner + 12, 0});
+    call(cpu, construct, {second, other_owner + 12, 0});
+    call(cpu, "_ZN3Osp5Media6Player10SetLoopingEb", {second, 1});
+    require(call(cpu, "_ZN3Osp5Media6Player9IsLoopingEv", {second}) == 1,
+            "Player did not retain its looping setting");
+    call(cpu, "_ZN3Osp5Media6Player4PlayEv", {first});
+    call(cpu, "_ZN3Osp5Media6Player4PlayEv", {second});
+    SDL_Delay(350);
+    hle::player_pump(cpu);
+    require(cpu.read_u32(owner + 4) == 1 && cpu.read_u32(owner + 8) == owner + 12,
+            "video completion did not reach the registered listener subobject");
+    require(cpu.read_u32(other_owner + 4) == 0 &&
+            call(cpu, "_ZNK3Osp5Media6Player8GetStateEv", {second}) == 6,
+            "looping media received an end-of-clip callback or stopped playing");
+    hle::player_pump(cpu);
+    require(cpu.read_u32(owner + 4) == 1, "video completion fired more than once");
+    call(cpu, "_ZN3Osp5Media6Player4PlayEv", {first});
+    call(cpu, "_ZN3Osp5Media6Player5PauseEv", {first});
+    SDL_Delay(350);
+    hle::player_pump(cpu);
+    require(cpu.read_u32(owner + 4) == 1 &&
+            call(cpu, "_ZNK3Osp5Media6Player8GetStateEv", {first}) == 5,
+            "paused media completed behind the app's back");
+    for (const uint32_t object : {first, second}) {
+        call(cpu, "_ZN3Osp5Media6Player5CloseEv", {object});
+        call(cpu, "_ZN3Osp5Media6PlayerD1Ev", {object});
+    }
+}
+
 void watchdog_test(Cpu& cpu) {
     const uint32_t loop = 0xeafffffe; // ARM b .
     cpu.write_u32(0x100180, loop);
@@ -143,6 +218,42 @@ void memory_transfer_test(Cpu& cpu) {
         std::memmove(expected.data() + (to - source), expected.data() + (from - source), 64);
         require(result == expected, "memmove corrupted an overlapping guest buffer");
     }
+    // Transfers larger than the staging chunk must keep overlap direction and
+    // boundary bytes intact without allocating a second full guest buffer.
+    const uint32_t large = cpu.alloc(131104);
+    std::vector<uint8_t> data(131104), actual(data.size());
+    for (size_t i = 0; i < data.size(); ++i) data[i] = static_cast<uint8_t>(i * 19);
+    for (bool backwards : {false, true}) {
+        cpu.write_mem(large, data.data(), data.size());
+        auto expected = data;
+        const uint32_t from = backwards ? 0 : 17, to = backwards ? 17 : 0;
+        std::memmove(expected.data() + to, expected.data() + from, 131073);
+        call(cpu, "memmove", {large + to, large + from, 131073});
+        cpu.read_mem(large, actual.data(), actual.size());
+        require(actual == expected, "large overlapping memmove lost chunk boundary bytes");
+    }
+    const auto before_fill = actual;
+    call(cpu, "memset", {large + 1, 0x1234, 131073});
+    cpu.read_mem(large, actual.data(), actual.size());
+    for (size_t i = 1; i <= 131073; ++i)
+        require(actual[i] == 0x34, "large memset skipped or overran a chunk");
+    require(actual[0] == before_fill[0] && actual[131074] == before_fill[131074] &&
+            actual.back() == before_fill.back(), "large memset changed bytes outside its range");
+    require(!cpu.memory_mapped(0xfffffff0, 64) && !cpu.memory_mapped(0x100ffc, 8),
+            "guest range validation accepted overflow or an unmapped page");
+    const hle::Handler invalid_transfers[] = {
+        [](Cpu& c) { hle::call("memset", c); },
+        [](Cpu& c) { hle::call("memcpy", c); },
+        [](Cpu& c) { hle::call("memcmp", c); }
+    };
+    for (const hle::Handler callback : invalid_transfers) {
+        const uint32_t handler = cpu.bind_trampoline(callback);
+        uint32_t returned = 0;
+        require(!cpu.run_guest(handler, {large, large, 0xfffffff0}, returned),
+                "invalid bulk transfer did not fail its guest callback");
+        require(cpu.run_guest(0x100000, {}, returned), "handler failure poisoned a later guest call");
+    }
+    cpu.free(large);
     // Executable-image memory is owned by Unicorn, outside the shared heap.
     const uint32_t value = 0x87654321;
     cpu.write_u32(0x1001c0, value);
@@ -169,6 +280,48 @@ void wide_string_test(Cpu& cpu) {
     cpu.write_mem(b, low, sizeof low);
     require(static_cast<int32_t>(call(cpu, "wcscmp", {a, b})) > 0,
             "wide comparison treated a zero low byte as the terminator");
+
+    const char filename[] = "/Res/anim";
+    const uint32_t narrow = cpu.alloc(32), wide = cpu.alloc(32);
+    cpu.write_mem(narrow, filename, sizeof filename);
+    cpu.write_u32(wide + 20, 0x12345678);
+    require(call(cpu, "mbstowcs", {wide, narrow, 16}) == 9 &&
+            call(cpu, "mbstowcs", {0, narrow, 0}) == 9,
+            "package filename conversion returned the wrong wide-character count");
+    char16_t converted[10];
+    cpu.read_mem(wide, converted, sizeof converted);
+    require(std::u16string(converted) == u"/Res/anim" && cpu.read_u32(wide + 20) == 0x12345678,
+            "package filename conversion used host wchar_t width or overwrote its output");
+    cpu.write_u32(wide + 8, 0x12345678);
+    require(call(cpu, "mbstowcs", {wide, narrow, 4}) == 4 &&
+            cpu.read_u32(wide + 8) == 0x12345678,
+            "truncated wide conversion wrote a terminator past the requested capacity");
+    const char unicode[] = u8"/Res/\u00e4";
+    cpu.write_mem(narrow, unicode, sizeof unicode);
+    require(call(cpu, "mbstowcs", {wide, narrow, 16}) == 6,
+            "UTF-8 filename conversion counted bytes as wide characters");
+    cpu.read_mem(wide, converted, 14);
+    require(std::u16string(converted) == u"/Res/\u00e4", "UTF-8 filename conversion lost the code point");
+}
+
+void guest_string_test(Cpu& cpu) {
+    std::string long_name(600, 'x');
+    long_name[257] = 'y';
+    cpu.write_mem(0x100600, long_name.c_str(), long_name.size() + 1);
+    require(cpu.read_cstr(0x100600) == long_name, "executable string lost bytes across read chunks");
+    const char edge[] = "shader";
+    cpu.write_mem(0x100ff9, edge, sizeof edge);
+    require(cpu.read_cstr(0x100ff9) == edge, "page-end string required an extra mapped page");
+    cpu.write_mem(0x100ffa, edge, sizeof edge - 1);
+    require(cpu.read_cstr(0x100ffa) == edge && cpu.read_cstr(0x100ffa, 3) == "sha",
+            "unterminated page-end string overran its mapping or requested length");
+    require(cpu.read_cstr(0xffffffff, 64).empty(), "invalid string address wrapped into another guest region");
+    require(uc_mem_map(cpu.uc, 0x150000, 8192, UC_PROT_READ | UC_PROT_WRITE) == UC_ERR_OK,
+            "could not map cross-page string test memory");
+    cpu.write_mem(0x150ff3, long_name.c_str(), long_name.size() + 1);
+    require(cpu.read_cstr(0x150ff3) == long_name, "string read stopped at a mapped page boundary");
+    uc_mem_unmap(cpu.uc, 0x150000, 8192);
+    puts("Chunked guest string reads, bounded lengths and page boundaries passed");
 }
 
 uint32_t queue(Cpu& cpu, uint32_t output, int frames, int channels, int16_t left, int16_t right) {
@@ -318,8 +471,11 @@ int main() {
         heap_test(cpu);
         watchdog_test(cpu);
         timer_test(cpu);
+        boolean_reference_test(cpu);
+        player_test(cpu);
         buffer_test(cpu);
         memory_transfer_test(cpu);
+        guest_string_test(cpu);
         wide_string_test(cpu);
         audio_test(cpu, recording);
         SDL_Quit();

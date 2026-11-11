@@ -229,83 +229,6 @@ void stub_ctor(Cpu& c) {
 void ret_ok(Cpu& c) { c.set_ret32(0); }   // E_SUCCESS
 void ret_true(Cpu& c) { c.set_ret32(1); } // bool true
 
-// --- Osp::Media::Player (video): no real decode. Drive a tiny state machine so
-// apps that gate progress on playback completion (Asphalt's intro trailer) see
-// the clip play briefly and reach end-of-clip, rather than looping forever on a
-// player that never finishes. Osp::Media::PlayerState: INITIALIZED=0, OPENING=1,
-// OPENED=2, ENDOFCLIP=3, STOPPED=4, PAUSED=5, PLAYING=6, CLOSED=7, ERROR=8.
-struct VidPlayer {
-    int state = 0;                                // PlayerState
-    std::chrono::steady_clock::time_point t_play; // when Play() was called
-    bool playing = false;
-    bool ended = false;    // OnPlayerEndOfClip already fired
-    uint32_t listener = 0; // IPlayerEventListener `this` (from Construct)
-    uint32_t end_cb = 0;   // listener's OnPlayerEndOfClip address
-};
-std::map<uint32_t, VidPlayer> g_players;
-constexpr int kClipMs = 300; // pretend every clip is this long, then end
-
-VidPlayer& player(Cpu& c) { return g_players[c.arg32(0)]; }
-// Player::Construct(IPlayerEventListener& listener, BufferInfo*): capture the
-// listener and resolve its OnPlayerEndOfClip so the pump can signal the end.
-void player_construct(Cpu& c) {
-    VidPlayer& p = player(c);
-    p.listener = c.arg32(1);
-    p.end_cb = c.img ? c.img->resolve_contains("17OnPlayerEndOfClipEv") : 0;
-    c.set_ret32(0);
-}
-int player_elapsed_ms(const VidPlayer& p) {
-    return (int)std::chrono::duration_cast<std::chrono::milliseconds>(
-               std::chrono::steady_clock::now() - p.t_play)
-        .count();
-}
-void player_ctor(Cpu& c) {
-    uint32_t o = c.arg32(0);
-    if (o) {
-        c.write_u32(o, c.noop_vtable());
-    }
-    g_players[o] = VidPlayer{};
-    c.set_ret32(o);
-}
-void player_openfile(Cpu& c) {
-    player(c).state = 2; // OPENED
-    c.set_ret32(0);
-}
-void player_play(Cpu& c) {
-    VidPlayer& p = player(c);
-    p.state = 6; // PLAYING
-    p.playing = true;
-    p.ended = false;
-    p.t_play = std::chrono::steady_clock::now();
-    c.set_ret32(0);
-}
-void player_getstate(Cpu& c) {
-    VidPlayer& p = player(c);
-    if (p.playing && player_elapsed_ms(p) >= kClipMs) {
-        p.state = 3; // ENDOFCLIP
-    }
-    c.set_ret32((uint32_t)p.state);
-}
-void player_getduration(Cpu& c) { c.set_ret32(kClipMs); }
-void player_getposition(Cpu& c) {
-    VidPlayer& p = player(c);
-    int pos = p.playing ? player_elapsed_ms(p) : 0;
-    c.set_ret32((uint32_t)(pos > kClipMs ? kClipMs : pos));
-}
-void player_stop(Cpu& c) {
-    VidPlayer& p = player(c);
-    p.state = 4; // STOPPED
-    p.playing = false;
-    c.set_ret32(0);
-}
-void player_close(Cpu& c) {
-    VidPlayer& p = player(c);
-    p.state = 7; // CLOSED -- BVideoPlayer::UpdateVideo gates the trailer exit on
-                 // GetState()==CLOSED after it calls Close() in the ENDOFCLIP case
-    p.playing = false;
-    c.set_ret32(0);
-}
-
 // SystemTime::GetTicks(long long& out) -- monotonic ms since start (static, so
 // r0 = &out). Apps drive animation/physics off this; a frozen 0 stalls them.
 void systemtime_getticks(Cpu& c) {
@@ -410,6 +333,11 @@ void control_addtouchlistener(Cpu& c) {
     }
     c.set_ret32(0);
 }
+void appframe_addtouchlistener(Cpu& c) {
+    g_touch_listener = c.arg32(1);
+    g_touch_source = g_frame;
+    c.set_ret32(0);
+}
 
 struct UserEvent {
     uint32_t id;
@@ -423,7 +351,7 @@ void control_senduserevent(Cpu& c) {
 void app_getappframe(Cpu& c) {
     if (!g_appframe) {
         g_frame = c.make_stub_object(256, 64);                  // the Frame/Container
-        uint32_t vt = c.make_vtable(64, {{9, frame_getframe}}); // AppFrame: slot 9 = GetFrame
+        uint32_t vt = c.make_vtable(64, {{5, appframe_addtouchlistener}, {9, frame_getframe}});
         g_appframe = c.alloc(64, 8);
         for (int i = 0; i < 64; i += 4) {
             c.write_u32(g_appframe + i, 0);
@@ -446,7 +374,10 @@ std::string g_locale_country = "US";
 
 // SettingInfo::GetValue(String key, bool& out) -> write false (e.g. SilentMode off)
 void settinginfo_getvalue_bool(Cpu& c) {
-    c.write_u32(c.arg32(1), 0);
+    // A Bada bool occupies one byte. AppBridge::IsSilent places this output
+    // immediately before a saved register, so a word store corrupts this.
+    const uint8_t value = 0;
+    c.write_mem(c.arg32(1), &value, sizeof value);
     c.set_ret32(0);
 }
 void runtimeinfo_getvalue_int(Cpu& c) {
@@ -668,23 +599,6 @@ void register_osp() {
     });
     register_handler("_ZNK3Osp4Base7Runtime9Semaphore7ReleaseEv", [](Cpu& c) { c.release_semaphore(c.arg32(0)); c.set_ret32(0); });
 
-    // Osp::Media::Player (no-op video that reports a short clip then end-of-clip).
-    register_handler("_ZN3Osp5Media6PlayerC1Ev", player_ctor);
-    register_handler("_ZN3Osp5Media6PlayerC2Ev", player_ctor);
-    register_handler("_ZN3Osp5Media6Player9ConstructERKNS0_20IPlayerEventListenerEPKNS_8Graphics10BufferInfoE",
-                     player_construct);
-    register_handler("_ZN3Osp5Media6Player8OpenFileERKNS_4Base6StringEb", player_openfile);
-    register_handler("_ZN3Osp5Media6Player4PlayEv", player_play);
-    register_handler("_ZN3Osp5Media6Player4StopEv", player_stop);
-    register_handler("_ZN3Osp5Media6Player5PauseEv", ret_ok);
-    register_handler("_ZN3Osp5Media6Player5CloseEv", player_close);
-    register_handler("_ZN3Osp5Media6Player6SeekToEl", ret_ok);
-    register_handler("_ZN3Osp5Media6Player7SetMuteEb", ret_ok);
-    register_handler("_ZN3Osp5Media6Player9SetVolumeEi", ret_ok);
-    register_handler("_ZNK3Osp5Media6Player8GetStateEv", player_getstate);
-    register_handler("_ZNK3Osp5Media6Player11GetDurationEv", player_getduration);
-    register_handler("_ZNK3Osp5Media6Player11GetPositionEv", player_getposition);
-
     // PowerManager::SetScreenEventListener(IScreenEventListener&)
     register_handler("_ZN3Osp6System12PowerManager22SetScreenEventListenerERNS_24IScreenEventListenerE", ret_ok);
     register_handler("_ZN3Osp6System12PowerManager17KeepScreenOnStateEbb", ret_ok);
@@ -770,24 +684,6 @@ void set_locale(const std::string& spec) {
     }
     printf("[locale] language=%s(%d) country=%s(%d)\n", g_locale_lang.c_str(), g_locale_lang_enum,
            g_locale_country.c_str(), g_locale_country_enum);
-}
-
-// Per frame (main/GL thread): once a no-op clip has "played" for kClipMs, fire
-// the player's OnPlayerEndOfClip listener so the app stops waiting and advances
-// (Asphalt's intro trailer -> menu). Must run from the loop, not a handler (it
-// re-enters the guest).
-void player_pump(Cpu& cpu) {
-    for (auto& [self, p] : g_players) {
-        if (!p.playing || p.ended || !p.listener || !p.end_cb) {
-            continue;
-        }
-        if (player_elapsed_ms(p) >= kClipMs) {
-            p.ended = true;
-            p.state = 3; // ENDOFCLIP
-            uint32_t ret = 0;
-            cpu.run_guest(p.end_cb, {p.listener}, ret);
-        }
-    }
 }
 
 void osp_string_set(Cpu& c, uint32_t obj, const std::string& utf8) {

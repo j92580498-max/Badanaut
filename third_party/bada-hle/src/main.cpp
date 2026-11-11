@@ -279,13 +279,14 @@ void feed_touch(Cpu& cpu, SDL_Window* win, int kind, int wx, int wy, uint32_t po
 // Deliver an app-lifecycle transition (background/foreground) to the guest app,
 // as bada would: OnBackground()/OnForeground() take only `this` (app instance).
 // No-op unless the hook was resolved (non-FruitNinja) and the app exists.
-void feed_focus(Cpu& cpu, uint32_t hook, const char* what) {
+bool feed_focus(Cpu& cpu, uint32_t hook, const char* what) {
     if (!hook || !cpu.app_instance) {
-        return;
+        return true;
     }
     uint32_t ret = 0;
     bool ok = cpu.run_guest(hook, {cpu.app_instance}, ret);
     printf("[focus] %s%s\n", what, ok ? "" : " [FAULTED]");
+    return ok;
 }
 
 // ---- function argument tracer (stdin: "args <func> <types> [count]") ----
@@ -1138,6 +1139,7 @@ int main(int argc, char** argv) {
     printf("[boot] OspMain returned ok=%d r0=0x%x\n", ok, ret);
 
     // ---- Application lifecycle (host-driven; Execute handed control back) ----
+    bool guest_failed = false;
     if (cpu.exec_requested) {
         printf("\n[boot] factory (app CreateInstance) ...\n");
         uint32_t app = 0;
@@ -1156,10 +1158,14 @@ int main(int argc, char** argv) {
         if (!ok2) {
             printf("[boot] init faulted; not entering frame loop\n");
             hle::dump_stats();
-            return 0;
+            return 1;
         }
 
-        feed_focus(cpu, g_on_foreground, "OnForeground (startup)");
+        if (!feed_focus(cpu, g_on_foreground, "OnForeground (startup)")) {
+            printf("[boot] foreground initialization faulted; not entering frame loop\n");
+            hle::dump_stats();
+            return 1;
+        }
         if (!cpu.pump_threads()) return 1;
 
         // ---- Timer-driven frame loop: each frame = one OnTimerExpired -> Draw ----
@@ -1235,15 +1241,24 @@ int main(int argc, char** argv) {
                     if (lost && g_app_focused) {
                         g_app_focused = false;
                         touch_input.cancel(deliver_touch);
-                        feed_focus(cpu, g_on_background, "OnBackground (focus lost -> pause)");
+                        if (!feed_focus(cpu, g_on_background, "OnBackground (focus lost -> pause)")) {
+                            guest_failed = true;
+                            running = false;
+                            break;
+                        }
                         hle::audio_pause(true);
                     } else if (gained && !g_app_focused) {
                         g_app_focused = true;
-                        feed_focus(cpu, g_on_foreground, "OnForeground (focus gained -> resume)");
+                        if (!feed_focus(cpu, g_on_foreground, "OnForeground (focus gained -> resume)")) {
+                            guest_failed = true;
+                            running = false;
+                            break;
+                        }
                         hle::audio_pause(false);
                     }
                 }
             }
+            if (!running) break;
             std::string cmd;
             while (pop_cmd(cmd)) { // stdin commands
                 bool q = false;
@@ -1291,6 +1306,7 @@ int main(int argc, char** argv) {
                     cpu.timer_active = false; // one-shot; the callback may re-arm it
                     uint32_t rr = 0;
                     if (!cpu.run_guest(ote, {cpu.app_instance, cpu.timer_obj}, rr)) {
+                        guest_failed = true;
                         break;
                     }
                     ticked = true;
@@ -1304,7 +1320,7 @@ int main(int argc, char** argv) {
             hle::user_event_pump(cpu); // deliver Control::SendUserEvent posts
             hle::player_pump(cpu);     // signal no-op video clips as ended (intro skip)
             hle::audio_pump(cpu);      // consumed PCM buffers -> AudioOut listener
-            if (!cpu.pump_threads()) break;
+            if (!cpu.pump_threads()) { guest_failed = true; break; }
             overlay::present_idle(win);
             if (ticked && ++frames == 1) {
                 printf("[boot] first frame drawn\n");
@@ -1356,5 +1372,5 @@ int main(int argc, char** argv) {
     SDL_GL_DeleteContext(glctx);
     SDL_DestroyWindow(win);
     SDL_Quit();
-    return 0;
+    return guest_failed ? 1 : 0;
 }

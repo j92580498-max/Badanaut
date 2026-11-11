@@ -1,4 +1,5 @@
 #include "cpu.h"
+#include "guest.h"
 #include "dispatch.h"
 #include "gl_api.h"
 #include "display.h"
@@ -18,8 +19,10 @@
 #include <cmath>
 #include <functional>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <map>
+#include <unordered_map>
 #include <vector>
 
 // GL ES 2.0 -> host GL (desktop compatibility or native ES from SDL). The binary's GL
@@ -122,6 +125,13 @@ uint32_t type_size(GLenum t) {
 GLuint g_vao = 0, g_ebo = 0;
 std::map<GLuint, GLuint> g_vbo; // per attrib-location VBO
 std::vector<uint8_t> g_indices;
+
+struct ProgramLocations {
+    bool linked = false;
+    std::unordered_map<std::string, GLint> attributes;
+    std::unordered_map<std::string, GLint> uniforms;
+};
+std::map<GLuint, ProgramLocations> g_program_locations;
 
 typedef void (*genfn)(GLsizei, GLuint*);
 typedef void (*bindfn)(GLenum, GLuint);
@@ -240,7 +250,11 @@ void gl_getintegerv(Cpu& c) {
 }
 
 void gl_createshader(Cpu& c) { c.set_ret32(host<GLuint (*)(GLenum)>("glCreateShader")(c.arg32(0))); }
-void gl_createprogram(Cpu& c) { c.set_ret32(host<GLuint (*)()>("glCreateProgram")()); }
+void gl_createprogram(Cpu& c) {
+    const GLuint program = host<GLuint (*)()>("glCreateProgram")();
+    if (program) g_program_locations[program] = {};
+    c.set_ret32(program);
+}
 void gl_attachshader(Cpu& c) { host<void (*)(GLuint, GLuint)>("glAttachShader")(c.arg32(0), c.arg32(1)); }
 void gl_compileshader(Cpu& c) {
     GLuint sh = c.arg32(0);
@@ -255,9 +269,13 @@ void gl_compileshader(Cpu& c) {
 }
 void gl_linkprogram(Cpu& c) {
     GLuint p = c.arg32(0);
+    // Locations belong to the linked executable, including missing names.
+    // A failed relink must also discard previous results and expose GL errors.
+    g_program_locations.erase(p);
     host<void (*)(GLuint)>("glLinkProgram")(p);
     GLint ok = 0;
     host<void (*)(GLuint, GLenum, GLint*)>("glGetProgramiv")(p, GL_LINK_STATUS, &ok);
+    if (ok) g_program_locations[p].linked = true;
     printf("[gl] link program %u: %s\n", p, ok ? "OK" : "FAILED");
     if (!ok) {
         char log[512] = {0};
@@ -267,8 +285,25 @@ void gl_linkprogram(Cpu& c) {
 }
 void gl_useprogram(Cpu& c) { host<void (*)(GLuint)>("glUseProgram")(c.arg32(0)); }
 void gl_uniform1i(Cpu& c) { host<void (*)(GLint, GLint)>("glUniform1i")(c.arg32(0), c.arg32(1)); }
+// The location occupies r0. VFP arguments start at s0 for hard-float,
+// whereas soft-float arguments follow the location in r1/r2/r3/the stack.
+float uniform_float(Cpu& c, int index) { return c.argf32(index + (c.hard_float ? 0 : 1)); }
+void gl_uniform1f(Cpu& c) {
+    host<void (*)(GLint, GLfloat)>("glUniform1f")(c.arg32(0), uniform_float(c, 0));
+}
+void gl_uniform2f(Cpu& c) {
+    host<void (*)(GLint, GLfloat, GLfloat)>("glUniform2f")(c.arg32(0), uniform_float(c, 0), uniform_float(c, 1));
+}
+void gl_uniform4f(Cpu& c) {
+    host<void (*)(GLint, GLfloat, GLfloat, GLfloat, GLfloat)>("glUniform4f")(
+        c.arg32(0), uniform_float(c, 0), uniform_float(c, 1), uniform_float(c, 2), uniform_float(c, 3));
+}
 void gl_deleteshader(Cpu& c) { host<void (*)(GLuint)>("glDeleteShader")(c.arg32(0)); }
-void gl_deleteprogram(Cpu& c) { host<void (*)(GLuint)>("glDeleteProgram")(c.arg32(0)); }
+void gl_deleteprogram(Cpu& c) {
+    const GLuint program = c.arg32(0);
+    g_program_locations.erase(program);
+    host<void (*)(GLuint)>("glDeleteProgram")(program);
+}
 void gl_getstring(Cpu& c) {
     const auto* value = glGetString(c.arg32(0));
     if (!value) { c.set_ret32(0); return; }
@@ -283,15 +318,31 @@ void gl_shadersource(Cpu& c) {
     GLuint sh = c.arg32(0);
     GLsizei count = c.arg32(1);
     uint32_t strs = c.arg32(2);
+    const uint32_t lengths = c.arg32(3);
     std::vector<std::string> src;
     std::vector<const char*> ptrs;
+    std::vector<GLint> sizes;
     for (int i = 0; i < count; i++) {
-        src.push_back(c.read_cstr(c.read_u32(strs + i * 4), 1 << 16));
+        const uint32_t address = c.read_u32(strs + i * 4);
+        const int32_t length = lengths ? static_cast<int32_t>(c.read_u32(lengths + i * 4)) : -1;
+        if (length >= 0) {
+            src.emplace_back(static_cast<size_t>(length), '\0');
+            if (length) c.read_mem(address, src.back().data(), length);
+        } else src.push_back(c.read_cstr(address, 1 << 16));
     }
+#ifndef BADA_GLES_BACKEND
+    // ES 2 defaults to GLSL ES 1.00. Desktop GL defaults to GLSL 1.10,
+    // which rejects the precision qualifiers in the original game shaders.
+    std::string joined;
+    for (const auto& part : src) joined += part;
+    if (!src.empty() && joined.find("#version") == std::string::npos)
+        src.front().insert(0, "#version 100\n");
+#endif
     for (auto& s : src) {
         ptrs.push_back(s.c_str());
+        sizes.push_back(static_cast<GLint>(s.size()));
     }
-    host<void (*)(GLuint, GLsizei, const char**, const GLint*)>("glShaderSource")(sh, count, ptrs.data(), nullptr);
+    host<void (*)(GLuint, GLsizei, const char**, const GLint*)>("glShaderSource")(sh, count, ptrs.data(), sizes.data());
 }
 void gl_getshaderiv(Cpu& c) {
     GLint v = 0;
@@ -303,18 +354,44 @@ void gl_getprogramiv(Cpu& c) {
     host<void (*)(GLuint, GLenum, GLint*)>("glGetProgramiv")(c.arg32(0), c.arg32(1), &v);
     c.write_u32(c.arg32(2), v);
 }
-void gl_getattriblocation(Cpu& c) {
-    std::string n = c.read_cstr(c.arg32(1));
-    GLint l = host<GLint (*)(GLuint, const char*)>("glGetAttribLocation")(c.arg32(0), n.c_str());
-    printf("[gl] attribLoc(\"%s\")=%d\n", n.c_str(), l);
-    c.set_ret32(l);
+void gl_info_log(Cpu& c, const char* name) {
+    const GLsizei capacity = c.arg32(1);
+    if (capacity < 0) {
+        host<void (*)(GLuint, GLsizei, GLsizei*, GLchar*)>(name)(c.arg32(0), capacity, nullptr, nullptr);
+        return;
+    }
+    std::vector<GLchar> log(std::max(capacity, 1), 0);
+    GLsizei length = 0;
+    host<void (*)(GLuint, GLsizei, GLsizei*, GLchar*)>(name)(c.arg32(0), capacity, &length, log.data());
+    if (c.arg32(2)) c.write_u32(c.arg32(2), length);
+    if (c.arg32(3) && capacity) c.write_mem(c.arg32(3), log.data(), std::min(capacity, length + 1));
 }
-void gl_getuniformlocation(Cpu& c) {
-    std::string n = c.read_cstr(c.arg32(1));
-    GLint l = host<GLint (*)(GLuint, const char*)>("glGetUniformLocation")(c.arg32(0), n.c_str());
-    printf("[gl] uniformLoc(\"%s\")=%d\n", n.c_str(), l);
-    c.set_ret32(l);
+void gl_shader_info_log(Cpu& c) { gl_info_log(c, "glGetShaderInfoLog"); }
+void gl_program_info_log(Cpu& c) { gl_info_log(c, "glGetProgramInfoLog"); }
+void gl_location(Cpu& c, bool uniform) {
+    const GLuint program = c.arg32(0);
+    const std::string name = c.read_cstr(c.arg32(1));
+    auto found = g_program_locations.find(program);
+    auto* cache = found != g_program_locations.end() && found->second.linked
+        ? (uniform ? &found->second.uniforms : &found->second.attributes) : nullptr;
+    if (cache) {
+        const auto location = cache->find(name);
+        if (location != cache->end()) {
+            c.set_ret32(location->second);
+            return;
+        }
+    }
+    const char* entry = uniform ? "glGetUniformLocation" : "glGetAttribLocation";
+    const GLint location = host<GLint (*)(GLuint, const char*)>(entry)(program, name.c_str());
+    // Key by string contents: guests can reuse a mutable buffer for names.
+    // Unlinked/unknown programs still reach GL on every call to retain errors.
+    if (cache) cache->emplace(name, location);
+    static const bool debug = getenv("BADA_GLDBG") != nullptr;
+    if (debug) printf("[gl] %s(%u, \"%s\")=%d\n", entry, program, name.c_str(), location);
+    c.set_ret32(location);
 }
+void gl_getattriblocation(Cpu& c) { gl_location(c, false); }
+void gl_getuniformlocation(Cpu& c) { gl_location(c, true); }
 void gl_bindattriblocation(Cpu& c) {
     std::string n = c.read_cstr(c.arg32(2));
     host<void (*)(GLuint, GLuint, const char*)>("glBindAttribLocation")(c.arg32(0), c.arg32(1), n.c_str());
@@ -706,6 +783,31 @@ uint32_t pixel_bytes(GLenum fmt, GLenum type) {
                                                               : 1;
     return ch;
 }
+void gl_readpixels(Cpu& c) {
+    const GLint x = c.arg32(0), y = c.arg32(1);
+    const GLsizei width = c.arg32(2), height = c.arg32(3);
+    const GLenum format = c.arg32(4), type = c.arg32(5);
+    const uint32_t destination = c.arg32(6);
+    if (width <= 0 || height <= 0) {
+        glReadPixels(x, y, width, height, format, type, nullptr);
+        return;
+    }
+    if (!destination) return;
+    const bool packed = type == GL_UNSIGNED_SHORT_5_6_5 ||
+                        type == GL_UNSIGNED_SHORT_4_4_4_4 || type == GL_UNSIGNED_SHORT_5_5_5_1;
+    const size_t row = static_cast<size_t>(width) * pixel_bytes(format, type) * (packed ? 1 : type_size(type));
+    GLint alignment = 4;
+    glGetIntegerv(GL_PACK_ALIGNMENT, &alignment);
+    const size_t stride = (row + alignment - 1) / alignment * alignment;
+    const uint64_t bytes = static_cast<uint64_t>(stride) * (height - 1) + row;
+    if (bytes > guest::HEAP_SIZE) return;
+    std::vector<uint8_t> pixels(static_cast<size_t>(bytes));
+    // GL leaves row padding untouched and does not write padding after the
+    // last row. Preserve those guest bytes when staging the driver's output.
+    c.read_mem(destination, pixels.data(), static_cast<uint32_t>(bytes));
+    glReadPixels(x, y, width, height, format, type, pixels.data());
+    c.write_mem(destination, pixels.data(), static_cast<uint32_t>(bytes));
+}
 void g1_teximage2d(Cpu& c) {
     GLenum tgt = c.arg32(0);
     GLint lvl = c.arg32(1), ifmt = c.arg32(2);
@@ -838,6 +940,35 @@ void g1_framebuffertexture2d(Cpu& c) {
 void g1_checkframebufferstatus(Cpu& c) {
     c.set_ret32(fbo<GLenum (*)(GLenum)>("glCheckFramebufferStatus",
                                         "glCheckFramebufferStatusEXT")(c.arg32(0)));
+}
+void gl_bindrenderbuffer(Cpu& c) {
+    fbo<bindfn>("glBindRenderbuffer", "glBindRenderbufferEXT")(c.arg32(0), c.arg32(1));
+}
+void gl_genrenderbuffers(Cpu& c) {
+    const GLsizei count = c.arg32(0);
+    std::vector<GLuint> names(std::max(count, 0));
+    fbo<genfn>("glGenRenderbuffers", "glGenRenderbuffersEXT")(count, names.data());
+    if (count > 0) c.write_mem(c.arg32(1), names.data(), count * sizeof(GLuint));
+}
+void gl_deleterenderbuffers(Cpu& c) {
+    const GLsizei count = c.arg32(0);
+    std::vector<GLuint> names(std::max(count, 0));
+    if (count > 0) c.read_mem(c.arg32(1), names.data(), count * sizeof(GLuint));
+    fbo<void (*)(GLsizei, const GLuint*)>("glDeleteRenderbuffers", "glDeleteRenderbuffersEXT")(count, names.data());
+}
+void gl_renderbufferstorage(Cpu& c) {
+    fbo<void (*)(GLenum, GLenum, GLsizei, GLsizei)>("glRenderbufferStorage", "glRenderbufferStorageEXT")(
+        c.arg32(0), c.arg32(1), c.arg32(2), c.arg32(3));
+}
+void gl_framebufferrenderbuffer(Cpu& c) {
+    fbo<void (*)(GLenum, GLenum, GLenum, GLuint)>("glFramebufferRenderbuffer", "glFramebufferRenderbufferEXT")(
+        c.arg32(0), c.arg32(1), c.arg32(2), c.arg32(3));
+}
+void gl_getrenderbufferparameter(Cpu& c) {
+    GLint value = 0;
+    fbo<void (*)(GLenum, GLenum, GLint*)>("glGetRenderbufferParameteriv", "glGetRenderbufferParameterivEXT")(
+        c.arg32(0), c.arg32(1), &value);
+    c.write_u32(c.arg32(2), value);
 }
 // buffers
 void g1_bindbuffer(Cpu& c) { host<bindfn>("glBindBuffer")(c.arg32(0), c.arg32(1)); }
@@ -1112,9 +1243,21 @@ void g1_getstring(Cpu& c) {
 // select the actual ES context when a runtime imports both API versions.
 constexpr uint32_t EGL_TRUE_ = 1, EGL_SUCCESS_ = 0x3000;
 uint32_t g_egl_error = EGL_SUCCESS_;
+uint32_t g_egl_current_context = 0;
 std::function<bool(int)> g_context_factory;
 void egl_true(Cpu& c) { c.set_ret32(EGL_TRUE_); }
 void egl_handle(Cpu& c) { c.set_ret32(1); } // nonzero display/surface/context
+void egl_makecurrent(Cpu& c) {
+    if (g_egl_current_context != c.arg32(3)) g_program_locations.clear();
+    g_egl_current_context = c.arg32(3);
+    c.set_ret32(EGL_TRUE_);
+}
+void egl_destroycontext(Cpu& c) {
+    g_program_locations.clear();
+    if (g_egl_current_context == c.arg32(1)) g_egl_current_context = 0;
+    c.set_ret32(EGL_TRUE_);
+}
+void egl_terminate(Cpu& c) { g_program_locations.clear(); g_egl_current_context = 0; c.set_ret32(EGL_TRUE_); }
 void egl_createcontext(Cpu& c) {
     int version = 1; // EGL's default client version
     const uint32_t attributes = c.arg32(3);
@@ -1126,6 +1269,7 @@ void egl_createcontext(Cpu& c) {
         }
     }
     const bool created = (version == 1 || version == 2) && (!g_context_factory || g_context_factory(version));
+    if (created && g_context_factory) g_program_locations.clear();
     if (!created) g_egl_error = 0x3009; // EGL_BAD_MATCH
     c.set_ret32(created ? 1 : 0);
 }
@@ -1308,6 +1452,7 @@ void gl_present_canvas(Cpu& cpu, uint32_t pixels, int width, int height) {
 #endif
 
 void register_gl() {
+    g_program_locations.clear();
     register_handler("glClearColor_2", gl_clearcolor);
     register_handler("glClear_2", gl_clear);
     register_handler("glViewport_2", gl_viewport);
@@ -1325,12 +1470,17 @@ void register_gl() {
     register_handler("glLinkProgram_2", gl_linkprogram);
     register_handler("glUseProgram_2", gl_useprogram);
     register_handler("glUniform1i_2", gl_uniform1i);
+    register_handler("glUniform1f_2", gl_uniform1f);
+    register_handler("glUniform2f_2", gl_uniform2f);
+    register_handler("glUniform4f_2", gl_uniform4f);
     register_handler("glDeleteShader_2", gl_deleteshader);
     register_handler("glDeleteProgram_2", gl_deleteprogram);
     register_handler("glGetString_2", gl_getstring);
     register_handler("glShaderSource_2", gl_shadersource);
     register_handler("glGetShaderiv_2", gl_getshaderiv);
     register_handler("glGetProgramiv_2", gl_getprogramiv);
+    register_handler("glGetShaderInfoLog_2", gl_shader_info_log);
+    register_handler("glGetProgramInfoLog_2", gl_program_info_log);
     register_handler("glGetAttribLocation_2", gl_getattriblocation);
     register_handler("glGetUniformLocation_2", gl_getuniformlocation);
     register_handler("glBindAttribLocation_2", gl_bindattriblocation);
@@ -1370,6 +1520,13 @@ void register_gl() {
     register_handler("glDeleteFramebuffers_2", g1_deleteframebuffers);
     register_handler("glFramebufferTexture2D_2", g1_framebuffertexture2d);
     register_handler("glCheckFramebufferStatus_2", g1_checkframebufferstatus);
+    register_handler("glBindRenderbuffer_2", gl_bindrenderbuffer);
+    register_handler("glGenRenderbuffers_2", gl_genrenderbuffers);
+    register_handler("glDeleteRenderbuffers_2", gl_deleterenderbuffers);
+    register_handler("glRenderbufferStorage_2", gl_renderbufferstorage);
+    register_handler("glFramebufferRenderbuffer_2", gl_framebufferrenderbuffer);
+    register_handler("glGetRenderbufferParameteriv_2", gl_getrenderbufferparameter);
+    register_handler("glReadPixels_2", gl_readpixels);
 
     // ---- GL ES 1.x fixed-function (FruitNinja) ----
     register_handler("glClear_1", g1_clear);
@@ -1471,11 +1628,12 @@ void register_gl() {
     register_handler("sglChooseConfig", egl_chooseconfig);
     register_handler("sglCreateWindowSurface", egl_handle);
     register_handler("sglCreateContext", egl_createcontext);
-    register_handler("sglMakeCurrent", egl_true);
+    register_handler("sglMakeCurrent", egl_makecurrent);
+    register_handler("sglGetCurrentContext", [](Cpu& c) { c.set_ret32(g_egl_current_context); });
     register_handler("sglSwapBuffers", egl_swapbuffers);
     register_handler("sglGetConfigAttrib", egl_getconfigattrib);
-    register_handler("sglTerminate", egl_true);
-    register_handler("sglDestroyContext", egl_true);
+    register_handler("sglTerminate", egl_terminate);
+    register_handler("sglDestroyContext", egl_destroycontext);
     register_handler("sglDestroySurface", egl_true);
 }
 } // namespace hle

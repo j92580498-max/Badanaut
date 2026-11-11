@@ -46,9 +46,8 @@ void osp_string_set(Cpu& c, uint32_t obj, const std::string& utf8);
 std::string osp_string_get(Cpu& c, uint32_t obj);
 void set_locale(const std::string& spec); // override reported system locale (--locale / BADA_LOCALE)
 
-// Per-frame pump (osp.cpp): fires the video player's OnPlayerEndOfClip listener
-// once a no-op clip has elapsed, so apps advance past intro movies. Needs a Cpu&
-// to re-enter the guest, so it's called from the frame loop (not a handler).
+// Deliver Player callbacks on the emulation thread, after host audio playback
+// or the short placeholder for unsupported intro videos completes.
 void player_pump(Cpu& cpu);
 void audio_pump(Cpu& cpu); // completed PCM buffers -> guest AudioOut listener
 void audio_pause(bool pause);
@@ -65,6 +64,7 @@ bool touch_multipoint_enabled(uint32_t source);
 // Associate the emulator-owned TouchEventInfo with this callback's contact.
 void touch_event_set(uint32_t object, uint32_t point_id, int x = 0, int y = 0);
 void set_package_root(const std::string& root); // .../FruitNinjaBada
+std::string resolve_package_path(const std::string& guest); // shared case-insensitive file lookup
 
 std::string demangle(const std::string& name);
 

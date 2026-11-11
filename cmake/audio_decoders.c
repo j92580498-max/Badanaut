@@ -1,0 +1,5 @@
+// Build the pinned, unmodified dr_libs memory decoders on every host.
+#define DR_MP3_IMPLEMENTATION
+#define DR_WAV_IMPLEMENTATION
+#include "dr_mp3.h"
+#include "dr_wav.h"

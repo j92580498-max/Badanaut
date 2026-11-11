@@ -10,6 +10,7 @@ third_party/cxxopts/LICENSE
 third_party/pugixml/LICENSE.md
 third_party/pvr/LICENSE.md
 third_party/tlsf/tlsf.h
+third_party/dr_libs/LICENSE
 third_party/unicorn/COPYING
 third_party/unicorn/COPYING.LGPL2
 third_party/unicorn/COPYING_GLIB

@@ -137,6 +137,15 @@ bool Cpu::init(ElfImage& image, std::string& err, ElfImage* lib) {
         err = std::string("uc_open: ") + uc_strerror(e);
         return false;
     }
+    // Unicorn defaults to a 1 GiB translation buffer on 64-bit hosts.
+    // A bounded cache can recycle translations without that reservation on
+    // phones sharing memory with Android and the graphics driver. Set it
+    // before the first register access initializes Unicorn's JIT.
+    e = uc_ctl_set_tcg_buffer_size(uc, uint32_t(64 * 1024 * 1024));
+    if (e) {
+        err = std::string("ARM translation buffer: ") + uc_strerror(e);
+        return false;
+    }
     try {
         watchdog_ = std::make_unique<Watchdog>(uc);
     } catch (const std::exception& ex) {
@@ -361,24 +370,23 @@ void Cpu::hook_code(uc_engine*, uint64_t addr, uint32_t, void* user) {
 static void synth_noop(Cpu& c) { c.set_ret32(0); }
 
 void Cpu::dispatch(uint32_t idx) {
-    if (idx < synth_base_) {
+    try {
         // A host exception escaping a handler would unwind through Unicorn and
         // kill the process with no context. Name the handler and stop cleanly.
-        try {
+        if (idx < synth_base_) {
             hle::call(slots_[idx], *this);
-        } catch (const std::exception& ex) {
-            printf("[hle] EXCEPTION in %s: %s\n", hle::demangle(slots_[idx]).c_str(), ex.what());
-            print_backtrace("bt");
-            set_ret32(0);
-            uc_emu_stop(uc);
+        } else {
+            uint32_t s = idx - synth_base_;
+            if (s < synth_.size() && synth_[s]) synth_[s](*this);
+            else set_ret32(0);
         }
-        return;
-    }
-    uint32_t s = idx - synth_base_; // synthetic vtable/method slot
-    if (s < synth_.size() && synth_[s]) {
-        synth_[s](*this);
-    } else {
+    } catch (const std::exception& ex) {
+        ++handler_failures_;
+        const std::string name = idx < synth_base_ ? hle::demangle(slots_[idx]) : "synthetic callback";
+        printf("[hle] EXCEPTION in %s: %s\n", name.c_str(), ex.what());
+        print_backtrace("bt");
         set_ret32(0);
+        uc_emu_stop(uc);
     }
 }
 
@@ -466,9 +474,11 @@ bool Cpu::run_slice(uint32_t addr, uint32_t& ret, uint64_t timeout_us) {
     // zero here disables Unicorn's busy polling timer; our worker owns the
     // deadline and reports expiry as failure instead of accepting partial init.
     if (timeout_us) watchdog_->arm(timeout_us);
+    const uint64_t previous_failures = handler_failures_;
     uc_err e = uc_emu_start(uc, addr, guest::HLE_RETURN, 0, 0);
     const bool expired = timeout_us && watchdog_->disarm();
-    if (e || expired) {
+    const bool handler_failed = handler_failures_ != previous_failures;
+    if (e || expired || handler_failed) {
         uint32_t pc;
         uc_reg_read(uc, UC_ARM_REG_PC, &pc);
         uint32_t poff = 0;
@@ -477,7 +487,8 @@ bool Cpu::run_slice(uint32_t addr, uint32_t& ret, uint64_t timeout_us) {
         if (!pn.empty()) {
             printf(" (%s+0x%x)", hle::demangle(pn).c_str(), poff);
         }
-        printf(": %s\n", expired ? "guest callback timed out" : uc_strerror(e));
+        printf(": %s\n", expired ? "guest callback timed out" :
+               handler_failed ? "HLE handler failed" : uc_strerror(e));
         static const int rr[] = {UC_ARM_REG_R0, UC_ARM_REG_R1, UC_ARM_REG_R2,
                                  UC_ARM_REG_R3, UC_ARM_REG_R4, UC_ARM_REG_R5, UC_ARM_REG_R6,
                                  UC_ARM_REG_R7, UC_ARM_REG_SP, UC_ARM_REG_LR};
@@ -800,6 +811,25 @@ const uint8_t* Cpu::memory_ptr(uint32_t a, uint32_t n) const {
         return nullptr;
     return static_cast<const uint8_t*>(heap_storage_) + (a - guest::HEAP_BASE);
 }
+bool Cpu::memory_mapped(uint32_t address, uint32_t length) const {
+    if (!length || memory_ptr(address, length)) return true;
+    const uint64_t end = static_cast<uint64_t>(address) + length;
+    if (end > uint64_t{1} << 32) return false;
+    uc_mem_region* regions = nullptr;
+    uint32_t count = 0;
+    if (uc_mem_regions(uc, &regions, &count) != UC_ERR_OK) return false;
+    uint64_t cursor = address;
+    while (cursor < end) {
+        uint64_t next = cursor;
+        for (uint32_t i = 0; i < count; ++i)
+            if (regions[i].begin <= cursor && regions[i].end >= cursor)
+                next = std::max(next, regions[i].end + 1);
+        if (next == cursor) break;
+        cursor = next;
+    }
+    uc_free(regions);
+    return cursor >= end;
+}
 void Cpu::read_mem(uint32_t a, void* d, uint32_t n) {
     if (!n) return;
     if (const auto* p = memory_ptr(a, n)) std::memcpy(d, p, n);
@@ -812,13 +842,19 @@ std::string Cpu::read_cstr(uint32_t a, uint32_t max) {
         return std::string(reinterpret_cast<const char*>(p), end ? end - p : max);
     }
     std::string s;
-    for (uint32_t i = 0; i < max; i++) {
-        uint8_t c = 0;
-        if (uc_mem_read(uc, a + i, &c, 1) != UC_ERR_OK) break;
-        if (!c) {
-            break;
-        }
-        s.push_back((char)c);
+    // Shader and attribute names often live in the executable's read-only
+    // pages. Read bounded chunks instead of entering Unicorn for every byte;
+    // keep each read inside a page so a trailing unmapped page remains safe.
+    std::array<char, 256> bytes;
+    const uint64_t end = std::min(static_cast<uint64_t>(a) + max, uint64_t{1} << 32);
+    for (uint64_t cursor = a; cursor < end;) {
+        const uint32_t size = static_cast<uint32_t>(std::min({end - cursor,
+            uint64_t{bytes.size()}, uint64_t{4096} - (cursor & 4095)}));
+        if (uc_mem_read(uc, cursor, bytes.data(), size) != UC_ERR_OK) break;
+        const auto* terminator = static_cast<const char*>(std::memchr(bytes.data(), 0, size));
+        s.append(bytes.data(), terminator ? static_cast<size_t>(terminator - bytes.data()) : size);
+        if (terminator) break;
+        cursor += size;
     }
     return s;
 }

@@ -1,6 +1,8 @@
 #include "cpu.h"
 #include "dispatch.h"
+#include <SDL2/SDL.h>
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <cmath>
 #include <cstdlib>
@@ -8,6 +10,7 @@
 #include <ctime>
 #include <functional>
 #include <string>
+#include <stdexcept>
 #include <vector>
 
 // Forward libc/libm/__aeabi_*/heap imports to the host runtime, operating on
@@ -42,9 +45,17 @@ void h_new(Cpu& c) { c.set_ret32(c.alloc(c.arg32(0))); }
 void h_free(Cpu& c) { c.free(c.arg32(0)); }
 
 // ---- mem* ----
+void require_memory(Cpu& c, uint32_t address, uint32_t length, const char* operation) {
+    if (c.memory_mapped(address, length)) return;
+    char message[160];
+    snprintf(message, sizeof message, "%s: unmapped guest range at 0x%x (%u bytes)", operation, address, length);
+    throw std::runtime_error(message);
+}
 void h_memcpy(Cpu& c) {
     uint32_t d = c.arg32(0), s = c.arg32(1), n = c.arg32(2);
     if (n) {
+        require_memory(c, d, n, "memcpy destination");
+        require_memory(c, s, n, "memcpy source");
         // As in touchHLE's guest-memory transfers, use a checked host view
         // when the source is directly mapped. Nova copies small mesh/string
         // buffers thousands of times per frame; staging each one allocates
@@ -56,9 +67,15 @@ void h_memcpy(Cpu& c) {
             c.write_mem(d, source, n);
         } else {
             // Also preserves memmove's overlapping-buffer semantics.
-            std::vector<uint8_t> b(n);
-            c.read_mem(s, b.data(), n);
-            c.write_mem(d, b.data(), n);
+            std::vector<uint8_t> b(std::min(n, uint32_t{64 * 1024}));
+            const bool backwards = d > s && !separate;
+            for (uint32_t copied = 0; copied < n;) {
+                const uint32_t size = std::min<uint32_t>(b.size(), n - copied);
+                const uint32_t offset = backwards ? n - copied - size : copied;
+                c.read_mem(s + offset, b.data(), size);
+                c.write_mem(d + offset, b.data(), size);
+                copied += size;
+            }
         }
     }
     c.set_ret32(d);
@@ -80,22 +97,61 @@ void h_wcscmp(Cpu& c) {
         if (!left) { c.set_ret32(0); return; }
     }
 }
+void h_mbstowcs(Cpu& c) {
+    // Bada stores wchar_t as UTF-16, including on hosts with 32-bit wchar_t.
+    const uint32_t destination = c.arg32(0), capacity = c.arg32(2);
+    if (destination && !capacity) { c.set_ret32(0); return; }
+    const std::string source = c.read_cstr(c.arg32(1));
+    const size_t units = destination ? std::min<size_t>(capacity, source.size() + 1) : source.size() + 1;
+    std::vector<uint16_t> converted(units);
+    SDL_iconv_t converter = SDL_iconv_open("UTF-16LE", "UTF-8");
+    if (converter == (SDL_iconv_t)-1) { c.set_ret32(uint32_t(-1)); return; }
+    const char* input = source.c_str();
+    size_t input_left = source.size() + 1, output_left = converted.size() * 2;
+    char* output = reinterpret_cast<char*>(converted.data());
+    const size_t status = SDL_iconv(converter, &input, &input_left, &output, &output_left);
+    SDL_iconv_close(converter);
+    if (status == SDL_ICONV_EILSEQ || status == SDL_ICONV_EINVAL || status == SDL_ICONV_ERROR) {
+        c.set_ret32(uint32_t(-1));
+        return;
+    }
+    const uint32_t written = static_cast<uint32_t>(converted.size() - output_left / 2);
+    if (destination && written) c.write_mem(destination, converted.data(), written * 2);
+    c.set_ret32(written && !converted[written - 1] ? written - 1 : written);
+}
 void h_memset(Cpu& c) {
     uint32_t d = c.arg32(0), v = c.arg32(1), n = c.arg32(2);
     if (n) {
-        std::vector<uint8_t> b(n, (uint8_t)v);
-        c.write_mem(d, b.data(), n);
+        require_memory(c, d, n, "memset");
+        std::array<uint8_t, 64 * 1024> bytes;
+        const uint32_t chunk = std::min<uint32_t>(bytes.size(), n);
+        std::fill_n(bytes.data(), chunk, static_cast<uint8_t>(v));
+        for (uint32_t offset = 0; offset < n;) {
+            const uint32_t size = std::min(chunk, n - offset);
+            c.write_mem(d + offset, bytes.data(), size);
+            offset += size;
+        }
     }
     c.set_ret32(d);
 }
 void h_memcmp(Cpu& c) {
     uint32_t a = c.arg32(0), b = c.arg32(1), n = c.arg32(2);
-    std::vector<uint8_t> x(n), y(n);
-    if (n) {
-        c.read_mem(a, x.data(), n);
-        c.read_mem(b, y.data(), n);
+    if (!n) { c.set_ret32(0); return; }
+    require_memory(c, a, n, "memcmp left");
+    require_memory(c, b, n, "memcmp right");
+    const uint8_t* left = c.memory_ptr(a, n);
+    const uint8_t* right = c.memory_ptr(b, n);
+    if (left && right) { c.set_ret32(memcmp(left, right, n)); return; }
+    std::vector<uint8_t> x(std::min(n, uint32_t{64 * 1024})), y(x.size());
+    for (uint32_t offset = 0; offset < n;) {
+        const uint32_t size = std::min<uint32_t>(x.size(), n - offset);
+        c.read_mem(a + offset, x.data(), size);
+        c.read_mem(b + offset, y.data(), size);
+        const int result = memcmp(x.data(), y.data(), size);
+        if (result) { c.set_ret32(result); return; }
+        offset += size;
     }
-    c.set_ret32((uint32_t)memcmp(x.data(), y.data(), n));
+    c.set_ret32(0);
 }
 
 // ---- str* ----
@@ -640,6 +696,7 @@ void register_libc() {
     register_handler("memcpy", h_memcpy);
     register_handler("memmove", h_memmove);
     register_handler("wcscmp", h_wcscmp);
+    register_handler("mbstowcs", h_mbstowcs);
     register_handler("memset", h_memset);
     register_handler("memcmp", h_memcmp);
     register_handler("strlen", h_strlen);

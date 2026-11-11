@@ -12,6 +12,7 @@ include("${REPO_ROOT}/cmake/Dependencies.cmake")
 badanaut_add_sdl()
 badanaut_add_unicorn()
 badanaut_add_support_libraries()
+badanaut_add_audio_decoders()
 
 add_library(bada-android SHARED
     "${BADA_ROOT}/main.cpp"
@@ -47,6 +48,7 @@ target_link_libraries(bada-android PRIVATE
     bada-cxxopts
     bada-pvr
     bada-tlsf
+    bada-audio-decoders
     android
     log
     GLESv1_CM

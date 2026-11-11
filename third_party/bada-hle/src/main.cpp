@@ -737,12 +737,10 @@ int main(int argc, char** argv) {
          cxxopts::value<std::string>()->default_value(""))   //
         ("libstdcxx", "guest libstdc++.so to map (or env BADA_LIBSTDCXX); found automatically if omitted",
          cxxopts::value<std::string>()->default_value(""))   //
-        ("resolution", "presentation size: native, 240x400, 480x800, 540x960, 720x1280, 1080x1920",
-         cxxopts::value<std::string>()->default_value("native"))
         ("scaling", "fit or integer", cxxopts::value<std::string>()->default_value("fit"))
         ("filter", "Canvas filtering: nearest or linear", cxxopts::value<std::string>()->default_value("nearest"))
         ("vsync", "synchronize presentation", cxxopts::value<bool>()->default_value("true"))
-        ("fullscreen", "start games fullscreen (default: windowed)", cxxopts::value<bool>()->default_value("false"))
+        ("fullscreen", "start games fullscreen", cxxopts::value<bool>()->default_value("true"))
         ("h,help", "show this help");
 #ifdef __ANDROID__
     opts.add_options()("log-file", "capture native diagnostics", cxxopts::value<std::string>()->default_value(""));
@@ -753,7 +751,7 @@ int main(int argc, char** argv) {
 
     std::string input, appid, locale, libstdcxx;
     int max_frames = 0;
-    bool fullscreen = false, vsync = true;
+    bool fullscreen = true, vsync = true;
     try {
         auto res = opts.parse(argc, argv);
 #ifdef __ANDROID__
@@ -771,15 +769,6 @@ int main(int argc, char** argv) {
         libstdcxx = res["libstdcxx"].as<std::string>();
         fullscreen = res["fullscreen"].as<bool>();
         vsync = res["vsync"].as<bool>();
-        const auto resolution = res["resolution"].as<std::string>();
-        if (resolution != "native") {
-            const std::vector<std::string> presets = {"240x400", "480x800", "540x960", "720x1280", "1080x1920"};
-            if (std::find(presets.begin(), presets.end(), resolution) == presets.end())
-                throw std::invalid_argument("Unsupported resolution");
-            const auto split = resolution.find('x');
-            display::output_width = std::stoi(resolution.substr(0, split));
-            display::output_height = std::stoi(resolution.substr(split + 1));
-        }
         const auto scaling = res["scaling"].as<std::string>();
         const auto filter = res["filter"].as<std::string>();
         if (scaling != "fit" && scaling != "integer") throw std::invalid_argument("Unsupported scaling");
@@ -873,8 +862,8 @@ int main(int argc, char** argv) {
     }
     if (SDL_GL_SetSwapInterval(vsync ? 1 : 0) != 0)
         printf("[display] swap interval unavailable: %s\n", SDL_GetError());
-    printf("[display] resolution=%dx%d scaling=%s filter=%s vsync=%d fullscreen=%d\n",
-           display::output_width, display::output_height, display::integer_scaling ? "integer" : "fit",
+    printf("[display] scaling=%s filter=%s vsync=%d fullscreen=%d\n",
+           display::integer_scaling ? "integer" : "fit",
            display::smooth ? "linear" : "nearest", vsync, fullscreen);
     printf("[gl] vendor=%s renderer=%s\n", glGetString(GL_VENDOR), glGetString(GL_RENDERER));
     printf("[gl] version=%s\n", glGetString(GL_VERSION));

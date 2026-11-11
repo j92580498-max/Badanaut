@@ -13,11 +13,8 @@ int main() {
     assert(small.width == 240 && small.height == 400);
     auto landscape = display::content_rect(800, 480, 1700, 1000);
     assert(landscape.width == 1600 && landscape.height == 960 && landscape.x == 50 && landscape.y == 20);
-    // Android output presets cap physical presentation without resizing a device.
+    // Presentation fills the available area while preserving the guest aspect ratio.
     display::integer_scaling = false;
-    display::output_width = 240; display::output_height = 400;
-#ifdef __ANDROID__
-    auto capped = display::content_rect(480, 800, 1080, 1920);
-    assert(capped.width == 240 && capped.height == 400 && capped.x == 420 && capped.y == 760);
-#endif
+    auto portrait = display::content_rect(480, 800, 1080, 1920);
+    assert(portrait.width == 1080 && portrait.height == 1800 && portrait.x == 0 && portrait.y == 60);
 }

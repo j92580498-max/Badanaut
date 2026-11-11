@@ -5,9 +5,8 @@ import org.json.JSONObject
 import java.io.File
 
 object DisplaySettings {
-    private val defaults = JSONObject("""{"resolution":"native","scaling":"fit","filter":"nearest","vsync":true,"fullscreen":false,"iconStyle":"glossy"}""")
+    private val defaults = JSONObject("""{"scaling":"fit","filter":"nearest","vsync":true,"fullscreen":true,"iconStyle":"glossy"}""")
     private val choices = mapOf(
-        "resolution" to listOf("native", "240x400", "480x800", "540x960", "720x1280", "1080x1920"),
         "scaling" to listOf("fit", "integer"), "filter" to listOf("nearest", "linear"), "iconStyle" to listOf("glossy", "flat"),
     )
 
@@ -31,8 +30,7 @@ object DisplaySettings {
     }
 
     fun arguments(context: Context): Array<String> = load(context).let {
-        arrayOf("--resolution", it.getString("resolution"), "--scaling", it.getString("scaling"),
-            "--filter", it.getString("filter"), "--vsync=${it.getBoolean("vsync")}") +
-            if (it.getBoolean("fullscreen")) arrayOf("--fullscreen") else emptyArray()
+        arrayOf("--scaling", it.getString("scaling"), "--filter", it.getString("filter"),
+            "--vsync=${it.getBoolean("vsync")}", "--fullscreen=${it.getBoolean("fullscreen")}")
     }
 }

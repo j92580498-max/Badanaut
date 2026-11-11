@@ -10,7 +10,7 @@ The Android APK hosts the same offline library and settings interface as Windows
 4. `BadaActivity` extends SDL2's `SDLActivity`, loads `libSDL2.so`, `libunicorn.so`, and `libmain.so`, and passes the selected package path, guest runtime path and AppId to the native entry point. It runs in the `:bada` process, which exits when the activity is destroyed so each launch starts with fresh native globals.
 5. The Android CMake target compiles `third_party/bada-hle/src` and links SDL2, Unicorn, GLESv2, pugixml, cxxopts, TLSF and the PowerVR texture decoder. `cmake/Dependencies.cmake` builds pinned upstream submodules, including Unicorn 2.1.4, directly for both Android ABIs. Gradle reads SDL Java sources from the SDL2 submodule and ignores legacy `jniLibs` outputs.
 
-Display preferences in `filesDir/bada/display.json` are passed to the native engine. Output presets limit the presentation area in physical pixels, preserving guest dimensions and aspect ratio. Rendering and touches use the same rectangle. Canvas filtering, whole-pixel scaling, vsync and optional fullscreen apply at the next launch. New optional game metadata fields are `icon` and `last_played`; existing installations remain valid.
+Display preferences in `filesDir/bada/display.json` are passed to the native engine. Presentation fits the available screen, preserving guest dimensions and aspect ratio. Rendering and touches use the same rectangle. Canvas filtering, whole-pixel scaling, vsync and fullscreen apply at the next launch. Fullscreen defaults to On and remains user-changeable; existing saved choices are preserved. New optional game metadata fields are `icon` and `last_played`; existing installations remain valid.
 
 ## Local game assets
 

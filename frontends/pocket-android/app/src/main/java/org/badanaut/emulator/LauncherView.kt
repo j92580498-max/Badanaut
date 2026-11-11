@@ -219,7 +219,6 @@ class LauncherView(context: Context, private val request: (JSONObject) -> Unit) 
             key.startsWith("game:") -> send("launch", JSONObject().put("id", key.substring(5)))
             key == "more" -> menuOpen = !menuOpen
             key == "settings" -> { draft = JSONObject(settings.toString()); navigate("settings") }
-            key == "copyright" -> navigate("copyright")
             key == "back" -> navigate(when (screen) { "choices" -> "settings"; "remove" -> "details"; "message" -> returnScreen; else -> "library" })
             key.startsWith("setting:") -> { choice = options().first { it.getString("key") == key.substring(8) }; navigate("choices") }
             key.startsWith("value:") -> { draft.put(choice!!.getString("key"), choice!!.getJSONArray("choices").get(key.substring(6).toInt())); navigate("settings") }
@@ -364,7 +363,7 @@ class LauncherView(context: Context, private val request: (JSONObject) -> Unit) 
                 text(canvas, spec.getString("emptyHint"), RectF(10f, 240f, 310f, 290f), 12, center = true, wrap = true)
             }
         } else {
-            val title = when (screen) { "settings" -> "Settings"; "copyright" -> "Copyright info"; "details" -> "Game details"; "choices" -> choice!!.getString("label"); "remove" -> "Remove game?"; else -> "Badanaut" }
+            val title = when (screen) { "settings" -> "Settings"; "details" -> "Game details"; "choices" -> choice!!.getString("label"); "remove" -> "Remove game?"; else -> "Badanaut" }
             text(canvas, title, RectF(90f, 10f, 310f, 38f), 16, true)
             when (screen) {
                 "settings" -> {
@@ -372,7 +371,6 @@ class LauncherView(context: Context, private val request: (JSONObject) -> Unit) 
                     text(canvas, if (runtimeReady) "Runtime installed" else "Bada runtime needed", RectF(10f, 261f, 310f, 277f), 11, true)
                     text(canvas, spec.getString("settingsHelp"), RectF(10f, 360f, 310f, 422f), 11, wrap = true)
                 }
-                "copyright" -> text(canvas, spec.getString("copyrightText"), RectF(10f, 56f, 310f, 444f), 13, wrap = true, top = true)
                 "details", "remove" -> selected?.let { game ->
                     icon(canvas, game, RectF(131f, 62f, 189f, 120f))
                     text(canvas, game.getString("name"), RectF(10f, 129f, 310f, 167f), 16, true, center = true, wrap = true)

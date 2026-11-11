@@ -6,10 +6,11 @@ and Liberation Sans fonts come from `../shared-ui/`; no browser is required.
 The library opens in a decorated, resizable 320×480 window. Enlarging it scales
 and centers the reference layout, keeping four columns and 16 games per page.
 Horizontal swipes move between pages, with dots showing the current page.
-The top-right ⋮ menu contains Open file manager, Copyright info and Settings.
+The top-right ⋮ menu contains Open file manager and Settings.
 
 PySide6 handles local file selection and starts the Bada SDL/OpenGL engine in a
-separate windowed process. Game windows can be resized; F11 toggles fullscreen.
+separate process. Games start fullscreen by default; the setting can be turned
+Off for resizable game windows. F11 toggles fullscreen.
 
 ## Build and run
 
@@ -70,12 +71,12 @@ The layout follows the reference from
 [touchHLE / HyperHLE-Reborn](https://github.com/KlugKlugTG/HyperHLE-Reborn).
 No source or game artwork from that project is bundled.
 
-Settings apply on the next launch. Resolution controls the presentation window,
-with orientation following the game and large windows constrained to the monitor.
-The guest keeps its original dimensions. Whole-pixel scaling keeps integer
+Settings apply on the next launch. Presentation follows the game's orientation
+and fits the available screen. The guest keeps its original dimensions. Whole-pixel scaling keeps integer
 multiples where the display is large enough, falling back to fitting on smaller
 displays. Filtering affects Canvas output, leaving the game's own GL texture
-choices intact. Vsync depends on driver support. Fullscreen is optional.
+choices intact. Vsync depends on driver support. Fullscreen starts On by default;
+existing saved choices are preserved.
 
 The library uses the OS application-data directory (`Badanaut/bada`), with
 `games/<id>/.badanaut-game.json`, `display.json`, and a separate runtime file.

@@ -25,6 +25,10 @@ class BadaPackageTest {
         this[18] = 40
     }
 
+    private fun png(): ByteArray = java.util.Base64.getDecoder().decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAFklEQVR4nGOUW3CHgYGBiYGBgYGBAQASpAGenRzoTAAAAABJRU5ErkJggg==",
+    )
+
     private fun archive(vararg entries: Pair<String, ByteArray>): ByteArray {
         val bytes = ByteArrayOutputStream()
         ZipOutputStream(bytes).use { zip ->
@@ -151,13 +155,40 @@ class BadaPackageTest {
         val directory = extract(
             "Bin/SkyForce.exe" to elf(),
             "Info/Appinfo.sys" to "<Application AppId=\"sky\" Name=\"SkyForce\"><Icon/></Application>".toByteArray(),
-            "Res/SKYFORCE.PNG" to byteArrayOf(1, 2, 3),
-            "Res/Splash.png" to byteArrayOf(4, 5, 6),
+            "Res/SKYFORCE.PNG" to png(),
+            "Res/Splash.png" to png(),
         )
         val details = BadaPackage.inspect(directory)
         assertEquals(File(directory, "Res/SKYFORCE.PNG"), BadaPackage.iconFile(directory, details.icon, details.executable.path))
-        val custom = File(directory, "_badanaut-icon.png").apply { writeBytes(byteArrayOf(7)) }
+        val custom = File(directory, "_badanaut-icon.png").apply { writeBytes(png()) }
         assertEquals(custom, BadaPackage.iconFile(directory, details.icon, details.executable.path))
+    }
+
+    @Test fun iconMetadataResolvesNestedPathsWithoutCaseSensitivity() {
+        val directory = extract(
+            "Bin/Test.exe" to elf(),
+            "Info/Appinfo.sys" to "<Application AppId=\"test\"><Icon>RES\\ICONS\\MENU.PNG</Icon></Application>".toByteArray(),
+            "Res/Icons/Menu.png" to png(),
+        )
+        val details = BadaPackage.inspect(directory)
+        assertEquals(File(directory, "Res/Icons/Menu.png"), BadaPackage.iconFile(directory, details.icon, details.executable.path))
+    }
+
+    @Test fun missingIconMetadataFindsNestedArtworkInExistingPackages() {
+        val directory = extract(
+            "Bin/Test.exe" to elf(),
+            "Info/Appinfo.sys" to "<Application AppId=\"test\"/>".toByteArray(),
+            "Res/Icons/MainMenu.png" to png(),
+        )
+        assertEquals(File(directory, "Res/Icons/MainMenu.png"), BadaPackage.iconFile(directory, executable = "Bin/Test.exe"))
+        File(directory, "_badanaut-icon.png").writeText("not an image")
+        assertEquals(File(directory, "Res/Icons/MainMenu.png"), BadaPackage.iconFile(directory, executable = "Bin/Test.exe"))
+    }
+
+    @Test fun iconMetadataCannotEscapeThePackage() {
+        val directory = extract("Res/icon.png" to png())
+        val outside = File(directory.parentFile, "outside.png").apply { writeBytes(png()) }
+        assertEquals(File(directory, "Res/icon.png"), BadaPackage.iconFile(directory, "../${outside.name}"))
     }
 
     @Test fun boundsRuntimeCopy() {

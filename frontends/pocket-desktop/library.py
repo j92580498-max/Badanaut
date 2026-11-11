@@ -12,9 +12,8 @@ import uuid
 import xml.etree.ElementTree as ET
 import zipfile
 
-RESOLUTIONS = ("native", "240x400", "480x800", "540x960", "720x1280", "1080x1920")
-DEFAULTS = dict(resolution="native", scaling="fit", filter="nearest", vsync=True,
-                fullscreen=False, iconStyle="glossy")
+DEFAULTS = dict(scaling="fit", filter="nearest", vsync=True,
+                fullscreen=True, iconStyle="glossy")
 ENTRY = ".badanaut-game.json"
 MAX_BYTES = 512 * 1024 * 1024
 MAX_ICON = 2 * 1024 * 1024
@@ -22,7 +21,7 @@ MAX_ICON = 2 * 1024 * 1024
 
 def settings(values):
     result = {**DEFAULTS, **{k: v for k, v in values.items() if k in DEFAULTS}}
-    for key, options in {"resolution": RESOLUTIONS, "scaling": ("fit", "integer"),
+    for key, options in {"scaling": ("fit", "integer"),
                          "filter": ("nearest", "linear"), "iconStyle": ("glossy", "flat")}.items():
         if result[key] not in options:
             raise ValueError(f"Unsupported {key}")
@@ -217,10 +216,8 @@ class Library:
             raise ValueError("Select a Bada runtime before launching")
         config = self.get_settings()
         args = ["--input", str(directory), "--libstdcxx", str(runtime), "--app-id", data["app_id"],
-                "--resolution", config["resolution"], "--scaling", config["scaling"], "--filter", config["filter"],
-                "--vsync=" + str(config["vsync"]).lower()]
-        if config["fullscreen"]:
-            args.append("--fullscreen")
+                "--scaling", config["scaling"], "--filter", config["filter"],
+                "--vsync=" + str(config["vsync"]).lower(), "--fullscreen=" + str(config["fullscreen"]).lower()]
         return args
 
     def played(self, game_id):

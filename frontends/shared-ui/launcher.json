@@ -1,7 +1,7 @@
 {
   "width": 320,
   "height": 480,
-  "version": "Badanaut v0.8.0",
+  "version": "Badanaut v1.0",
   "background": "#000000",
   "labelColor": "#aaaaaa",
   "tileColor": "#292929",
@@ -30,26 +30,6 @@
   "emptyText": "Open the menu to add a Bada game ZIP.\nSelect the Bada runtime in Settings.",
   "emptyHint": "Right-click or hold a game for details.",
   "settings": [
-    {
-      "key": "resolution",
-      "label": "Screen resolution",
-      "choices": [
-        "native",
-        "240x400",
-        "480x800",
-        "540x960",
-        "720x1280",
-        "1080x1920"
-      ],
-      "names": [
-        "Game default",
-        "240 × 400",
-        "480 × 800",
-        "540 × 960",
-        "720 × 1280",
-        "1080 × 1920"
-      ]
-    },
     {
       "key": "scaling",
       "label": "Screen scaling",
@@ -90,17 +70,16 @@
       "key": "fullscreen",
       "label": "Start games fullscreen",
       "choices": [
-        false,
-        true
+        true,
+        false
       ],
       "names": [
-        "Off",
-        "On"
+        "On",
+        "Off"
       ]
     }
   ],
-  "settingsHelp": "Changes apply when a game starts. Resolution sets the output size; the game keeps its original screen dimensions. Desktop games start in a resizable window. F11 toggles fullscreen.",
-  "copyrightText": "Badanaut — Samsung Bada OS emulator\n\nBada HLE engine: mariotaku/bada-hle contributors. See UPSTREAM.md for attribution.\n\nLauncher design inspired by touchHLE and HyperHLE-Reborn. Written for Badanaut; no upstream game artwork is bundled.\n\nDesktop: Qt / PySide6 (LGPL / GPL / commercial), PyInstaller (GPL with bootloader exception).\n\nLiberation Sans: SIL Open Font License 1.1.\n\nSee THIRD_PARTY_NOTICES.md and the bundled license files for component licenses.",
+  "settingsHelp": "Changes apply when a game starts. Games start fullscreen by default. The game keeps its original screen dimensions. F11 toggles fullscreen on desktop.",
   "menu": {
     "trigger": [
       280,
@@ -112,7 +91,7 @@
       110,
       30,
       200,
-      108
+      72
     ],
     "itemHeight": 36,
     "background": "#292929",
@@ -121,10 +100,6 @@
       {
         "id": "importGame",
         "text": "Open file manager"
-      },
-      {
-        "id": "copyright",
-        "text": "Copyright info"
       },
       {
         "id": "settings",

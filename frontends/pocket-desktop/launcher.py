@@ -190,8 +190,6 @@ class Launcher(QWidget):
         elif key == "settings":
             self.draft = dict(self.settings)
             self.navigate("settings")
-        elif key == "copyright":
-            self.navigate("copyright")
         elif key == "back":
             self.navigate({"choices": "settings", "remove": "details", "message": self.return_screen}.get(self.screen, "library"))
         elif key.startswith("setting:"):
@@ -358,15 +356,13 @@ class Launcher(QWidget):
                 self.text(painter, self.layout["emptyText"], QRectF(24, 136, 272, 90), 15, align=Qt.AlignCenter, wrap=True)
                 self.text(painter, self.layout["emptyHint"], QRectF(10, 240, 300, 50), 12, align=Qt.AlignCenter, wrap=True)
         else:
-            title = {"settings": "Settings", "copyright": "Copyright info", "details": "Game details", "choices": self.choice["label"] if self.choice else "", "remove": "Remove game?", "message": "Badanaut"}[self.screen]
+            title = {"settings": "Settings", "details": "Game details", "choices": self.choice["label"] if self.choice else "", "remove": "Remove game?", "message": "Badanaut"}[self.screen]
             self.text(painter, title, QRectF(90, 10, 220, 28), 16, True)
             if self.screen == "settings":
                 for i, option in enumerate(self.layout["settings"]):
                     self.text(painter, option["label"], QRectF(10, 56 + 42 * i, 144, 30), 12, True, wrap=True)
                 self.text(painter, "Runtime installed" if self.runtime_ready else "Bada runtime needed", QRectF(10, 261, 300, 16), 11, True)
                 self.text(painter, self.layout["settingsHelp"], QRectF(10, 360, 300, 62), 11, wrap=True)
-            elif self.screen == "copyright":
-                self.text(painter, self.layout["copyrightText"], QRectF(10, 56, 300, 388), 13, align=Qt.AlignLeft | Qt.AlignTop, wrap=True)
             elif self.screen in ("details", "remove") and self.selected:
                 self.icon(painter, self.selected, QRectF(131, 62, 58, 58))
                 self.text(painter, self.selected["name"], QRectF(10, 129, 300, 38), 16, True, align=Qt.AlignCenter, wrap=True)

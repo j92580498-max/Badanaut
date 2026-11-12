@@ -2,6 +2,13 @@ THIRD_PARTY_NOTICES.md
 LICENSE
 LICENSE-MIT
 LICENSE-APACHE
+bada_libs/README.md
+bada_libs/SOURCE.md
+bada_libs/COPYING.libgcc
+bada_libs/COPYING.libstdcxx
+bada_libs/COPYING.RUNTIME
+bada_libs/manifest.json
+bada_libs/SHA256SUMS
 third_party/README.md
 third_party/bada-hle/UPSTREAM.md
 third_party/SDL2/LICENSE.txt

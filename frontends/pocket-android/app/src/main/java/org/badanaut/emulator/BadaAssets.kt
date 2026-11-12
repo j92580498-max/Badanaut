@@ -13,10 +13,16 @@ import java.util.UUID
 
 /** Installs and manages Samsung bada packages and their guest runtime. */
 object BadaAssets {
-    data class Installation(val packageDirectory: File, val runtimeLibrary: File, val appId: String)
+    data class Installation(val packageDirectory: File, val runtimeLibrary: File, val appId: String,
+                            val exceptionLibrary: File? = null, val cxxSupportLibrary: File? = null)
 
     private const val ENTRY_FILE = ".badanaut-game.json"
     private const val BUNDLED_ID = "bundled-sky-force"
+
+    private fun prepareBundledRuntimes(context: Context) {
+        val checksums = context.assets.open("bada_libs/SHA256SUMS").bufferedReader().use { it.readText() }
+        BadaRuntime.installBundled(root(context), checksums) { name -> context.assets.open("bada_libs/$name") }
+    }
 
     private fun root(context: Context) = File(context.filesDir, "bada").also {
         if (!it.isDirectory && !it.mkdirs()) throw IOException("Could not create Bada library")
@@ -55,6 +61,7 @@ object BadaAssets {
                 directory = directory.absolutePath,
                 appId = metadata.getString("app_id"),
                 lastPlayed = metadata.optLong("last_played", 0),
+                apiVersion = metadata.optString("api_version"),
             )
         }.getOrNull() }.sortedByDescending { it.importedAt }
 
@@ -88,10 +95,13 @@ object BadaAssets {
             put("source", source)
             put("imported_at", System.currentTimeMillis() / 1000)
             put("icon", details.icon)
+            put("api_version", details.apiVersion)
+            put("float_abi", details.floatAbi)
         }.toString())
     }
 
-    fun hasRuntime(context: Context): Boolean = BadaPackage.isArmElf(File(root(context), "libstdc++.so.6"))
+    fun hasRuntime(context: Context): Boolean = BadaRuntime.entries(root(context)).isNotEmpty() ||
+        runCatching { context.assets.open("bada_libs/SHA256SUMS").use { it.read() >= 0 } }.getOrDefault(false)
 
     @Synchronized
     fun importRuntime(context: Context, uri: Uri) {
@@ -100,7 +110,7 @@ object BadaAssets {
             val input = context.contentResolver.openInputStream(uri) ?: throw IOException("Could not open Bada runtime")
             BadaPackage.copyLimited(input, temporary, BadaPackage.MAX_RUNTIME_BYTES)
             if (!BadaPackage.isArmElf(temporary)) throw IOException(context.getString(R.string.bada_invalid_runtime))
-            if (!temporary.renameTo(File(root(context), "libstdc++.so.6"))) throw IOException("Could not install Bada runtime")
+            BadaRuntime.install(root(context), temporary)
         } finally {
             temporary.delete()
         }
@@ -117,9 +127,10 @@ object BadaAssets {
             !BadaPackage.isArmElf(executable) || !File(directory, "Info").isDirectory || appId.isBlank()) {
             throw IOException("The installed Bada package is incomplete")
         }
-        val runtime = File(root(context), "libstdc++.so.6")
-        if (!BadaPackage.isArmElf(runtime)) throw IOException(context.getString(R.string.bada_runtime_needed))
-        return Installation(directory, runtime, appId)
+        prepareBundledRuntimes(context)
+        val runtime = BadaRuntime.select(root(context), executable)
+        return Installation(directory, runtime, appId, BadaRuntime.optional(root(context), executable, BadaRuntime.GCC),
+                            BadaRuntime.optional(root(context), executable, BadaRuntime.SUPCXX))
     }
 
     @Synchronized

@@ -116,5 +116,5 @@ jobs:
           ## Android APK
           Download **Badanaut-Android** from the **Artifacts** section of this run, unzip it and install **Badanaut-Android.apk** on your phone.
 
-          The APK contains the Bada engine for **arm64-v8a** and **armeabi-v7a**. Import your game ZIP and select a compatible Bada **libstdc++.so.6** runtime.
+          The APK contains the Bada engine for **arm64-v8a** and **armeabi-v7a**, with GNU guest runtimes for both float ABIs. Import your game ZIP; runtime selection is automatic.
           SUMMARY

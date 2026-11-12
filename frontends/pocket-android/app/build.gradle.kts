@@ -20,8 +20,22 @@ val prepareNotices by tasks.registering(Copy::class) {
     }
 }
 
+val runtimeAssetRoot = layout.buildDirectory.dir("generated/runtimeAssets")
+val prepareBadaLibraries by tasks.registering(Copy::class) {
+    val bundle = rootProject.projectDir.resolve("../../bada_libs")
+    from(bundle)
+    into(runtimeAssetRoot.map { it.dir("bada_libs") })
+    doFirst {
+        listOf("soft-float", "hard-float").forEach { abi ->
+            listOf("libstdc++.so.6", "libgcc_s.so.1", "libsupc++.so").forEach { library ->
+                check(bundle.resolve("$abi/$library").isFile) { "Missing bundled Bada runtime: $abi/$library" }
+            }
+        }
+    }
+}
+
 tasks.named("preBuild") {
-    dependsOn(prepareNotices)
+    dependsOn(prepareNotices, prepareBadaLibraries)
 }
 
 android {
@@ -64,6 +78,7 @@ android {
     sourceSets.getByName("main") {
         assets.srcDir("../../shared-ui")
         assets.srcDir(noticeAssetRoot)
+        assets.srcDir(runtimeAssetRoot)
         java.srcDir("../../../third_party/SDL2/android-project/app/src/main/java")
         // Native libraries are built by CMake; ignore generated files from older builds.
         jniLibs.setSrcDirs(emptyList<String>())

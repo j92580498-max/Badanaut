@@ -26,6 +26,8 @@ constexpr uint32_t ABI_HELPER_STRIDE = 32;
 // Second image (the guest libstdc++.so). Its own vaddrs start at 0, so it loads
 // at this bias, clear of the app image (which sits below ~0x400000).
 constexpr uint32_t LIB_BASE = 0x10000000;
+constexpr uint32_t LIBGCC_BASE = 0x11000000; // optional guest exception unwinder
+constexpr uint32_t LIBSUPCXX_BASE = 0x12000000; // optional SDK C++ exception ABI
 
 // Guest stack (grows down).
 constexpr uint32_t STACK_TOP = 0x70000000;

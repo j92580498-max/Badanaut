@@ -77,7 +77,7 @@ class MainActivity : AppCompatActivity() {
                             if (!bundledChecked) { BadaAssets.importBundledIfAvailable(this@MainActivity); bundledChecked = true }
                             JSONObject().apply {
                                 put("games", JSONArray().apply { BadaAssets.listGames(this@MainActivity).forEach { game -> put(JSONObject().apply {
-                                    put("id", game.id); put("name", game.displayName); put("appId", game.appId)
+                                    put("id", game.id); put("name", game.displayName); put("appId", game.appId); put("apiVersion", game.apiVersion)
                                     put("source", game.sourcePackage); put("importedAt", game.importedAt)
                                     put("lastPlayed", game.lastPlayed); put("icon", game.icon ?: JSONObject.NULL)
                                 }) } })

@@ -30,6 +30,7 @@
 #include "cpu.h"
 #include "elf_loader.h"
 #include "guest.h"
+#include "runtime_libraries.h"
 #include "hle/dispatch.h"
 #include "hle/gl_api.h"
 #include "ui_overlay.h"
@@ -667,19 +668,25 @@ static std::string find_root(const std::string& exe) {
     return exedir;
 }
 
-// Locate the guest libstdc++.so the app was linked against, when no path was
-// given. Looks beside bada-hle, in the package's Bin, then in a bada SDK named
-// by $BADA_SDK. Picks the multilib that matches the app's float ABI -- the same
-// test Cpu::init uses (soft-float binaries import the __aeabi_f* helpers).
-// Returns "" when nothing turned up; main treats that as fatal.
+static fs::path executable_directory() {
+    if (char* base = SDL_GetBasePath()) {
+        fs::path directory(base);
+        SDL_free(base);
+        return directory;
+    }
+    return {};
+}
+
+// Use the matching bundled guest runtime by default, retaining the previous
+// package/SDK search when the bundle is unavailable. Cpu::init uses the same
+// ARM flags/attributes and the fallback for older stripped binaries.
 static std::string find_libstdcxx(const ElfImage& img, const std::string& root,
                                   std::vector<std::string>* searched) {
-    bool hard = true;
-    for (auto& n : img.imports) {
-        if (n == "__aeabi_fmul" || n == "__aeabi_fadd") {
-            hard = false;
-            break;
-        }
+    const bool hard = img.uses_hard_float();
+    const auto bundled = runtime::bundled_library(img, executable_directory(), "libstdc++.so.6", searched);
+    if (!bundled.empty()) {
+        printf("[boot] bundled guest libstdc++ (%s-float): %s\n", hard ? "hard" : "soft", bundled.c_str());
+        return bundled;
     }
     std::vector<std::string> dirs;
     if (char* base = SDL_GetBasePath()) {
@@ -706,8 +713,33 @@ static std::string find_libstdcxx(const ElfImage& img, const std::string& root,
                 searched->push_back(p);
             }
             if (fs::exists(p, ec)) {
+                if (!runtime::compatible_library(p, hard)) continue;
                 printf("[boot] guest libstdc++ (%s-float): %s\n", hard ? "hard" : "soft", p.c_str());
                 return p;
+            }
+        }
+    }
+    return "";
+}
+
+static std::string find_guest_library(const ElfImage& img, const std::string& root, const std::string& libcxx,
+                                      const char* filename, const char* prefix) {
+    std::vector<fs::path> dirs{fs::path(libcxx).parent_path()};
+    for (const auto& bundle : runtime::bundle_roots(executable_directory()))
+        dirs.push_back(bundle / runtime::abi_directory(img.uses_hard_float()));
+    dirs.push_back(fs::path(root) / "Bin");
+    if (char* base = SDL_GetBasePath()) { dirs.emplace_back(base); SDL_free(base); }
+    if (const char* sdk = getenv("BADA_SDK")) {
+        fs::path lib = fs::path(sdk) / "Tools/Toolchains/ARM/arm-bada-eabi/lib";
+        dirs.push_back(img.uses_hard_float() ? lib / "hard/armv6/vfp" : lib);
+    }
+    std::error_code ec;
+    for (const auto& directory : dirs) {
+        for (const std::string& name : {std::string(prefix) + (img.uses_hard_float() ? "hard.so" : "soft.so"), std::string(filename)}) {
+            const auto path = directory / name;
+            if (fs::is_regular_file(path, ec)) {
+                if (!runtime::compatible_library(path, img.uses_hard_float())) continue;
+                return path.string();
             }
         }
     }
@@ -735,8 +767,12 @@ int main(int argc, char** argv) {
          cxxopts::value<int>()->default_value("0"))                                        //
         ("l,locale", "system locale override, e.g. fre or fre_FR (or env BADA_LOCALE)",
          cxxopts::value<std::string>()->default_value(""))   //
-        ("libstdcxx", "guest libstdc++.so to map (or env BADA_LIBSTDCXX); found automatically if omitted",
+        ("libstdcxx", "override the bundled guest C++ runtime (or env BADA_LIBSTDCXX)",
          cxxopts::value<std::string>()->default_value(""))   //
+        ("libgcc", "optional guest libgcc_s.so.1 for C++ exceptions (or env BADA_LIBGCC)",
+         cxxopts::value<std::string>()->default_value(""))
+        ("libsupcxx", "optional guest C++ exception ABI library (or env BADA_LIBSUPCXX)",
+         cxxopts::value<std::string>()->default_value(""))
         ("scaling", "fit or integer", cxxopts::value<std::string>()->default_value("fit"))
         ("filter", "Canvas filtering: nearest or linear", cxxopts::value<std::string>()->default_value("nearest"))
         ("vsync", "synchronize presentation", cxxopts::value<bool>()->default_value("true"))
@@ -749,7 +785,7 @@ int main(int argc, char** argv) {
     opts.parse_positional({"input", "app-id", "max-frames"});
     opts.positional_help("<app-dir-or-exe> [AppId] [maxFrames]");
 
-    std::string input, appid, locale, libstdcxx;
+    std::string input, appid, locale, libstdcxx, libgcc, libsupcxx;
     int max_frames = 0;
     bool fullscreen = true, vsync = true;
     try {
@@ -767,6 +803,8 @@ int main(int argc, char** argv) {
         max_frames = res["max-frames"].as<int>();
         locale = res["locale"].as<std::string>();
         libstdcxx = res["libstdcxx"].as<std::string>();
+        libgcc = res["libgcc"].as<std::string>();
+        libsupcxx = res["libsupcxx"].as<std::string>();
         fullscreen = res["fullscreen"].as<bool>();
         vsync = res["vsync"].as<bool>();
         const auto scaling = res["scaling"].as<std::string>();
@@ -789,6 +827,8 @@ int main(int argc, char** argv) {
             libstdcxx = e;
         }
     }
+    if (libgcc.empty()) if (const char* e = getenv("BADA_LIBGCC")) libgcc = e;
+    if (libsupcxx.empty()) if (const char* e = getenv("BADA_LIBSUPCXX")) libsupcxx = e;
     hle::set_locale(locale); // no-op when empty -> keeps the eng/US default
 
     std::string exe, root;
@@ -917,10 +957,11 @@ int main(int argc, char** argv) {
         std::vector<std::string> searched;
         libstdcxx = find_libstdcxx(img, root, &searched);
         if (libstdcxx.empty()) {
-            printf("\nERROR: no guest libstdc++.so found.\n"
+            printf("\nERROR: no compatible guest libstdc++.so found.\n"
                    "The app's std::* calls need the ARM libstdc++ it was linked against"
                    " (the bada SDK ships it under Tools/Toolchains/ARM/arm-bada-eabi/lib).\n"
-                   "Give one with --libstdcxx <path>, set BADA_LIBSTDCXX, set BADA_SDK, or"
+                   "Keep bada_libs beside the engine, or give one with --libstdcxx <path>,"
+                   " set BADA_LIBSTDCXX, set BADA_SDK, or"
                    " copy it next to bada-hle as libstdc++-hard.so / libstdc++-soft.so.\n"
                    "Looked in:\n");
             for (const std::string& p : searched) {
@@ -934,9 +975,22 @@ int main(int argc, char** argv) {
         printf("libstdc++ load failed: %s\n", err.c_str());
         return 1;
     }
+    if (libgcc.empty()) libgcc = find_guest_library(img, root, libstdcxx, "libgcc_s.so.1", "libgcc-");
+    if (libsupcxx.empty()) libsupcxx = find_guest_library(img, root, libstdcxx, "libsupc++.so", "libsupc++-");
+    ElfImage gcc;
+    if (!libgcc.empty() && !gcc.load(libgcc, err, guest::LIBGCC_BASE)) {
+        printf("libgcc load failed: %s\n", err.c_str());
+        return 1;
+    }
+    ElfImage supcxx;
+    if (!libsupcxx.empty() && !supcxx.load(libsupcxx, err, guest::LIBSUPCXX_BASE)) {
+        printf("C++ exception support load failed: %s\n", err.c_str());
+        return 1;
+    }
 
     Cpu cpu;
-    if (!cpu.init(img, err, &libcxx)) {
+    if (!cpu.init(img, err, &libcxx, libgcc.empty() ? nullptr : &gcc,
+                  libsupcxx.empty() ? nullptr : &supcxx)) {
         printf("cpu init failed: %s\n", err.c_str());
         return 1;
     }
@@ -1150,7 +1204,7 @@ int main(int argc, char** argv) {
             return 1;
         }
 
-        if (!feed_focus(cpu, g_on_foreground, "OnForeground (startup)")) {
+        if (!cpu.termination_requested && !feed_focus(cpu, g_on_foreground, "OnForeground (startup)")) {
             printf("[boot] foreground initialization faulted; not entering frame loop\n");
             hle::dump_stats();
             return 1;
@@ -1184,7 +1238,7 @@ int main(int argc, char** argv) {
                              event.kind == input::TouchKind::released ? TK_RELEASED : TK_MOVED;
             feed_touch(cpu, win, kind, event.x, event.y, event.point_id);
         };
-        for (bool running = true; running;) {
+        for (bool running = true; running && !cpu.termination_requested;) {
             uint32_t frame_start = SDL_GetTicks();
             overlay::begin_frame();
             SDL_Event ev;

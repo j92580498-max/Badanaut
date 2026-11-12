@@ -23,10 +23,11 @@ class Cpu {
     ElfImage* img = nullptr;             // the app image
     std::vector<ElfImage*> images;       // every mapped image, load order
 
-    // `lib`, when given, is a second image (the guest libstdc++.so) mapped
-    // alongside the app. App imports resolve against it before falling back to
-    // an HLE trampoline, so the real library code runs instead of an HLE stub.
-    bool init(ElfImage& image, std::string& err, ElfImage* lib = nullptr);
+    // Guest libstdc++, and optional libgcc/libsupc++ exception support, map
+    // alongside the app. Imports resolve against these libraries before an
+    // HLE trampoline, so the real ARM runtime code handles C++ ABI details.
+    bool init(ElfImage& image, std::string& err, ElfImage* lib = nullptr, ElfImage* libgcc = nullptr,
+              ElfImage* libsupcxx = nullptr);
 
     // --- Boot ---
     void run_init_array(); // run DT_INIT_ARRAY constructors
@@ -98,6 +99,7 @@ class Cpu {
     // --- Application::Execute handoff (host drives the lifecycle, not nested emu) ---
     uint32_t exec_factory = 0, exec_args = 0;
     bool exec_requested = false;
+    bool termination_requested = false;
     void request_exit(); // stop emulation, return control to the host loop
 
     // --- Application and earliest active timer (host wake/diagnostics) ---
@@ -121,6 +123,8 @@ class Cpu {
     void do_return(); // force PC=LR (used by patches)
 
     bool hard_float = true; // VFP float args (FruitNinja) vs soft-float (GlesCube)
+    uint32_t strtok_cursor = 0; // tokenizer state belongs to this guest process
+    uint64_t rand_state = 1; // bada/newlib's default seed, independent of the host CRT
 
   private:
     struct TimerEvent {

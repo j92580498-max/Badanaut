@@ -1,0 +1,45 @@
+{
+  "schema": 1,
+  "sdk": "Samsung bada SDK 2.0.6 Common",
+  "gcc_version": "4.5.3",
+  "files": {
+    "soft-float/libstdc++.so.6": {
+      "sha256": "992dc05f6d49cfbd64583f43b84f130594d6b8027e400a080060d0e80abdc6e3",
+      "float_abi": "soft"
+    },
+    "soft-float/libgcc_s.so.1": {
+      "sha256": "3f66b1fb096e99fa076ba2846df5e5fe64c351797a1656d3d918f6d41cc7b169",
+      "float_abi": "soft"
+    },
+    "soft-float/libsupc++.so": {
+      "sha256": "279c482954d97d9564e0a56c429b1b5322d220b495c5adf66a5bc9c229358413",
+      "float_abi": "soft"
+    },
+    "hard-float/libstdc++.so.6": {
+      "sha256": "797b5befd5ec77e39d329f8263c4d4548dbc625bd29adca0b9e5abf343ab29df",
+      "float_abi": "hard"
+    },
+    "hard-float/libgcc_s.so.1": {
+      "sha256": "ba0a44892024d1300207f2d4b08309f04fa6cd876234b460bcf81d0392d20418",
+      "float_abi": "hard"
+    },
+    "hard-float/libsupc++.so": {
+      "sha256": "d805c07df7cf107e97744b3a64bd0c090589d9815938a1dbf1ead6df581fa4b9",
+      "float_abi": "hard"
+    }
+  },
+  "license": "GPL-3.0-or-later WITH GCC-exception-3.1",
+  "sdk_archive": {
+    "filename": "bada_SDK_2.0.6_Common.zip",
+    "size": 678890944,
+    "sha256": "555bd2d6a2ff34ca8da9481f5e959146abdf40537b1e4c7bd0cd27a4f112904a",
+    "url": "https://web.archive.org/web/20140810175413if_/http://static.bada.com/sdk-update/2.0.6/bada_SDK_2.0.6_Common.zip"
+  },
+  "corresponding_source": {
+    "filename": "bada-g++-4.5-3-src.tar.gz",
+    "size": 274733874,
+    "sha256": "6d028c8c5d907359dab639adb8b541eb67e4cd45b3f1c30f61c1d433c3894f2d",
+    "url": "https://archive.org/download/bada_SDK_2.0.6_src/bada_SDK_2.0.6.zip/bada-g%2B%2B-4.5-3-src.tar.gz",
+    "mirror_url": "https://archive.org/download/Bada_SDK_Source/bada_SDK_2.0.6.zip/bada-g%2B%2B-4.5-3-src.tar.gz"
+  }
+}

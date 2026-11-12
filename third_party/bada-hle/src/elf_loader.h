@@ -1,4 +1,5 @@
 #pragma once
+#include "arm_abi.h"
 #include <cstdint>
 #include <string>
 #include <unordered_map>
@@ -32,6 +33,8 @@ struct ElfImage {
     uint32_t entry = 0;
     uint32_t bias = 0;      // added to every vaddr this image exposes
     std::string name;       // basename, for logging
+    ArmFloatAbi float_abi = ArmFloatAbi::unknown;
+    uint32_t exidx = 0, exidx_count = 0; // guest exception index table
 
     // Dynamic symbols. Imports == STT entries that are UND.
     struct Sym {
@@ -53,6 +56,7 @@ struct ElfImage {
     const std::string& sym_name(uint32_t idx) const;
     uint32_t resolve(const std::string& name) const;            // defined symbol -> guest addr (0 if none)
     uint32_t resolve_contains(const std::string& substr) const; // first defined FUNC whose name contains substr
+    bool uses_hard_float() const;
     // Nearest defined FUNC at or below `addr` (for backtraces). Empty if none;
     // sets *off to addr - symbol value.
     std::string nearest_symbol(uint32_t addr, uint32_t* off = nullptr) const;

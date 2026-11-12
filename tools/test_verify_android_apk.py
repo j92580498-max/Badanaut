@@ -19,6 +19,10 @@ class ApkVerificationTest(unittest.TestCase):
     def entries(self):
         entries = {name: b"fixture" for name in ("AndroidManifest.xml", "classes.dex", "resources.arsc", "assets/launcher.json", "assets/fonts/LiberationSans-Regular.ttf", "assets/fonts/LiberationSans-Bold.ttf", "assets/fonts/LICENSE.txt")}
         entries["assets/launcher.json"] = (Path(__file__).resolve().parents[1] / "frontends/shared-ui/launcher.json").read_bytes()
+        bundle = Path(__file__).resolve().parents[1] / "bada_libs"
+        for file in bundle.rglob("*"):
+            if file.is_file():
+                entries["assets/bada_libs/" + file.relative_to(bundle).as_posix()] = file.read_bytes()
         for abi, elf_class, machine in (("arm64-v8a", 2, 183), ("armeabi-v7a", 1, 40)):
             header = bytearray(64)
             header[:6] = b"\x7fELF" + bytes((elf_class, 1))
@@ -38,6 +42,32 @@ class ApkVerificationTest(unittest.TestCase):
 
     def test_accepts_bada_without_pocket_pc(self):
         self.verify(self.entries())
+
+    def test_requires_both_complete_guest_runtime_sets(self):
+        for abi in ("soft", "hard"):
+            entries = self.entries()
+            name = f"assets/bada_libs/{abi}-float/libsupc++.so"
+            del entries[name]
+            with self.subTest(abi=abi), self.assertRaisesRegex(ValueError, "runtime asset"):
+                self.verify(entries)
+
+    def test_detects_guest_runtime_corruption(self):
+        entries = self.entries()
+        entries["assets/bada_libs/hard-float/libgcc_s.so.1"] += b"corruption"
+        with self.assertRaisesRegex(ValueError, "checksum mismatch"):
+            self.verify(entries)
+
+    def test_rejects_guest_library_for_the_wrong_float_abi(self):
+        entries = self.entries()
+        entries["assets/bada_libs/hard-float/libstdc++.so.6"] = entries["assets/bada_libs/soft-float/libstdc++.so.6"]
+        with self.assertRaisesRegex(ValueError, "calling convention"):
+            self.verify(entries)
+
+    def test_requires_gnu_runtime_license_notices(self):
+        entries = self.entries()
+        del entries["assets/bada_libs/COPYING.RUNTIME"]
+        with self.assertRaisesRegex(ValueError, "COPYING.RUNTIME"):
+            self.verify(entries)
 
     def test_requires_the_shared_interface_in_the_apk(self):
         entries = self.entries()

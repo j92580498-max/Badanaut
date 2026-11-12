@@ -45,6 +45,10 @@ target_link_libraries(bada-test-engine PUBLIC
 )
 
 enable_testing()
+add_executable(bada-elf-test elf_test.cpp "${BADA_ROOT}/elf_loader.cpp")
+target_include_directories(bada-elf-test PRIVATE "${BADA_ROOT}")
+add_test(NAME runtime-arm-elf COMMAND bada-elf-test)
+set_tests_properties(runtime-arm-elf PROPERTIES TIMEOUT 30)
 add_executable(bada-display-test display_test.cpp)
 target_include_directories(bada-display-test PRIVATE "${BADA_ROOT}")
 target_link_libraries(bada-display-test PRIVATE bada-sdl)

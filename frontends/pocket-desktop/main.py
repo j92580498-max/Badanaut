@@ -14,6 +14,7 @@ from PySide6.QtWidgets import QApplication, QFileDialog, QMainWindow
 from launcher import Launcher
 
 from library import Library, MAX_ICON
+from arm_elf import bundle_roots
 
 
 def assets():
@@ -52,7 +53,7 @@ class Host(QObject):
             request_id, action, args = call["id"], call["action"], call.get("args", {})
             if action in ("importGame", "importRuntime", "setIcon"):
                 title, filters = {"importGame": ("Add a Bada game", "Bada packages (*.zip)"),
-                                  "importRuntime": ("Select Bada libstdc++.so.6", "All files (*)"),
+                                  "importRuntime": ("Select Bada ARM runtime library", "All files (*)"),
                                   "setIcon": ("Select game artwork", "Images (*.png *.jpg *.jpeg *.webp)")}[action]
                 filename, _ = QFileDialog.getOpenFileName(self.window, title, "", filters)
                 if not filename:
@@ -202,7 +203,8 @@ def main():
     available = app.primaryScreen().availableGeometry()
     window.resize(320, 480)
     window.move(available.center() - window.rect().center())
-    host = Host(window, Library(root), args.engine or engine_path())
+    engine = args.engine or engine_path()
+    host = Host(window, Library(root, bundle_roots(engine.parent)), engine)
     view.request.connect(host.request)
     host.reply.connect(view.receive)
     host.event.connect(view.engine_event)

@@ -268,16 +268,23 @@ void h_memchr(Cpu& c) {
     c.set_ret32(0);
 }
 void h_strspn(Cpu& c) {
-    c.set_ret32((uint32_t)c.read_cstr(c.arg32(0)).find_first_not_of(c.read_cstr(c.arg32(1))));
+    const std::string value = c.read_cstr(c.arg32(0));
+    const size_t end = value.find_first_not_of(c.read_cstr(c.arg32(1)));
+    c.set_ret32(static_cast<uint32_t>(end == std::string::npos ? value.size() : end));
 }
 void h_strcspn(Cpu& c) {
     std::string s = c.read_cstr(c.arg32(0));
     size_t p = s.find_first_of(c.read_cstr(c.arg32(1)));
     c.set_ret32((uint32_t)(p == std::string::npos ? s.size() : p));
 }
+void h_strpbrk(Cpu& c) {
+    const uint32_t address = c.arg32(0);
+    const size_t match = c.read_cstr(address).find_first_of(c.read_cstr(c.arg32(1)));
+    c.set_ret32(match == std::string::npos ? 0 : address + static_cast<uint32_t>(match));
+}
 // strtok keeps its cursor between calls, as guest addresses.
 void h_strtok(Cpu& c) {
-    static uint32_t save = 0;
+    uint32_t& save = c.strtok_cursor;
     uint32_t s = c.arg32(0) ? c.arg32(0) : save;
     if (!s) {
         c.set_ret32(0);
@@ -745,9 +752,29 @@ void h_guard_release(Cpu& c) {
     c.write_mem(g, &b, 1);
 }
 void h_noop(Cpu& c) { c.set_ret32(0); }
-void h_rand(Cpu& c) { c.set_ret32(rand()); }
+void h_abort(Cpu&) { throw std::runtime_error("guest called abort()"); }
+void h_find_exidx(Cpu& c) {
+    const uint32_t pc = c.arg32(0) & ~1u, count = c.arg32(1);
+    if (count) c.write_u32(count, 0);
+    for (const auto* image : c.images) {
+        for (const auto& segment : image->segments) {
+            if (!(segment.flags & 1) || pc < segment.vaddr ||
+                uint64_t(pc) >= uint64_t(segment.vaddr) + segment.memsz) continue;
+            if (count) c.write_u32(count, image->exidx_count);
+            c.set_ret32(image->exidx);
+            return;
+        }
+    }
+    c.set_ret32(0);
+}
+void h_rand(Cpu& c) {
+    // Match the bada SDK's newlib generator and 31-bit RAND_MAX. Windows CRT
+    // rand() only has 15 bits, which collapses guest-normalized idle delays.
+    c.rand_state = c.rand_state * UINT64_C(6364136223846793005) + 1;
+    c.set_ret32(static_cast<uint32_t>(c.rand_state >> 32) & 0x7fffffffu);
+}
 void h_srand(Cpu& c) {
-    srand(c.arg32(0));
+    c.rand_state = c.arg32(0);
     c.set_ret32(0);
 }
 // Wide ctype receives a code point by value (Nova's wchar_t storage is UTF-16), so
@@ -783,6 +810,10 @@ void register_libc() {
     register_handler("_Z8Osp_freePv", h_free);               // Osp_free(ptr)
     register_handler("_Z10Osp_freeExPvPKci", h_free);        // Osp_freeEx(ptr,file,line)
     register_handler("free", h_free);
+    register_handler("abort", h_abort);
+    register_handler("__gnu_Unwind_Find_exidx", h_find_exidx);
+    register_handler("_dl_find_exidx", h_find_exidx);
+    register_handler("dl_unwind_find_exidx", h_find_exidx);
     register_handler("_Znwj", h_new);   // operator new(unsigned int)
     register_handler("_Znaj", h_new);   // operator new[](unsigned int)
     register_handler("_ZdlPv", h_free); // operator delete(void*)
@@ -806,6 +837,10 @@ void register_libc() {
     register_handler("strchr", h_strchr);
     register_handler("strrchr", h_strrchr);
     register_handler("strstr", h_strstr);
+    register_handler("strspn", h_strspn);
+    register_handler("strcspn", h_strcspn);
+    register_handler("strpbrk", h_strpbrk);
+    register_handler("strtok", h_strtok);
     register_handler("memchr", h_memchr);
     register_handler("atol", h_atol);
     register_handler("time", h_time);
@@ -916,7 +951,6 @@ void register_libc() {
     register_handler("__cxa_guard_abort", h_noop);
     register_handler("__aeabi_atexit", h_noop);
     register_handler("__cxa_atexit", h_noop);
-    register_handler("__gxx_personality_v0", h_noop);
     register_handler("rand", h_rand);
     register_handler("srand", h_srand);
     register_handler("iswspace", h_iswspace);

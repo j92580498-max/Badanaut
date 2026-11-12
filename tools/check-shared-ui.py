@@ -44,8 +44,7 @@ def main():
             library.import_game(base / "demo.zip")
         window = QMainWindow()
         view = Launcher(assets(), window)
-        # An existing executable isolates the missing-runtime error. The fixture
-        # library has no runtime, so no process can actually be started.
+        # An existing executable lets the missing-runtime check reach launch preparation.
         host = Host(window, library, Path(sys.executable))
         view.request.connect(host.request); host.reply.connect(view.receive); host.event.connect(view.engine_event)
         window.setCentralWidget(view); window.resize(320, 480); window.show()
@@ -83,6 +82,7 @@ def main():
         try:
             view.send("bootstrap"); wait()
             assert len(view.games) == 25 and len(view.images) == 25
+            assert view.runtime_ready, "Bundled runtime libraries were not discovered"
             assert len(view.visible_games()) == 16
             image = view.grab().toImage()
             assert image.size().width() == 320 and image.size().height() == 480
@@ -138,8 +138,10 @@ def main():
             click("removeConfirm"); click("remove"); wait()
             assert len(view.games) == 24 and len(library.list_games()) == 24
             # A launch failure must become a readable native message, without hanging the picker.
+            host.library = Library(library.root, bundle_dirs=[])
             click("game:" + view.visible_games()[0]["id"]); wait()
             assert view.screen == "message" and "runtime" in view.message.lower()
+            assert host.process is None, "A missing runtime must prevent the game process from starting"
             click("back"); assert view.screen == "library"
             print("Native UI passed: reference icon geometry, menu/dismissal, 16-game swipe paging, page bounds, dots, scaled hit targets, hold/details, removal, saved settings and launch errors.", flush=True)
         finally:

@@ -13,17 +13,7 @@ import java.util.zip.ZipOutputStream
 class BadaPackageTest {
     @get:Rule val temporary = TemporaryFolder()
 
-    private fun elf(): ByteArray = ByteArray(52).apply {
-        this[0] = 0x7f
-        this[1] = 'E'.code.toByte()
-        this[2] = 'L'.code.toByte()
-        this[3] = 'F'.code.toByte()
-        this[4] = 1
-        this[5] = 1
-        this[6] = 1
-        this[16] = 3
-        this[18] = 40
-    }
+    private fun elf(): ByteArray = armTestElf()
 
     private fun png(): ByteArray = java.util.Base64.getDecoder().decode(
         "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAFklEQVR4nGOUW3CHgYGBiYGBgYGBAQASpAGenRzoTAAAAABJRU5ErkJggg==",
@@ -80,6 +70,24 @@ class BadaPackageTest {
         val details = BadaPackage.inspect(directory)
         assertEquals("test-id", details.appId)
         assertEquals("Test Game", details.name)
+    }
+
+    @Test fun apiVersionDoesNotDetermineFloatAbiOrFollowManifestSchemaVersion() {
+        for ((version, abi) in listOf("2.0" to "hard", "2.0" to "soft", "1.2" to "hard")) {
+            val directory = extract(
+                "Bin/Test.exe" to armTestElf(abi),
+                "Info/Appinfo.sys" to "<Application AppId=\"test\"/>".toByteArray(),
+                "Info/manifest.xml" to "<Manifest><ManifestVersion>1.2</ManifestVersion><APIVersion>$version</APIVersion></Manifest>".toByteArray(),
+            )
+            val details = BadaPackage.inspect(directory)
+            assertEquals(version, details.apiVersion)
+            assertEquals(abi, details.floatAbi)
+        }
+        val directory = extract(
+            "Bin/Test.exe" to elf(),
+            "Info/manifest.xml" to "<Manifest><Id>test</Id><ManifestVersion>2.0</ManifestVersion></Manifest>".toByteArray(),
+        )
+        assertEquals("", BadaPackage.inspect(directory).apiVersion)
     }
 
     @Test fun rejectsTraversalAndAbsolutePaths() {

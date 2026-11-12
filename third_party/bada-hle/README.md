@@ -89,6 +89,10 @@ Runs the **unmodified ARM binaries** end to end:
 - **Exploration 1.3.1** (soft-float, GL ES 1.x) boots, renders terrain and its
   menus, and reopens a saved world. The [compatibility notes](EXPLORATION.md)
   describe its framework, file, mesh and Windows JIT fixes and validation limits.
+- **Angry Birds 1.6.3** (bada API 2.0, hard-float) reaches its menus and playable
+  levels with touch input, sound and normal idle animations. The
+  [compatibility notes](ANGRY_BIRDS.md) cover exception support, complete font
+  resources, runtime selection and the bada random-number range.
 
 This exercises the whole stack: ARM emulation, custom ELF load/reloc, the Osp
 framework HLE (App/Ui/Frame/Timer with synthesized guest vtables), GL/EGL
@@ -131,23 +135,45 @@ bada-hle <app-dir-or-exe> [AppId] [maxFrames]
 - `[AppId]` — override (some apps' `OspMain` hash-checks `argv[0]` against it).
 - `[maxFrames]` — defaults to `0` = run until the window is closed.
 
-### The guest libstdc++ (required)
+### Bundled guest C++ runtimes
 
-Apps call into the ARM **libstdc++ 3.4.12** they were linked against, and they
+Apps call into ARM **libstdc++**, and they
 *inline* half of it — `std::string::size()`, `c_str()`, `operator[]` and the
 destructor all read the COW `_Rep` header directly. So bada-hle maps the real
 library as a second guest image rather than emulating it method by method.
 
-The bada SDK ships it at
-`Tools/Toolchains/ARM/arm-bada-eabi/lib/libstdc++.so.6.0.12` (soft-float) and
-`.../lib/hard/armv6/vfp/libstdc++.so.6.0.12` (hard-float — what Fruit Ninja and
-PvZ need). bada-hle refuses to start without one. Point it at yours with any of:
+Normal builds include `bada_libs/soft-float/` and `bada_libs/hard-float/` beside
+the engine. Each contains GNU GCC 4.5.3 `libstdc++.so.6`, `libgcc_s.so.1` and
+`libsupc++.so`. The engine finds that bundle automatically; under `.build/`
+it can also find the repository's bundle without relying on the current
+working directory. CMake and desktop/Android packaging retain the same
+libraries and GNU license notices. See [bundle provenance](../../bada_libs/README.md).
+
+For development or a different compatible runtime, overrides remain available:
 
 - `--libstdcxx <path>` or `BADA_LIBSTDCXX=<path>`
-- `BADA_SDK=<sdk-root>` — the right multilib is picked from the app's float ABI
-- copy both next to `bada-hle` as `libstdc++-hard.so` and `libstdc++-soft.so`
 
-There is no fallback. bada-hle used to hand-roll the parts of libstdc++ apps
+If a compatible bundle is unavailable, the legacy search also checks the
+package, loose `libstdc++-hard.so` / `libstdc++-soft.so` files next to the
+engine, and `BADA_SDK=<sdk-root>` with the app's matching multilib.
+
+API 1.2 and 2.0 games can use different float calling conventions. The loader
+checks ARM ELF flags and attributes rather than inferring the ABI from the API version or
+filename. The desktop and Android hosts retain imported runtime versions and
+select the most recently imported compatible library; the older runtime is
+kept alongside newer SDK libraries.
+
+Apps that throw C++ exceptions can additionally map ARM `libgcc_s.so.1` with
+`--libgcc <path>` or `BADA_LIBGCC`. The SDK 2.0 C++ library also needs exception
+ABI support from `libsupc++.so`, supplied with `--libsupcxx <path>` or
+`BADA_LIBSUPCXX`. Matching companions are loaded automatically from the bundle,
+or searched beside an overridden C++ runtime, in the
+package's `Bin`, beside the engine, and in `BADA_SDK`'s matching multilib.
+Explicitly supplied libraries must match the game's float ABI.
+See [Angry Birds runtime setup](ANGRY_BIRDS.md#runtime-and-package-requirements)
+for package requirements and optional SDK runtime reproduction.
+
+There is no synthetic C++ runtime fallback. bada-hle used to hand-roll the parts of libstdc++ apps
 call — the COW string, the red-black tree, the intrusive list — but the guest
 inlines enough of the library that a stand-in has to match its layout byte for
 byte anyway. Mapping the real thing does that by construction, and gets

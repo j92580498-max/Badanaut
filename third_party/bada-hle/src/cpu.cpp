@@ -125,13 +125,26 @@ Cpu::~Cpu() {
     std::free(heap_storage_);
 }
 
-bool Cpu::init(ElfImage& image, std::string& err, ElfImage* lib) {
+bool Cpu::init(ElfImage& image, std::string& err, ElfImage* lib, ElfImage* libgcc, ElfImage* libsupcxx) {
+    hard_float = image.uses_hard_float();
+    for (const auto& library : {std::make_pair("libstdc++", lib), std::make_pair("libgcc", libgcc),
+                                std::make_pair("libsupc++", libsupcxx)}) {
+        const auto* candidate = library.second;
+        if (candidate && ((candidate->float_abi == ArmFloatAbi::hard && !hard_float) ||
+                          (candidate->float_abi == ArmFloatAbi::soft && hard_float))) {
+            err = std::string("game uses ") + (hard_float ? "hard" : "soft") +
+                  "-float calls but " + library.first + " uses " + arm_float_abi_name(candidate->float_abi);
+            return false;
+        }
+    }
     img = &image;
     // The library goes first: its constructors must run before the app's, and
     // its exports win when both images define a name.
     if (lib) {
         images.push_back(lib);
     }
+    if (libsupcxx) images.push_back(libsupcxx);
+    if (libgcc) images.push_back(libgcc);
     images.push_back(&image);
     uc_err e = uc_open(UC_ARCH_ARM, UC_MODE_ARM, &uc);
     if (e) {
@@ -227,14 +240,8 @@ bool Cpu::init(ElfImage& image, std::string& err, ElfImage* lib) {
     uc_hook_add(uc, &h, UC_HOOK_CODE, (void*)&Cpu::hook_code, this,
                 guest::HLE_BASE, guest::HLE_BASE + guest::HLE_SIZE - 1);
 
-    // Float ABI: soft-float binaries import the __aeabi_f* helpers; hard-float don't.
-    for (auto& n : img->imports) {
-        if (n == "__aeabi_fmul" || n == "__aeabi_fadd") {
-            hard_float = false;
-            break;
-        }
-    }
-    printf("[cpu] float ABI: %s\n", hard_float ? "hard (VFP)" : "soft");
+    printf("[cpu] float ABI: %s (%s)\n", hard_float ? "hard (VFP)" : "soft",
+           image.float_abi == ArmFloatAbi::unknown ? "import fallback" : "ARM attributes");
 
     apply_relocs();
     hle::init_dispatch();

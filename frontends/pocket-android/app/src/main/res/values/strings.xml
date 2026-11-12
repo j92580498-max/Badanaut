@@ -3,8 +3,8 @@
   <string name="app_name">Badanaut</string>
   <string name="bada_game_title">Bada game</string>
   <string name="bada_install_failed">Could not prepare Bada game: %1$s</string>
-  <string name="bada_runtime_needed">Select a Bada runtime library before launching a game.</string>
-  <string name="bada_invalid_runtime">Select a 32-bit ARM Bada libstdc++ library. Android, PC and ARM64 libraries are incompatible.</string>
+  <string name="bada_runtime_needed">The Bada runtime bundle is missing. Reinstall the app or import a compatible runtime.</string>
+  <string name="bada_invalid_runtime">Select a 32-bit ARM Bada runtime library. Android, PC and ARM64 libraries are incompatible.</string>
   <string name="bada_share_log">Share Bada log</string>
   <string name="bada_log_empty">Launch a Bada game first, then share its log.</string>
   <string name="bada_log_failed">Could not prepare the launch log: %1$s</string>

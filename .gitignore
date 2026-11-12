@@ -10,6 +10,14 @@
 *.lib
 *.pdb
 
+# Deliberately redistributed GNU guest runtimes, with their own license notices.
+!/bada_libs/soft-float/libstdc++.so.6
+!/bada_libs/soft-float/libgcc_s.so.1
+!/bada_libs/soft-float/libsupc++.so
+!/bada_libs/hard-float/libstdc++.so.6
+!/bada_libs/hard-float/libgcc_s.so.1
+!/bada_libs/hard-float/libsupc++.so
+
 # IDEs / editors
 .idea/
 .vscode/

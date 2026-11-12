@@ -40,7 +40,19 @@ copyright (c) Imagination Technologies Ltd., under the MIT license. See
 `third_party/pvr/LICENSE.md`. The upstream revision and original decoder path
 are documented in `third_party/pvr/UPSTREAM.md`.
 
-The Bada game archive and firmware libraries are not included in this repository.
+The Bada game archive and proprietary firmware libraries are not included in this repository.
+
+## GNU GCC guest runtime libraries
+
+`bada_libs/` contains the ARM32 GNU GCC 4.5.3 libraries `libstdc++.so.6`,
+`libgcc_s.so.1` and `libsupc++.so`, for soft-float and hard-float/VFP guests.
+The SDK's GNU C++ library notices retain GPLv3-or-later with the GCC Runtime
+Library Exception 3.1. See `bada_libs/COPYING.libgcc`,
+`bada_libs/COPYING.libstdcxx`, `bada_libs/COPYING.RUNTIME`, and the source
+provenance in `bada_libs/SOURCE.md`. `libsupc++.so` was linked from the SDK's
+GNU `libsupc++-xnew.a`; the other libraries are copied unchanged.
+These files execute as guest code and are not host dependencies. Their terms
+do not relicense the launcher, the HLE engine, proprietary firmware or games.
 
 ## TLSF guest heap allocator
 

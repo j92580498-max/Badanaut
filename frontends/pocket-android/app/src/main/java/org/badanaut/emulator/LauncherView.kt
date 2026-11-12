@@ -142,7 +142,7 @@ class LauncherView(context: Context, private val request: (JSONObject) -> Unit) 
                     val index = (0 until values.length()).first { values.get(it) == value }
                     result.add(control("setting:" + option.getString("key"), 158, 56 + 42 * i, 152, 30, option.getJSONArray("names").getString(index)))
                 }
-                result.add(control("importRuntime", 10, 280, 300, 30, "Select Bada runtime"))
+                result.add(control("importRuntime", 10, 280, 300, 30, "Import runtime override"))
                 result.add(control("diagnostics", 10, 320, 300, 30, "Export launch log"))
                 result.add(control("saveSettings", 10, 428, 300, 30, "Save settings"))
             }

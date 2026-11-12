@@ -216,6 +216,10 @@ void app_execute(Cpu& c) {
     c.request_exit();
     c.set_ret32(0);
 }
+void app_terminate(Cpu& c) {
+    c.termination_requested = true; // the host leaves the loop after this callback
+    c.set_ret32(0);
+}
 
 // --- Generic stubs for not-yet-implemented Osp objects ---
 // Any class whose ctor we stub still needs a valid vtable so the guest's virtual
@@ -587,6 +591,7 @@ void register_osp() {
 
     // Application::Execute(Application*(*)(), IList const*, AppAttributeType)
     register_handler("_ZN3Osp3App11Application7ExecuteEPFPS1_vEPKNS_4Base10Collection5IListENS0_16AppAttributeTypeE", app_execute);
+    register_handler("_ZN3Osp3App11Application9TerminateEv", app_terminate);
 
     // App + Ui::Controls::Form -- stub objects with a valid (no-op) vtable.
     register_handler("_ZN3Osp3App11ApplicationC2Ev", stub_ctor); // Application()

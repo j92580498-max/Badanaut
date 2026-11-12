@@ -11,4 +11,5 @@ data class GameEntry(
     val directory: String,
     val appId: String,
     val lastPlayed: Long,
+    val apiVersion: String = "",
 )

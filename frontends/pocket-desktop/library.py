@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -11,6 +12,8 @@ import time
 import uuid
 import xml.etree.ElementTree as ET
 import zipfile
+
+from arm_elf import CPP, GCC, SUPCXX, float_abi, game_float_abi, runtime_filename
 
 DEFAULTS = dict(scaling="fit", filter="nearest", vsync=True,
                 fullscreen=True, iconStyle="glossy")
@@ -86,7 +89,7 @@ def inspect(extracted):
     executables = list((root / "Bin").glob("*.exe"))
     if len(executables) != 1 or not arm_elf(executables[0]):
         raise ValueError("The Bada package must contain one 32-bit ARM ELF executable in Bin")
-    app_id, name, icon = "", "", ""
+    app_id, name, icon, api_version = "", "", "", ""
     for filename in ("Appinfo.sys", "manifest.xml"):
         path = root / "Info" / filename
         if not path.is_file() or path.stat().st_size > 1024 * 1024:
@@ -107,10 +110,15 @@ def inspect(extracted):
             app_id = app_id or (doc.findtext("Id") or "").strip()
             name = name or (doc.findtext("Name") or "").strip()
             icon = icon or (doc.findtext("Icon") or "").strip()
+        if doc.tag in ("Application", "Manifest"):
+            version = (doc.findtext(".//APIVersion") or "").strip()
+            if re.fullmatch(r"[0-9]+\.[0-9]+(?:\.[0-9]+)?", version):
+                api_version = api_version or version
     if not app_id:
         raise ValueError("No AppId found in the Bada package metadata")
     return root, dict(app_id=app_id, display_name=name or executables[0].stem,
-                      executable=executables[0].relative_to(root).as_posix(), icon=icon)
+                      executable=executables[0].relative_to(root).as_posix(), icon=icon,
+                      api_version=api_version, float_abi=float_abi(executables[0]))
 
 
 def _resolve_icon_path(root, base, hint):
@@ -172,8 +180,10 @@ def write_json(path, values):
 
 
 class Library:
-    def __init__(self, root):
+    def __init__(self, root, bundle_dirs=None):
         self.root = Path(root).resolve()
+        self.bundle_dirs = [Path(directory).resolve() for directory in (
+            bundle_dirs if bundle_dirs is not None else [Path(__file__).resolve().parents[2] / "bada_libs"])]
         self.games = self.root / "games"
         self.games.mkdir(parents=True, exist_ok=True)
 
@@ -194,7 +204,8 @@ class Library:
                 data = json.loads((path / ENTRY).read_text(encoding="utf-8"))
                 entries.append(dict(id=path.name, name=data["display_name"], appId=data["app_id"],
                                     source=data["source"], importedAt=data["imported_at"],
-                                    lastPlayed=data.get("last_played", 0), icon=icon_data(path, data.get("icon", ""), data.get("executable", ""))))
+                                    lastPlayed=data.get("last_played", 0), apiVersion=data.get("api_version", ""),
+                                    icon=icon_data(path, data.get("icon", ""), data.get("executable", ""))))
             except (OSError, ValueError, KeyError):
                 continue  # A damaged installation must not hide the rest of the library.
         return entries
@@ -207,7 +218,7 @@ class Library:
 
     def bootstrap(self):
         return dict(games=self.list_games(), settings=self.get_settings(),
-                    runtimeReady=arm_elf(self.root / "libstdc++.so.6"), platform="desktop")
+                    runtimeReady=bool(self.runtimes()), platform="desktop")
 
     def import_game(self, archive):
         game_id = str(uuid.uuid4())
@@ -227,13 +238,70 @@ class Library:
     def import_runtime(self, source):
         source = Path(source)
         if source.stat().st_size > 32 * 1024 * 1024 or not arm_elf(source):
-            raise ValueError("Select a 32-bit ARM Bada libstdc++.so.6, up to 32 MB")
+            raise ValueError("Select a 32-bit ARM Bada runtime library, up to 32 MB")
         temporary = self.root / ".runtime-installing"
         try:
             shutil.copyfile(source, temporary)
-            temporary.replace(self.root / "libstdc++.so.6")
+            abi = float_abi(temporary)
+            filename = runtime_filename(temporary)
+            digest = hashlib.sha256(temporary.read_bytes()).hexdigest()
+            destination = self.root / "runtimes" / digest
+            destination.mkdir(parents=True, exist_ok=True)
+            temporary.replace(destination / filename)
+            write_json(destination / "runtime.json", dict(float_abi=abi, source=source.name,
+                                                         kind=filename, imported_at=time.time_ns()))
         finally:
             temporary.unlink(missing_ok=True)
+
+    def runtimes(self, filename=CPP):
+        """Keep older single-file installations usable alongside the catalog."""
+        candidates = [self.root / filename]
+        catalog = self.root / "runtimes"
+        if catalog.is_dir():
+            candidates.extend(catalog.glob(f"*/{filename}"))
+        result = []
+        for path in candidates:
+            try:
+                if path.is_symlink() or not path.resolve().is_relative_to(self.root):
+                    continue
+                abi = float_abi(path)
+                result.append((path.stat().st_mtime_ns, path, abi))
+            except (OSError, ValueError):
+                continue
+        result.sort(key=lambda entry: (entry[0], str(entry[1])), reverse=True)
+        # Explicit runtime imports retain priority over the shipped defaults.
+        for bundle in self.bundle_dirs:
+            for abi in ("hard", "soft"):
+                path = bundle / f"{abi}-float" / filename
+                try:
+                    if path.is_symlink() or not path.resolve().is_relative_to(bundle):
+                        continue
+                    if float_abi(path) not in (abi, "compatible"):
+                        continue
+                    if not any(entry[1] == path for entry in result):
+                        result.append((0, path, abi))
+                except (OSError, ValueError):
+                    continue
+        return result
+
+    def runtime_for(self, executable, filename=CPP, required=True):
+        abi = game_float_abi(executable)
+        candidates = self.runtimes(filename)
+        if not candidates:
+            if not required:
+                return None
+            raise ValueError("Bada runtime bundle is missing; keep bada_libs beside the engine or import a compatible runtime")
+        for _, path, runtime_abi in candidates:
+            if abi in ("unknown", "compatible") or runtime_abi in (abi, "compatible"):
+                return path
+        # Older ELF files can lack both attributes and float flags. The native
+        # loader retains its import-based fallback for those installations.
+        for _, path, runtime_abi in candidates:
+            if runtime_abi == "unknown":
+                return path
+        if not required:
+            return None
+        raise ValueError(f"This game needs a {abi}-float Bada runtime; import the matching SDK library")
 
     def prepare(self, game_id):
         directory = self.directory(game_id)
@@ -241,13 +309,15 @@ class Library:
         exe = (directory / data["executable"]).resolve()
         if exe.parent != (directory / "Bin").resolve() or not arm_elf(exe) or not (directory / "Info").is_dir() or not data["app_id"].strip():
             raise ValueError("The installed Bada package is incomplete")
-        runtime = self.root / "libstdc++.so.6"
-        if not arm_elf(runtime):
-            raise ValueError("Select a Bada runtime before launching")
+        runtime = self.runtime_for(exe)
         config = self.get_settings()
         args = ["--input", str(directory), "--libstdcxx", str(runtime), "--app-id", data["app_id"],
                 "--scaling", config["scaling"], "--filter", config["filter"],
                 "--vsync=" + str(config["vsync"]).lower(), "--fullscreen=" + str(config["fullscreen"]).lower()]
+        for option, filename in (("--libgcc", GCC), ("--libsupcxx", SUPCXX)):
+            support = self.runtime_for(exe, filename, required=False)
+            if support:
+                args.extend((option, str(support)))
         return args
 
     def played(self, game_id):

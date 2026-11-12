@@ -1,5 +1,6 @@
 """Build a self-contained desktop directory and ZIP/tar.gz artifact."""
 from pathlib import Path
+import importlib.util
 import os
 import platform
 import shutil
@@ -11,9 +12,18 @@ native = root / ".build/desktop/native"
 engine = native / ("bada-hle.exe" if os.name == "nt" else "bada-hle")
 if not engine.is_file():
     raise SystemExit("Build the native engine before packaging")
+bundle = native / "bada_libs"
+if not (bundle / "manifest.json").is_file():
+    raise SystemExit("Build the native engine with its bundled Bada runtimes before packaging")
+spec = importlib.util.spec_from_file_location("verify_bada_libs", root / "tools/verify-bada-libs.py")
+verifier = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(verifier)
+verifier.verify_bundle(bundle)
 command = [sys.executable, "-m", "PyInstaller", "--noconfirm", "--clean", "--onedir", "--windowed",
            "--name", "Badanaut", "--distpath", str(root / "dist"), "--workpath", str(root / ".build/pyinstaller"),
            "--specpath", str(root / ".build"), "--add-data", f"{root / 'frontends/shared-ui'}{os.pathsep}shared-ui"]
+# ARM guest libraries are data, not host ELF dependencies for PyInstaller.
+command += ["--add-data", f"{bundle}{os.pathsep}native/bada_libs"]
 for package in ("PySide6_Essentials", "shiboken6"):
     command += ["--copy-metadata", package]
 for entry in (root / "third_party/notices.txt").read_text(encoding="utf-8").splitlines():

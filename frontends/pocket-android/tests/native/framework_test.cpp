@@ -43,6 +43,123 @@ void string_search_test(Cpu& cpu) {
     cpu.free(empty);
 }
 
+void tokenizer_test(Cpu& cpu) {
+    const uint32_t buffer = text(cpu, ";;terrain.pvr;32;64\n");
+    const uint32_t separators = text(cpu, ";\n");
+    const uint32_t semicolon = text(cpu, ";");
+    require(call(cpu, "strtok", {0, separators}) == 0, "tokenizer retained another guest's cursor");
+    uint32_t token = call(cpu, "strtok", {buffer, semicolon});
+    require(token == buffer + 2 && cpu.read_cstr(token) == "terrain.pvr", "resource index lost its first token");
+    {
+        Cpu other;
+        std::string error;
+        require(other.init(*cpu.img, error), error.c_str());
+        const uint32_t other_separators = text(other, ";");
+        require(call(other, "strtok", {0, other_separators}) == 0,
+                "another guest inherited an active tokenizer");
+        other.free(other_separators);
+    }
+    token = call(cpu, "strtok", {0, separators});
+    require(cpu.read_cstr(token) == "32", "resource index lost its offset token");
+    token = call(cpu, "strtok", {0, separators});
+    require(cpu.read_cstr(token) == "64" && call(cpu, "strtok", {0, separators}) == 0,
+            "resource index tokenization did not stop at its terminator");
+    const uint32_t delimiters = text(cpu, ";;;;"), empty = text(cpu, "");
+    require(call(cpu, "strspn", {delimiters, semicolon}) == 4 &&
+            call(cpu, "strspn", {empty, semicolon}) == 0 &&
+            call(cpu, "strcspn", {delimiters, empty}) == 4 &&
+            call(cpu, "strpbrk", {delimiters, semicolon}) == delimiters &&
+            call(cpu, "strpbrk", {delimiters, empty}) == 0,
+            "delimiter searches returned the wrong span or guest address");
+    require(call(cpu, "strtok", {delimiters, semicolon}) == 0,
+            "delimiter-only input produced a token");
+    for (auto value : {buffer, separators, semicolon, delimiters, empty}) cpu.free(value);
+}
+
+void exception_index_test(Cpu& cpu) {
+    const uint32_t count = cpu.alloc(4), table = cpu.alloc(16);
+    ElfImage library;
+    library.segments.push_back({0x10000000, 4096, 4096, 5, nullptr});
+    library.exidx = table;
+    library.exidx_count = 2;
+    cpu.images.push_back(&library);
+    require(call(cpu, "__gnu_Unwind_Find_exidx", {0x10000101, count}) == table &&
+            cpu.read_u32(count) == 2, "unwinder could not find a mapped library's exception table");
+    require(call(cpu, "dl_unwind_find_exidx", {0x10000100, count}) == table,
+            "unwinder alias did not locate the exception table");
+    require(call(cpu, "__gnu_Unwind_Find_exidx", {0x20000000, count}) == 0 &&
+            cpu.read_u32(count) == 0, "unknown code retained another image's exception index");
+    cpu.images.pop_back();
+    cpu.free(count);
+    cpu.free(table);
+    require(call(cpu, "_ZN3Osp3App11Application9TerminateEv", {}) == 0 && cpu.termination_requested,
+            "Application::Terminate did not request a host loop exit");
+    cpu.termination_requested = false;
+}
+
+void runtime_abi_test() {
+    for (bool hard : {false, true}) {
+        ElfImage game, library;
+        game.float_abi = hard ? ArmFloatAbi::hard : ArmFloatAbi::soft;
+        library.float_abi = hard ? ArmFloatAbi::soft : ArmFloatAbi::hard;
+        for (unsigned index = 0; index < 3; ++index) {
+            Cpu cpu;
+            std::string error;
+            require(!cpu.init(game, error, index == 0 ? &library : nullptr,
+                              index == 1 ? &library : nullptr, index == 2 ? &library : nullptr),
+                    "a runtime library with the wrong calling convention was accepted");
+            const char* names[] = {"libstdc++", "libgcc", "libsupc++"};
+            require(cpu.uc == nullptr && error.find(names[index]) != std::string::npos,
+                    "runtime ABI mismatch did not identify the library before starting the CPU");
+        }
+    }
+}
+
+void random_test(Cpu& cpu) {
+    // Reference outputs from rand.o in the bada SDK's newlib 1.19 libc.a.
+    const std::array<uint32_t, 6> default_sequence = {
+        1481765933, 1085377743, 1270216262, 1191391529, 812669700, 553475508
+    };
+    for (auto expected : default_sequence)
+        require(call(cpu, "rand") == expected, "rand did not use bada's default seed and sequence");
+    const std::array<uint32_t, 6> unsigned_sequence = {
+        1950583551, 1904347508, 668093517, 1658550643, 871423820, 1363333837
+    };
+    call(cpu, "srand", {UINT32_MAX});
+    for (auto expected : unsigned_sequence)
+        require(call(cpu, "rand") == expected, "srand lost the high bit of an unsigned guest seed");
+    call(cpu, "srand", {0});
+    require(call(cpu, "rand") == 0 && call(cpu, "rand") == default_sequence[0],
+            "srand(0) did not preserve bada's sequence");
+    {
+        Cpu other;
+        std::string error;
+        require(other.init(*cpu.img, error), error.c_str());
+        require(call(other, "rand") == default_sequence[0], "another guest inherited the random state");
+        call(other, "srand", {UINT32_MAX});
+        require(call(cpu, "rand") == default_sequence[1] && call(other, "rand") == unsigned_sequence[0],
+                "seeding or advancing one guest changed another guest's random sequence");
+    }
+    call(cpu, "srand", {1});
+    for (auto expected : default_sequence)
+        require(call(cpu, "rand") == expected, "reseed did not reproduce the original random sequence");
+
+    // Angry Birds normalizes rand() by 2^31. Sample that exact calculation to
+    // guard against a host CRT's smaller range, even when running tests on Linux.
+    call(cpu, "srand", {0x12345678});
+    double total = 0, maximum = 0;
+    constexpr unsigned samples = 4096;
+    for (unsigned i = 0; i < samples; ++i) {
+        const uint32_t value = call(cpu, "rand");
+        require(value <= 0x7fffffffu, "rand returned a negative signed int");
+        const double normalized = value / 2147483648.0;
+        total += normalized;
+        if (normalized > maximum) maximum = normalized;
+    }
+    require(maximum > 0.99 && total / samples > 0.48 && total / samples < 0.52,
+            "guest-normalized random values collapsed the idle animation delay range");
+}
+
 void switch_uqi(Cpu& cpu) { hle::call("__gnu_thumb1_case_uqi", cpu); }
 void switch_uhi(Cpu& cpu) { hle::call("__gnu_thumb1_case_uhi", cpu); }
 void switch_shi(Cpu& cpu) { hle::call("__gnu_thumb1_case_shi", cpu); }
@@ -220,12 +337,16 @@ int main() {
         require(initialized, error.c_str());
         cpu.set_reg(UC_ARM_REG_SP, cpu.reg(UC_ARM_REG_SP) - 256);
         string_search_test(cpu);
+        tokenizer_test(cpu);
+        exception_index_test(cpu);
+        runtime_abi_test();
+        random_test(cpu);
         thumb_switch_test(cpu);
         unsigned_float_test(cpu);
         datetime_test(cpu);
         form_initialization_test(cpu);
         SDL_Quit();
-        puts("String terminators, Thumb switch tables, dates and ARM/Thumb form initialization passed");
+        puts("String tokenizers, exception indexes, bada random numbers, dates and ARM/Thumb form initialization passed");
         return 0;
     } catch (const std::exception& error) {
         fprintf(stderr, "FAIL: %s\n", error.what());

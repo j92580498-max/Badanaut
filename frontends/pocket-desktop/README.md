@@ -46,7 +46,7 @@ The same pinned Unicorn 2.1.4, SDL2 and support libraries are used by desktop
 and Android. See [native dependencies](../../third_party/README.md).
 
 Run `python frontends/pocket-desktop/package.py` to bundle the application, shared
-layout/fonts, engine, CPU library, Qt Essentials and native dependencies into `dist/Badanaut/`.
+layout/fonts, engine, CPU library, GNU guest runtimes, Qt Essentials and native dependencies into `dist/Badanaut/`.
 The script also creates a Windows ZIP or Linux tar.gz. Extract the complete
 archive and run `Badanaut.exe` or `./Badanaut/Badanaut`; keep its `_internal`
 directory. Neither Python nor an Android SDK is needed to run a packaged build.
@@ -56,9 +56,17 @@ OpenGL driver. The CI artifacts target x86-64.
 ## Library and display
 
 Import Bada ZIP packages with `Bin/*.exe` and `Info/Appinfo.sys` or
-`Info/manifest.xml`. A single containing directory is supported. A Bada ARM32
-`libstdc++.so.6` from the SDK/firmware must be selected separately; its float ABI
-must match the game. Packages and firmware are never included in distribution.
+`Info/manifest.xml`. A single containing directory is supported. The included
+`native/bada_libs/` automatically supplies `libstdc++.so.6`, `libgcc_s.so.1`
+and `libsupc++.so` for the game's soft-float or hard-float ARM ABI. Development
+builds can also find the repository bundle under `../../bada_libs/`.
+Games and proprietary firmware are not included in distribution.
+
+The optional runtime selector accepts these same three library types. Imports
+preserve earlier versions and take priority over matching bundled defaults.
+Package metadata records `api_version` and `float_abi` separately because bada
+API 2.0 does not imply a particular float convention. See
+[GNU runtime notices and provenance](../../bada_libs/README.md).
 
 Artwork comes from the metadata's `Icon` path, or `icon`, `appicon`, or
 `mainmenuicon` images, or an executable-named image such as `Res/SkyForce.png`. Unsupported/missing
@@ -80,7 +88,8 @@ choices intact. Vsync depends on driver support. Fullscreen starts On by default
 existing saved choices are preserved.
 
 The library uses the OS application-data directory (`Badanaut/bada`), with
-`games/<id>/.badanaut-game.json`, `display.json`, and a separate runtime file.
+`games/<id>/.badanaut-game.json`, `display.json`, and imported runtime files in
+`runtimes/<sha256>/`. Existing root `libstdc++.so.6` installations remain usable.
 `--library <directory>` and `--engine <file>` override the defaults for development.
 Launch logs are bounded to 2 MB and can be exported in Settings.
 

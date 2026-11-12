@@ -124,7 +124,7 @@ class BadaActivity : SDLActivity() {
 
     override fun getArguments(): Array<String> {
         val files = installation ?: return arrayOf("--help")
-        val arguments = arrayOf(
+        val arguments = mutableListOf(
             "--input",
             files.packageDirectory.absolutePath,
             "--libstdcxx",
@@ -132,8 +132,10 @@ class BadaActivity : SDLActivity() {
             "--app-id",
             files.appId,
         )
+        files.exceptionLibrary?.let { arguments.addAll(listOf("--libgcc", it.absolutePath)) }
+        files.cxxSupportLibrary?.let { arguments.addAll(listOf("--libsupcxx", it.absolutePath)) }
         BadaDiagnostics.event(this, "Starting SDL_main")
-        return arguments + DisplaySettings.arguments(this) + (nativeLog?.let { arrayOf("--log-file", it.absolutePath) } ?: emptyArray())
+        return arguments.toTypedArray() + DisplaySettings.arguments(this) + (nativeLog?.let { arrayOf("--log-file", it.absolutePath) } ?: emptyArray())
     }
 
     override fun onDestroy() {

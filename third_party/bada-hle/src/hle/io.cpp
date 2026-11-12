@@ -811,6 +811,11 @@ void c_ferror(Cpu& c) {
 }
 // fprintf(FILE*, fmt, ...). An unknown handle is the guest's stdout/stderr --
 // echo it, so the app's own logging shows up.
+void c_printf(Cpu& c) {
+    const std::string out = hle::format_args(c, c.read_cstr(c.arg32(0)), 1);
+    printf("[app] %s", out.c_str());
+    c.set_ret32(static_cast<uint32_t>(out.size()));
+}
 void c_fprintf(Cpu& c) {
     std::string out = hle::format_args(c, c.read_cstr(c.arg32(1)), 2);
     if (FILE* f = cf(c.arg32(0))) {
@@ -1052,6 +1057,7 @@ void register_io() {
     register_handler("ferror", c_ferror);
     register_handler("fflush", c_fflush);
     register_handler("fprintf", c_fprintf);
+    register_handler("printf", c_printf);
     register_handler("fclose", c_fclose);
 
     register_handler("open", c_open);

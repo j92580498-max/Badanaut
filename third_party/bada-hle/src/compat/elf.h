@@ -45,6 +45,19 @@ typedef struct {
 } Elf32_Phdr;
 
 typedef struct {
+    Elf32_Word sh_name;
+    Elf32_Word sh_type;
+    Elf32_Word sh_flags;
+    Elf32_Addr sh_addr;
+    Elf32_Off sh_offset;
+    Elf32_Word sh_size;
+    Elf32_Word sh_link;
+    Elf32_Word sh_info;
+    Elf32_Word sh_addralign;
+    Elf32_Word sh_entsize;
+} Elf32_Shdr;
+
+typedef struct {
     Elf32_Sword d_tag;
     union {
         Elf32_Word d_val;
@@ -71,6 +84,8 @@ typedef struct {
 #define SELFMAG 4
 #define EI_CLASS 4
 #define ELFCLASS32 1
+#define EI_DATA 5
+#define ELFDATA2LSB 1
 
 // e_machine
 #define EM_ARM 40
@@ -78,13 +93,18 @@ typedef struct {
 // Segment types (p_type)
 #define PT_LOAD 1
 #define PT_DYNAMIC 2
+#define PT_ARM_EXIDX 0x70000001
+#define SHT_ARM_EXIDX 0x70000001
+#define SHT_ARM_ATTRIBUTES 0x70000003
 
 // Dynamic tags (d_tag)
 #define DT_NULL 0
 #define DT_PLTRELSZ 2
+#define DT_HASH 4
 #define DT_STRTAB 5
 #define DT_SYMTAB 6
 #define DT_SYMENT 11
+#define DT_STRSZ 10
 #define DT_REL 17
 #define DT_RELSZ 18
 #define DT_JMPREL 23

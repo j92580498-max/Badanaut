@@ -27,7 +27,8 @@ Keep the Android application ID `org.badanaut.emulator` and
 `.badanaut-game.json` keeps its fields, including optional `icon` and
 `last_played`. Desktop uses the same package metadata. Never let metadata paths
 escape a package. Imports run off the UI thread and preserve resources.
-A firmware runtime remains a separate ARM32 library supplied by the user.
+The GNU ARM32 guest runtime defaults to the bundled `bada_libs/` ABI sets.
+User imports remain optional overrides and retain their previous versions.
 
 Display preferences are presentation settings. Do not change guest bounds or
 texture state to implement them. `third_party/bada-hle/src/display.h` supplies
@@ -42,6 +43,9 @@ in the app source tree. The desktop workflow builds and smoke-tests packaged
 apps on Windows and Linux. The Android workflow tests native rendering, builds
 both ABIs and verifies the APK. Package all redistributed dependency licenses.
 Game files, firmware, generated native libraries and APKs stay outside Git.
+The six GNU runtime libraries in `bada_libs/manifest.json` are the explicit
+exception: retain their licenses, exception, provenance and checksums, and
+package the same bundle on desktop and Android.
 
 Do not commit unless asked and never push directly to the target branch;
 changes go through a pull request on a separate branch.

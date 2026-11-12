@@ -27,7 +27,7 @@
   "buttonSize": 18,
   "footerSize": 12,
   "footerBaseline": 472,
-  "emptyText": "Open the menu to add a Bada game ZIP.\nSelect the Bada runtime in Settings.",
+  "emptyText": "Open the menu to add a Bada game ZIP.",
   "emptyHint": "Right-click or hold a game for details.",
   "settings": [
     {

@@ -92,7 +92,7 @@ class Launcher(QWidget):
                 value = self.draft.get(option["key"], option["choices"][0])
                 label = option["names"][option["choices"].index(value)]
                 controls.append(("setting:" + option["key"], QRectF(158, 56 + 42 * i, 152, 30), label))
-            controls += [("importRuntime", QRectF(10, 280, 300, 30), "Select Bada runtime"),
+            controls += [("importRuntime", QRectF(10, 280, 300, 30), "Import runtime override"),
                          ("diagnostics", QRectF(10, 320, 300, 30), "Export launch log"),
                          ("saveSettings", QRectF(10, 428, 300, 30), "Save settings")]
         elif self.screen == "choices":

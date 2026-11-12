@@ -1,8 +1,10 @@
 package org.badanaut.emulator
 
 import android.content.Context
+import android.util.AtomicFile
 import org.json.JSONObject
 import java.io.File
+import java.io.FileOutputStream
 
 object DisplaySettings {
     private val defaults = JSONObject("""{"scaling":"fit","filter":"nearest","vsync":true,"fullscreen":true,"iconStyle":"glossy"}""")
@@ -17,16 +19,25 @@ object DisplaySettings {
     }
 
     fun load(context: Context): JSONObject = runCatching {
-        validate(JSONObject(File(context.filesDir, "bada/display.json").readText()))
+        AtomicFile(File(context.filesDir, "bada/display.json")).openRead().bufferedReader().use {
+            validate(JSONObject(it.readText()))
+        }
     }.getOrElse { JSONObject(defaults.toString()) }
 
     fun save(context: Context, values: JSONObject) {
         val data = validate(values)
         val file = File(context.filesDir, "bada/display.json")
         file.parentFile!!.mkdirs()
-        val temporary = File(file.parentFile, "display.json.tmp")
-        temporary.writeText(data.toString())
-        check(temporary.renameTo(file)) { "Could not save display settings" }
+        val storage = AtomicFile(file)
+        var output: FileOutputStream? = null
+        try {
+            output = storage.startWrite()
+            output.write(data.toString().toByteArray(Charsets.UTF_8))
+            storage.finishWrite(output)
+        } catch (error: Exception) {
+            storage.failWrite(output)
+            throw error
+        }
     }
 
     fun arguments(context: Context): Array<String> = load(context).let {

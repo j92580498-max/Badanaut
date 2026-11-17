@@ -1,6 +1,7 @@
 #pragma once
 #include "elf_loader.h"
 #include "hle/dispatch.h" // hle::Handler
+#include "hle/graphics.h"
 #include <cstdint>
 #include <deque>
 #include <initializer_list>
@@ -104,6 +105,11 @@ class Cpu {
 
     // --- Application and earliest active timer (host wake/diagnostics) ---
     uint32_t app_instance = 0; // the real app object (factory result)
+    // Framework-owned storage is scoped to this guest process. Buffer views
+    // share data but retain independent positions and limits.
+    struct ByteBuffer { uint32_t data = 0; int cap = 0, pos = 0, limit = 0; };
+    std::unordered_map<uint32_t, ByteBuffer> byte_buffers;
+    std::unordered_map<uint32_t, uint32_t> string_buffers;
     bool timer_active = false;
     uint32_t timer_interval_ms = 0; // last Timer::Start(msec); 0 = never armed
     uint32_t timer_deadline_ms = 0; // SDL monotonic clock at Start(), not after Draw()
@@ -125,6 +131,8 @@ class Cpu {
     bool hard_float = true; // VFP float args (FruitNinja) vs soft-float (GlesCube)
     uint32_t strtok_cursor = 0; // tokenizer state belongs to this guest process
     uint64_t rand_state = 1; // bada/newlib's default seed, independent of the host CRT
+    std::unique_ptr<hle::GraphicsState> graphics;
+    uint32_t byte_buffer_vtable = 0;
 
   private:
     struct TimerEvent {

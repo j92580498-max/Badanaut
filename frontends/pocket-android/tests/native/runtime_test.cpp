@@ -224,23 +224,65 @@ void buffer_test(Cpu& cpu) {
     call(cpu, "_ZN3Osp4Base10ByteBufferC1Ev", {buffer});
     call(cpu, "_ZN3Osp4Base10ByteBuffer9ConstructEi", {buffer, 16});
     const uint32_t data = call(cpu, "_ZNK3Osp4Base10ByteBuffer10GetPointerEv", {buffer});
-    const uint32_t source = cpu.alloc(8);
-    const uint32_t pattern[] = {0x12345678, 0x87654321};
+    const uint32_t source = cpu.alloc(16), destination = cpu.alloc(16);
+    const uint32_t pattern[] = {0xdeadbeef, 0x12345678, 0x87654321};
     cpu.write_mem(source, pattern, sizeof pattern);
+    call(cpu, "_ZN3Osp4Base10BufferBase11SetPositionEi", {buffer, 4});
     require(call(cpu, "_ZN3Osp4Base10ByteBuffer8SetArrayEPKhii", {buffer, source, 4, 8}) == 0, "SetArray failed");
-    require(cpu.read_u32(data + 4) == pattern[0] && cpu.read_u32(data + 8) == pattern[1], "SetArray discarded PCM bytes");
-    require(call(cpu, "_ZN3Osp4Base10ByteBuffer8SetArrayEPKhii", {buffer, source, 15, 8}) != 0, "SetArray accepted overflow");
+    require(cpu.read_u32(data) == 0 && cpu.read_u32(data + 4) == pattern[1] && cpu.read_u32(data + 8) == pattern[2] &&
+            call(cpu, "_ZNK3Osp4Base10BufferBase11GetPositionEv", {buffer}) == 12,
+            "SetArray ignored the source offset or current buffer position");
+    require(call(cpu, "_ZN3Osp4Base10ByteBuffer8SetArrayEPKhii", {buffer, source, 0, 8}) != 0 &&
+            call(cpu, "_ZNK3Osp4Base10BufferBase11GetPositionEv", {buffer}) == 12,
+            "SetArray accepted overflow or advanced on failure");
+    require(call(cpu, "_ZN3Osp4Base10ByteBuffer7SetByteEih", {buffer, 1, 0x42}) == 0 &&
+            cpu.read_u32(data) == 0x4200 &&
+            call(cpu, "_ZNK3Osp4Base10BufferBase11GetPositionEv", {buffer}) == 12,
+            "absolute SetByte changed the position or wrong byte");
+    require(call(cpu, "_ZN3Osp4Base10ByteBuffer6SetIntEi", {buffer, 0xabcdef12}) == 0 &&
+            cpu.read_u32(data + 12) == 0xabcdef12 &&
+            call(cpu, "_ZNK3Osp4Base10BufferBase11GetPositionEv", {buffer}) == 16,
+            "relative SetInt lost bytes or its position advance");
+    require(call(cpu, "_ZN3Osp4Base10ByteBuffer6SetIntEi", {buffer, 1}) != 0 &&
+            call(cpu, "_ZN3Osp4Base10ByteBuffer7SetByteEh", {buffer, 1}) != 0,
+            "relative writes accepted a full buffer");
+    require(call(cpu, "_ZN3Osp4Base10BufferBase11SetPositionEi", {buffer, UINT32_MAX}) != 0 &&
+            call(cpu, "_ZN3Osp4Base10ByteBuffer7SetByteEih", {buffer, UINT32_MAX, 0}) != 0,
+            "buffer accepted negative indexes");
+    call(cpu, "_ZN3Osp4Base10BufferBase11SetPositionEi", {buffer, 4});
+    cpu.write_u32(destination, 0xfeedface);
+    require(call(cpu, "_ZN3Osp4Base10ByteBuffer8GetArrayEPhii", {buffer, destination, 4, 8}) == 0 &&
+            cpu.read_u32(destination) == 0xfeedface && cpu.read_u32(destination + 4) == pattern[1] &&
+            cpu.read_u32(destination + 8) == pattern[2] &&
+            call(cpu, "_ZNK3Osp4Base10BufferBase11GetPositionEv", {buffer}) == 12,
+            "GetArray ignored the destination offset or position advance");
     call(cpu, "_ZN3Osp4Base10BufferBase11SetPositionEi", {buffer, 8});
     call(cpu, "_ZN3Osp4Base10BufferBase4FlipENS0_10PositionToE", {buffer, 0});
     require(call(cpu, "_ZNK3Osp4Base10BufferBase8GetLimitEv", {buffer}) == 8, "Flip did not shorten the buffer");
     require(call(cpu, "_ZNK3Osp4Base10BufferBase11GetCapacityEv", {buffer}) == 16, "Flip changed storage capacity");
     call(cpu, "_ZN3Osp4Base10BufferBase6RewindEv", {buffer});
     require(call(cpu, "_ZNK3Osp4Base10BufferBase8GetLimitEv", {buffer}) == 8, "Rewind changed the limit");
+    require(call(cpu, "_ZN3Osp4Base10ByteBuffer8GetArrayEPhii", {buffer, destination, 0, 9}) != 0,
+            "GetArray read past the limit");
     call(cpu, "_ZN3Osp4Base10BufferBase5ClearEv", {buffer});
     require(call(cpu, "_ZNK3Osp4Base10BufferBase8GetLimitEv", {buffer}) == 16, "Clear did not restore capacity");
+    const uint32_t view = cpu.alloc(36);
+    call(cpu, "_ZN3Osp4Base10ByteBufferC1Ev", {view});
+    require(call(cpu, "_ZN3Osp4Base10ByteBuffer9ConstructERKS1_", {view, buffer}) == 0 &&
+            call(cpu, "_ZNK3Osp4Base10ByteBuffer10GetPointerEv", {view}) == data,
+            "buffer copy did not share its storage");
+    call(cpu, "_ZN3Osp4Base10BufferBase11SetPositionEi", {view, 4});
+    require(call(cpu, "_ZNK3Osp4Base10BufferBase11GetPositionEv", {buffer}) == 0,
+            "shared buffer copy changed the source position");
     call(cpu, "_ZN3Osp4Base10ByteBufferD1Ev", {buffer});
     uint32_t pointer = 0, length = 0;
-    require(!hle::byte_buffer_view(buffer, pointer, length), "destroyed buffer still has a descriptor");
+    require(!hle::byte_buffer_view(cpu, buffer, pointer, length) && cpu.allocation_size(data) != 0 &&
+            cpu.read_u32(data + 4) == pattern[1], "destroying a buffer freed a live shared view");
+    uint32_t result = 1;
+    require(cpu.run_guest(cpu.read_u32(cpu.read_u32(view) + 4), {view}, result) &&
+            cpu.allocation_size(view) == 0 && cpu.allocation_size(data) == 0,
+            "last buffer's virtual destructor retained shared storage");
+    for (const auto object : {buffer, source, destination}) cpu.free(object);
 }
 
 void memory_transfer_test(Cpu& cpu) {

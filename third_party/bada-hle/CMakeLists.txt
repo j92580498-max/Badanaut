@@ -19,10 +19,10 @@ badanaut_add_audio_decoders()
 add_library(bada-hle-core STATIC
     src/elf_loader.cpp src/cpu.cpp src/pixel_accel.cpp
     src/hle/dispatch.cpp src/hle/libc.cpp src/hle/gl.cpp src/hle/osp.cpp
-    src/hle/io.cpp src/hle/audio.cpp src/hle/ui.cpp
+    src/hle/io.cpp src/hle/audio.cpp src/hle/ui.cpp src/hle/graphics.cpp
 )
 target_include_directories(bada-hle-core PUBLIC src)
-target_link_libraries(bada-hle-core PUBLIC bada-sdl unicorn bada-pvr bada-tlsf bada-audio-decoders OpenGL::GL Threads::Threads)
+target_link_libraries(bada-hle-core PUBLIC bada-sdl unicorn bada-pvr bada-tlsf bada-audio-decoders SDL2_image::SDL2_image OpenGL::GL Threads::Threads)
 add_executable(bada-hle src/main.cpp src/control.cpp src/ui_overlay.cpp)
 target_include_directories(bada-hle PRIVATE src)
 target_link_libraries(bada-hle PRIVATE bada-hle-core SDL2_image::SDL2_image
@@ -66,10 +66,13 @@ if(BUILD_TESTING)
     add_executable(bada-framework-test "${REPO_ROOT}/frontends/pocket-android/tests/native/framework_test.cpp")
     target_link_libraries(bada-framework-test PRIVATE bada-hle-core)
     add_test(NAME desktop-runtime-framework COMMAND bada-framework-test)
+    add_executable(bada-graphics-test "${REPO_ROOT}/frontends/pocket-android/tests/native/graphics_test.cpp")
+    target_link_libraries(bada-graphics-test PRIVATE bada-hle-core)
+    add_test(NAME desktop-runtime-graphics COMMAND bada-graphics-test)
     add_executable(bada-elf-test "${REPO_ROOT}/frontends/pocket-android/tests/native/elf_test.cpp" src/elf_loader.cpp)
     target_include_directories(bada-elf-test PRIVATE src)
     add_test(NAME runtime-arm-elf COMMAND bada-elf-test)
-    foreach(probe bada-framework-test bada-elf-test)
+    foreach(probe bada-framework-test bada-graphics-test bada-elf-test)
         set_target_properties(${probe} PROPERTIES
             RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/native"
             RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_BINARY_DIR}/native")
@@ -77,10 +80,12 @@ if(BUILD_TESTING)
             target_compile_options(${probe} PRIVATE /utf-8)
         endif()
     endforeach()
-    set_tests_properties(desktop-runtime-framework runtime-arm-elf PROPERTIES TIMEOUT 30)
-    foreach(runtime_target unicorn SDL2::SDL2)
-        add_custom_command(TARGET bada-framework-test POST_BUILD
-            COMMAND ${CMAKE_COMMAND} -E copy_if_different "$<TARGET_FILE:${runtime_target}>" "$<TARGET_FILE_DIR:bada-framework-test>")
+    set_tests_properties(desktop-runtime-framework desktop-runtime-graphics runtime-arm-elf PROPERTIES TIMEOUT 30)
+    foreach(probe bada-framework-test bada-graphics-test)
+        foreach(runtime_target unicorn SDL2::SDL2 SDL2_image::SDL2_image)
+            add_custom_command(TARGET ${probe} POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different "$<TARGET_FILE:${runtime_target}>" "$<TARGET_FILE_DIR:${probe}>")
+        endforeach()
     endforeach()
 endif()
 

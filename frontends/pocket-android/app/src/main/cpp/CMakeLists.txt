@@ -12,6 +12,7 @@ include("${REPO_ROOT}/cmake/Dependencies.cmake")
 badanaut_add_sdl()
 badanaut_add_unicorn()
 badanaut_add_support_libraries()
+badanaut_add_sdl_image()
 badanaut_add_audio_decoders()
 
 add_library(bada-android SHARED
@@ -27,6 +28,7 @@ add_library(bada-android SHARED
     "${BADA_ROOT}/hle/io.cpp"
     "${BADA_ROOT}/hle/audio.cpp"
     "${BADA_ROOT}/hle/ui.cpp"
+    "${BADA_ROOT}/hle/graphics.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/gl_android.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/diagnostic_log.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/ui_overlay_android.cpp"
@@ -49,6 +51,7 @@ target_link_libraries(bada-android PRIVATE
     bada-pvr
     bada-tlsf
     bada-audio-decoders
+    SDL2_image::SDL2_image
     android
     log
     GLESv1_CM

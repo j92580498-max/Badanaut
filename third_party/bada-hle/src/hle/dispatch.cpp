@@ -432,6 +432,7 @@ void init_dispatch() {
     register_libc();
     register_gl();
     register_osp();
+    register_graphics();
     register_io();
     register_ui();
     register_audio();

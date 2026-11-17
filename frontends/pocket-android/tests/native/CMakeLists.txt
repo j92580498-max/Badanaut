@@ -14,6 +14,7 @@ set(BADA_ROOT "${REPO_ROOT}/third_party/bada-hle/src")
 include("${REPO_ROOT}/cmake/Dependencies.cmake")
 badanaut_add_sdl()
 badanaut_add_support_libraries()
+badanaut_add_sdl_image()
 badanaut_add_audio_decoders()
 option(BADA_BUILD_UNICORN "Build the pinned ARM32 CPU engine" ON)
 if(BADA_BUILD_UNICORN)
@@ -34,6 +35,7 @@ set(BADA_TEST_SOURCES
     "${BADA_ROOT}/hle/io.cpp"
     "${BADA_ROOT}/hle/audio.cpp"
     "${BADA_ROOT}/hle/ui.cpp"
+    "${BADA_ROOT}/hle/graphics.cpp"
 )
 add_library(bada-test-engine STATIC ${BADA_TEST_SOURCES}
     "${REPO_ROOT}/frontends/pocket-android/app/src/main/cpp/gl_android.cpp"
@@ -41,7 +43,7 @@ add_library(bada-test-engine STATIC ${BADA_TEST_SOURCES}
 target_compile_definitions(bada-test-engine PRIVATE BADA_GLES_BACKEND=1)
 target_include_directories(bada-test-engine PUBLIC "${BADA_ROOT}")
 target_link_libraries(bada-test-engine PUBLIC
-    bada-sdl ${BADA_CPU_TARGET} bada-pvr bada-tlsf bada-audio-decoders PkgConfig::GLES1 PkgConfig::GLES2 Threads::Threads
+    bada-sdl ${BADA_CPU_TARGET} bada-pvr bada-tlsf bada-audio-decoders SDL2_image::SDL2_image PkgConfig::GLES1 PkgConfig::GLES2 Threads::Threads
 )
 
 enable_testing()
@@ -74,6 +76,10 @@ add_test(NAME runtime-files COMMAND bada-file-test)
 add_executable(bada-framework-test framework_test.cpp)
 target_link_libraries(bada-framework-test PRIVATE bada-test-engine)
 add_test(NAME runtime-framework COMMAND bada-framework-test)
+add_executable(bada-graphics-test graphics_test.cpp)
+target_link_libraries(bada-graphics-test PRIVATE bada-test-engine)
+add_test(NAME runtime-graphics COMMAND bada-graphics-test)
+set_tests_properties(runtime-graphics PROPERTIES TIMEOUT 30)
 set_tests_properties(runtime-framework PROPERTIES TIMEOUT 30)
 add_executable(bada-thread-test thread_test.cpp)
 target_link_libraries(bada-thread-test PRIVATE bada-test-engine)
@@ -119,7 +125,7 @@ endforeach()
 add_library(bada-desktop-test-engine STATIC ${BADA_TEST_SOURCES})
 target_include_directories(bada-desktop-test-engine PUBLIC "${BADA_ROOT}")
 target_link_libraries(bada-desktop-test-engine PUBLIC
-    bada-sdl ${BADA_CPU_TARGET} bada-pvr bada-tlsf bada-audio-decoders PkgConfig::DESKTOP_GL Threads::Threads
+    bada-sdl ${BADA_CPU_TARGET} bada-pvr bada-tlsf bada-audio-decoders SDL2_image::SDL2_image PkgConfig::DESKTOP_GL Threads::Threads
 )
 add_executable(bada-desktop-render-test gl_render_test.cpp)
 target_compile_definitions(bada-desktop-render-test PRIVATE BADA_TEST_DESKTOP=1)

@@ -403,7 +403,7 @@ void player_openfile(Cpu& cpu) {
 void player_openbuffer(Cpu& cpu) {
     begin_open(cpu);
     uint32_t data = 0, length = 0;
-    if (!hle::byte_buffer_view(cpu.arg32(1), data, length) || !length || !cpu.memory_mapped(data, length)) {
+    if (!hle::byte_buffer_view(cpu, cpu.arg32(1), data, length) || !length || !cpu.memory_mapped(data, length)) {
         cpu.set_ret32(invalid_state);
         return;
     }
@@ -566,7 +566,7 @@ void audio_prepare(Cpu& cpu) {
 
 void audio_write(Cpu& cpu) {
     uint32_t data = 0, length = 0;
-    if (!hle::byte_buffer_view(cpu.arg32(1), data, length) || !data || !length || length > 4 * 1024 * 1024) {
+    if (!hle::byte_buffer_view(cpu, cpu.arg32(1), data, length) || !data || !length || length > 4 * 1024 * 1024) {
         cpu.set_ret32(invalid_state);
         return;
     }

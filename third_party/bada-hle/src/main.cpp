@@ -1015,7 +1015,7 @@ int main(int argc, char** argv) {
         // than deref a bad pointer; valid (heap) textures run unchanged.
         cpu.patch(0x259290, [](Cpu& c) -> bool { // TextureAtlasPage::GetTexture
             uint32_t tex = c.read_u32(c.reg(UC_ARM_REG_R1) + 0x40);
-            if (tex >= 0x80000000u && tex < 0x88000000u) {
+            if (c.memory_ptr(tex, 1)) {
                 return false;
             }
             uint32_t out = c.reg(UC_ARM_REG_R0);

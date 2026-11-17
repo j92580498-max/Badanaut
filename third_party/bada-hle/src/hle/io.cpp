@@ -3,6 +3,7 @@
 #include <SDL2/SDL.h>
 #include <algorithm>
 #include <cctype>
+#include <cerrno>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -36,8 +37,12 @@ void mkdir_p(const std::string& path) {
 }
 
 using Buf = Cpu::ByteBuffer;
+constexpr uint32_t end_of_file = 0xa0000000u + 1503;
+constexpr uint32_t file_not_found = 0xa0000000u + 1603;
+constexpr uint32_t illegal_access = 0xa0000000u + 1900;
 constexpr uint32_t invalid_arg = 0xa0000000u + 1909;
 constexpr uint32_t invalid_state = 0xa0000000u + 1926;
+constexpr uint32_t io_error = 0xa0000000u + 1928;
 constexpr uint32_t out_of_memory = 0xa0000000u + 2505;
 constexpr uint32_t out_of_range = 0xa0000000u + 2506;
 constexpr uint32_t overflow = 0xa0000000u + 2507;
@@ -564,31 +569,35 @@ void file_construct(Cpu& c) {
     // Reuse c_fopen's writable /Home mapping and the r/w/a modes described by
     // touchHLE's stdio.rs. Nova's New Game must truncate its previous save.
     if (!binary_file_mode(mode)) {
-        c.set_ret32(0x80000000);
+        c.set_ret32(invalid_arg);
         return;
     }
     bool writing = mode[0] == 'w' || mode[0] == 'a';
     std::string host = writing ? write_path(path) : resolve(path);
     if (host.empty()) {
         printf("[io] File::Construct(\"%s\") -> NOT FOUND\n", path.c_str());
-        c.set_ret32(0x80000000);
+        c.set_ret32(file_not_found);
         return;
     }
     FILE* f = fopen(host.c_str(), mode.c_str());
     if (!f) {
-        c.set_ret32(0x80000000);
+        const int error = errno;
+        c.set_ret32(error == ENOENT || error == ENOTDIR ? file_not_found :
+                    error == EACCES || error == EPERM ? illegal_access : io_error);
         return;
     }
     File fl;
     fl.name = path;
     fl.stream.reset(f);
-    fseek(f, 0, SEEK_END);
-    long n = ftell(f);
-    if (n < 0) {
-        c.set_ret32(0x80000000);
+    if (fseek(f, 0, SEEK_END) != 0) {
+        c.set_ret32(io_error);
         return;
     }
-    fseek(f, 0, SEEK_SET);
+    long n = ftell(f);
+    if (n < 0 || fseek(f, 0, SEEK_SET) != 0) {
+        c.set_ret32(io_error);
+        return;
+    }
     fl.size = static_cast<size_t>(n);
     g_files[o] = std::move(fl);
     c.set_ret32(0);
@@ -619,16 +628,31 @@ size_t file_read_into_guest(Cpu& c, File& f, uint32_t destination, size_t length
 void file_read(Cpu& c) {
     auto fi = g_files.find(c.arg32(0));
     auto bi = c.byte_buffers.find(c.arg32(1));
-    if (fi == g_files.end() || bi == c.byte_buffers.end()) {
-        c.set_ret32(0x80000000);
+    // Preserve Bada's cause bits: Zenonia masks results with 0xffff before
+    // checking them. A generic high-bit error looks like a successful read
+    // and lets an absent options file overwrite the game's audio defaults.
+    if (fi == g_files.end()) {
+        c.set_ret32(invalid_state);
+        return;
+    }
+    if (bi == c.byte_buffers.end() || !bi->second.data) {
+        c.set_ret32(invalid_arg);
         return;
     }
     File& f = fi->second;
     Buf& b = bi->second;
+    if (b.pos < 0 || b.pos >= b.limit || b.limit > b.cap ||
+        uint64_t(b.data) + b.limit > UINT32_MAX ||
+        !c.memory_mapped(b.data + b.pos, b.limit - b.pos)) {
+        c.set_ret32(invalid_arg);
+        return;
+    }
     size_t n = file_read_into_guest(c, f, b.data + b.pos, static_cast<size_t>(b.limit - b.pos));
     b.pos += n;
     b.limit = b.pos;
-    c.set_ret32(0); // result; the caller rewinds the filled buffer to read it
+    // Successful reads leave the caller to rewind the filled buffer. EOF
+    // without any bytes must not be mistaken for a valid options payload.
+    c.set_ret32(ferror(f.stream.get()) ? io_error : n ? 0 : end_of_file);
 }
 // File::Read(void* buffer, int length) -> bytes read into the guest buffer.
 void file_read_raw(Cpu& c) {

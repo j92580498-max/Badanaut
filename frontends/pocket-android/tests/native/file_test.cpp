@@ -33,6 +33,48 @@ uint32_t c_string(Cpu& cpu, const char* value) {
     return address;
 }
 
+void file_result_test(Cpu& cpu, const std::filesystem::path& package) {
+    constexpr const char* read_buffer = "_ZN3Osp2Io4File4ReadERNS_4Base10ByteBufferE";
+    const uint32_t file = cpu.alloc(20), buffer = cpu.alloc(36), name = cpu.alloc(20), mode = cpu.alloc(20);
+    call(cpu, "_ZN3Osp2Io4FileC1Ev", {file});
+    call(cpu, "_ZN3Osp4Base10ByteBufferC1Ev", {buffer});
+    call(cpu, "_ZN3Osp4Base10ByteBuffer9ConstructEi", {buffer, 8});
+    hle::osp_string_set(cpu, name, "/Res/data/missing-options.sav");
+    hle::osp_string_set(cpu, mode, "r");
+    require(call(cpu, construct, {file, name, mode, 0}) == 0xa0000000u + 1603,
+            "missing file did not report Bada E_FILE_NOT_FOUND");
+    // Zenonia's MC_fsRead strips the source bits before testing a result.
+    // A bare 0x80000000 becomes success and makes missing options mute audio.
+    const uint32_t failed_read = call(cpu, read_buffer, {file, buffer});
+    require(failed_read == 0xa0000000u + 1926 && (failed_read & 0xffffu) != 0,
+            "unopened file read became success after the guest's result mask");
+    const uint32_t data = call(cpu, "_ZNK3Osp4Base10ByteBuffer10GetPointerEv", {buffer});
+    cpu.write_u32(data, 0x12345678);
+    require(call(cpu, read, {file, data, 4}) == 0 && cpu.read_u32(data) == 0x12345678,
+            "failed raw read changed the caller's options or reported bytes");
+
+    std::ofstream(package / "Res/data/empty-options.sav", std::ios::binary).close();
+    hle::osp_string_set(cpu, name, "/Res/data/empty-options.sav");
+    require(call(cpu, construct, {file, name, mode, 0}) == 0,
+            "empty options file could not be opened");
+    require(call(cpu, read_buffer, {file, buffer}) == 0xa0000000u + 1503 &&
+            call(cpu, "_ZNK3Osp4Base10BufferBase8GetLimitEv", {buffer}) == 0 &&
+            cpu.read_u32(data) == 0x12345678,
+            "empty options file reported a successful read or fabricated bytes");
+    call(cpu, "_ZN3Osp4Base10ByteBuffer9ConstructEi", {buffer, 8});
+    call(cpu, "_ZN3Osp4Base10BufferBase11SetPositionEi", {buffer, 8});
+    require(call(cpu, read_buffer, {file, buffer}) == 0xa0000000u + 1909 &&
+            call(cpu, read_buffer, {file, 0}) == 0xa0000000u + 1909,
+            "read without buffer space did not report Bada E_INVALID_ARG");
+    call(cpu, "_ZN3Osp2Io4FileD1Ev", {file});
+    hle::osp_string_set(cpu, mode, "bad");
+    require(call(cpu, construct, {file, name, mode, 0}) == 0xa0000000u + 1909,
+            "invalid file mode did not report Bada E_INVALID_ARG");
+    call(cpu, "_ZN3Osp4Base10ByteBufferD1Ev", {buffer});
+    for (const auto object : {name, mode}) call(cpu, "_ZN3Osp4Base6StringD1Ev", {object});
+    for (const auto object : {file, buffer, name, mode}) cpu.free(object);
+}
+
 void text_mode_test(Cpu& cpu, const std::filesystem::path& package) {
     // Newlib's text mode preserves bytes. The host Windows CRT would reject
     // "rtb", translate CRLF, and stop at Ctrl-Z if this stayed a text stream.
@@ -364,6 +406,7 @@ int main() {
         std::string error;
         require(cpu.init(image, error), error.c_str());
         file_test(cpu, package);
+        file_result_test(cpu, package);
         text_mode_test(cpu, package);
         descriptor_test(cpu, package);
         buffer_save_test(cpu, package);

@@ -66,10 +66,34 @@ and rejects an existing writable destination. The older UTC SystemTime overload
 and TimeSpan ticks accessor are implemented; SystemTime ticks use milliseconds
 since the Unix epoch, as documented by bada 1.0.
 
+## Audio settings
+
+Zenonia's `MC_fsRead` masks failed framework results with `0xffff` before
+checking them. The generic `0x80000000` returned for an unopened file therefore
+became success. A missing `option.sav` appeared to contain a valid zero-filled
+payload, replacing the default volume and music settings with zero.
+
+File construction and ByteBuffer reads now return the documented bada errors
+with their cause bits intact, including `E_FILE_NOT_FOUND`, `E_INVALID_STATE`,
+`E_INVALID_ARG`, `E_END_OF_FILE` and host I/O errors. Reads validate the buffer
+before calculating its remaining space. Missing and empty options files can
+no longer masquerade as successful reads. Raw reads retain their byte-count
+return convention, and successful reads and const buffer writes retain their
+existing behavior.
+
+A fresh private-data directory reproduced volume zero before the fix and the
+game's default volume of 25 after it. The original startup and menu WAV effects
+then opened through Player and produced nonzero stereo S16 PCM through SDL's
+disk audio driver at 48,000 Hz. The supplied WAV files use mono 16-bit PCM at
+22,050 Hz, which the existing decoder and mixer already support. Game binaries
+and saved settings were not patched. Looping music and audible device playback
+have not been separately validated.
+
 ## References and validation
 
 Declarations were located with `gh search code`, including `FGrpCanvas`,
-`FBaseByteBuffer`, `FSysSystemTime` and `FIoFileAttributes`. Behavior was checked
+`FBaseByteBuffer`, `FBaseErrors`, `FSysSystemTime`, `FIoFile` and
+`FIoFileAttributes`. Behavior was checked
 against the original
 [bada 1.0 API reference](https://github.com/romanm11/bada-SDK-1.0.0-Help/blob/master/com.osp.apireference.help_1.0.0.jar),
 with the
@@ -92,6 +116,9 @@ zero and negative pivots, scaled and overlapping copies, masked/transparent UI
 bitmaps, image decoding, virtual object destruction, String array cleanup and
 ByteBuffer sharing/offsets. A file probe writes, moves and reopens a save payload
 and verifies that its bytes and const buffer state survive the round trip.
+The file regression also checks missing and empty settings files, the guest's
+result mask, unchanged bytes after a failed raw read and invalid read buffers
+and file modes. It failed against the previous engine and passes with the fix.
 
 Android device/APK validation, audible playback and a complete campaign have
 not been performed. The shared engine and Android GLES presenter are covered

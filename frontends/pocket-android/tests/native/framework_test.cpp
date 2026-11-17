@@ -43,6 +43,48 @@ void string_search_test(Cpu& cpu) {
     cpu.free(empty);
 }
 
+void framework_string_test(Cpu& cpu) {
+    const uint32_t array = cpu.alloc(3 * 20 + 4), suffix = cpu.alloc(20);
+    require(static_cast<int32_t>(array) > 0 && static_cast<int32_t>(suffix) > 0,
+            "guest allocations are invalid as signed Bada resource IDs");
+    cpu.write_u32(array + 60, 0xdeadbeef);
+    call(cpu, "_ZN3Osp4Base6StringC1Ei", {array, 32});
+    require(call(cpu, "_ZNK3Osp4Base6String7IsEmptyEv", {array}) == 1 && cpu.read_u32(array + 4) >= 32,
+            "String(capacity) did not construct an empty string");
+    call(cpu, "_ZN3Osp4Base6StringC1Ev", {array + 20});
+    const uint16_t prefix[] = {'/', 'R', 'e', 's', '/', 0};
+    const uint32_t wide = cpu.alloc(sizeof prefix);
+    cpu.write_mem(wide, prefix, sizeof prefix);
+    require(call(cpu, "_ZN3Osp4Base6StringaSEPKw", {array + 20, wide}) == array + 20,
+            "wide String assignment did not return its reference");
+    cpu.free(wide);
+    hle::osp_string_set(cpu, suffix, "UI/title.bmp");
+    const auto old = cpu.read_u32(array + 20 + 12);
+    require(call(cpu, "_ZN3Osp4Base6StringpLERKS1_", {array + 20, suffix}) == array + 20 &&
+            hle::osp_string_get(cpu, array + 20) == "/Res/UI/title.bmp" && cpu.allocation_size(old) == 0,
+            "String operator+= lost its reference, path suffix, or old allocation");
+    call(cpu, "_ZN3Osp4Base6StringC1ERKS1_", {array + 40, array + 20});
+    call(cpu, "_ZN3Osp4Base6StringpLERKS1_", {array + 40, array + 40});
+    require(hle::osp_string_get(cpu, array + 40) == "/Res/UI/title.bmp/Res/UI/title.bmp" &&
+            hle::osp_string_get(cpu, array + 20) == "/Res/UI/title.bmp",
+            "self-append invalidated the source or a copied string");
+    // Zenonia emits virtual destructor calls for stack arrays, with a 20-byte
+    // stride. The non-deleting destructor must release only internal storage.
+    uint32_t result = 1;
+    for (unsigned index = 0; index < 3; ++index) {
+        const uint32_t object = array + index * 20, buffer = cpu.read_u32(object + 12);
+        require(cpu.run_guest(cpu.read_u32(cpu.read_u32(object)), {object}, result) && result == 0 &&
+                cpu.allocation_size(buffer) == 0 && cpu.allocation_size(array) != 0,
+                "virtual String destruction faulted or freed stack array storage");
+    }
+    require(cpu.read_u32(array + 60) == 0xdeadbeef, "String array cleanup overwrote adjacent storage");
+    const uint32_t buffer = cpu.read_u32(suffix + 12);
+    require(cpu.run_guest(cpu.read_u32(cpu.read_u32(suffix) + 4), {suffix}, result) &&
+            cpu.allocation_size(buffer) == 0 && cpu.allocation_size(suffix) == 0,
+            "String deleting destructor retained its object or text");
+    cpu.free(array);
+}
+
 void tokenizer_test(Cpu& cpu) {
     const uint32_t buffer = text(cpu, ";;terrain.pvr;32;64\n");
     const uint32_t separators = text(cpu, ";\n");
@@ -231,6 +273,12 @@ void datetime_test(Cpu& cpu) {
             call(cpu, getters[5], {object}) < 60, "SystemTime did not populate a current UTC DateTime");
     require(call(cpu, current, {3, object}) != 0 && call(cpu, current, {0, 0}) != 0,
             "SystemTime accepted an invalid mode or output object");
+    require(call(cpu, "_ZN3Osp6System10SystemTime14GetCurrentTimeERNS_4Base8DateTimeE", {object}) == 0 &&
+            call(cpu, getters[0], {object}) >= 2020, "deprecated SystemTime API did not return UTC time");
+    call(cpu, "_ZNK3Osp4Base8DateTime7GetTimeEv", {span, object});
+    const uint32_t milliseconds = call(cpu, "_ZNK3Osp4Base8TimeSpan15GetMillisecondsEv", {span});
+    require(call(cpu, "_ZNK3Osp4Base8TimeSpan8GetTicksEv", {span}) == milliseconds,
+            "TimeSpan ticks did not use milliseconds");
 
     const uint32_t tm_object = cpu.alloc(40);
     std::tm normalized{};
@@ -337,6 +385,7 @@ int main() {
         require(initialized, error.c_str());
         cpu.set_reg(UC_ARM_REG_SP, cpu.reg(UC_ARM_REG_SP) - 256);
         string_search_test(cpu);
+        framework_string_test(cpu);
         tokenizer_test(cpu);
         exception_index_test(cpu);
         runtime_abi_test();

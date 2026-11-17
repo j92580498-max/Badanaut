@@ -35,12 +35,13 @@ void mkdir_p(const std::string& path) {
     fs::create_directories(path, ec);
 }
 
-struct Buf {
-    uint32_t data = 0;
-    int cap = 0;
-    int pos = 0;
-    int limit = 0;
-};
+using Buf = Cpu::ByteBuffer;
+constexpr uint32_t invalid_arg = 0xa0000000u + 1909;
+constexpr uint32_t invalid_state = 0xa0000000u + 1926;
+constexpr uint32_t out_of_memory = 0xa0000000u + 2505;
+constexpr uint32_t out_of_range = 0xa0000000u + 2506;
+constexpr uint32_t overflow = 0xa0000000u + 2507;
+constexpr uint32_t underflow = 0xa0000000u + 3100;
 struct File {
     // Like the stdio handlers below (and touchHLE's libc/stdio.rs), keep an
     // open stream rather than copying a whole resource pack for every reader.
@@ -49,8 +50,6 @@ struct File {
     size_t pos = 0;
     std::string name;
 };
-std::map<uint32_t, Buf> g_bufs;           // ByteBuffer object -> backing store
-std::map<uint32_t, uint32_t> g_owned_buffers; // StringToUtf8N allocates an owned result
 std::map<uint32_t, File> g_files;         // File object -> owned host stream
 std::map<uint32_t, uint64_t> g_attr_size; // FileAttributes object -> size
 std::map<uint32_t, std::string> g_directories;
@@ -334,39 +333,54 @@ void direntry_datetime(Cpu& c) {
 }
 
 // ---- ByteBuffer ----
+void bb_dtor(Cpu& c) {
+    const auto found = c.byte_buffers.find(c.arg32(0));
+    if (found != c.byte_buffers.end()) {
+        const uint32_t data = found->second.data;
+        c.byte_buffers.erase(found);
+        // Construct(buffer) creates a shared view. Keep its storage until the
+        // last descriptor is destroyed, including results deleted virtually.
+        const bool shared = std::any_of(c.byte_buffers.begin(), c.byte_buffers.end(),
+            [data](const auto& entry) { return entry.second.data == data; });
+        if (!shared) c.free(data);
+    }
+    c.set_ret32(0);
+}
+void bb_delete(Cpu& c) { const uint32_t object = c.arg32(0); bb_dtor(c); c.free(object); }
 void bb_ctor(Cpu& c) {
     uint32_t o = c.arg32(0);
+    bb_dtor(c);
+    if (!c.byte_buffer_vtable)
+        c.byte_buffer_vtable = c.make_vtable(8, {{0, bb_dtor}, {1, bb_delete}});
     if (o) {
-        c.write_u32(o, c.noop_vtable());
+        c.write_u32(o, c.byte_buffer_vtable);
     }
-    g_bufs[o] = Buf{};
+    c.byte_buffers[o] = Buf{};
     c.set_ret32(o);
 }
 void bb_construct(Cpu& c) {
     uint32_t o = c.arg32(0);
-    int cap = c.arg32(1);
+    int cap = static_cast<int32_t>(c.arg32(1));
+    if (cap < 0) { c.set_ret32(invalid_arg); return; }
     uint32_t data = c.alloc(cap ? cap : 1, 4);
-    std::vector<uint8_t> z(cap, 0);
-    if (cap) {
-        c.write_mem(data, z.data(), cap);
-    }
-    g_bufs[o] = {data, cap, 0, cap};
+    if (!data) { c.set_ret32(out_of_memory); return; }
+    bb_dtor(c);
+    c.byte_buffers[o] = {data, cap, 0, cap};
     c.set_ret32(0);
 }
 // ByteBuffer::Construct(const ByteBuffer&) -- bada shares the source's storage,
 // so copy the descriptor rather than the bytes.
 void bb_construct_copy(Cpu& c) {
-    auto src = g_bufs.find(c.arg32(1));
-    g_bufs[c.arg32(0)] = src == g_bufs.end() ? Buf{} : src->second;
+    const uint32_t object = c.arg32(0);
+    auto src = c.byte_buffers.find(c.arg32(1));
+    if (src == c.byte_buffers.end() || !src->second.data) { c.set_ret32(invalid_arg); return; }
+    const Buf view = src->second;
+    if (object != c.arg32(1)) {
+        bb_dtor(c);
+        c.byte_buffers[object] = view;
+    }
     c.set_ret32(0);
 }
-void bb_dtor(Cpu& c) {
-    const auto owned = g_owned_buffers.find(c.arg32(0));
-    if (owned != g_owned_buffers.end()) { c.free(owned->second); g_owned_buffers.erase(owned); }
-    g_bufs.erase(c.arg32(0));
-    c.set_ret32(0);
-}
-void bb_delete(Cpu& c) { const uint32_t object = c.arg32(0); bb_dtor(c); c.free(object); }
 // StringUtil::StringToUtf8N returns a caller-owned ByteBuffer containing the
 // UTF-8 bytes and a NUL terminator. Marmalade reads it with strlen/strcpy and
 // deletes it through its virtual destructor after native name entry.
@@ -384,100 +398,123 @@ void string_to_utf8(Cpu& c) {
     }
     c.write_mem(data, encoded, size);
     SDL_free(encoded);
-    c.write_u32(object, c.make_vtable(8, {{0, bb_dtor}, {1, bb_delete}}));
-    g_bufs[object] = {data, static_cast<int>(size), 0, static_cast<int>(size)};
-    g_owned_buffers[object] = data;
+    c.set_reg(UC_ARM_REG_R0, object);
+    bb_ctor(c);
+    c.byte_buffers[object] = {data, static_cast<int>(size), 0, static_cast<int>(size)};
     c.set_ret32(object);
 }
-void bb_getpointer(Cpu& c) { c.set_ret32(g_bufs.count(c.arg32(0)) ? g_bufs[c.arg32(0)].data : 0); }
+void bb_getpointer(Cpu& c) { c.set_ret32(c.byte_buffers.count(c.arg32(0)) ? c.byte_buffers[c.arg32(0)].data : 0); }
 void bb_getbyte(Cpu& c) {
-    auto it = g_bufs.find(c.arg32(0));
-    int idx = c.arg32(1);
+    auto it = c.byte_buffers.find(c.arg32(0));
+    int idx = static_cast<int32_t>(c.arg32(1));
     uint8_t v = 0;
-    if (it != g_bufs.end() && idx < it->second.cap) {
-        c.read_mem(it->second.data + idx, &v, 1);
-    }
+    if (it == c.byte_buffers.end() || idx < 0 || idx >= it->second.limit) { c.set_ret32(out_of_range); return; }
+    c.read_mem(it->second.data + idx, &v, 1);
     c.write_mem(c.arg32(2), &v, 1);
     c.set_ret32(0);
 }
 void bb_setbyte(Cpu& c) {
-    auto it = g_bufs.find(c.arg32(0));
+    auto it = c.byte_buffers.find(c.arg32(0));
     uint8_t v = c.arg32(1);
-    if (it != g_bufs.end() && it->second.pos < it->second.cap) {
-        c.write_mem(it->second.data + it->second.pos++, &v, 1);
-    }
+    if (it == c.byte_buffers.end() || it->second.pos >= it->second.limit) { c.set_ret32(overflow); return; }
+    c.write_mem(it->second.data + it->second.pos++, &v, 1);
+    c.set_ret32(0);
+}
+void bb_setbyte_index(Cpu& c) {
+    auto it = c.byte_buffers.find(c.arg32(0));
+    const int index = static_cast<int32_t>(c.arg32(1));
+    if (it == c.byte_buffers.end() || index < 0 || index >= it->second.limit) { c.set_ret32(out_of_range); return; }
+    const uint8_t value = static_cast<uint8_t>(c.arg32(2));
+    c.write_mem(it->second.data + index, &value, 1);
+    c.set_ret32(0);
+}
+void bb_setint(Cpu& c) {
+    auto it = c.byte_buffers.find(c.arg32(0));
+    if (it == c.byte_buffers.end() || it->second.limit - it->second.pos < 4) { c.set_ret32(overflow); return; }
+    c.write_u32(it->second.data + it->second.pos, c.arg32(1));
+    it->second.pos += 4;
     c.set_ret32(0);
 }
 
 // BufferBase, the ByteBuffer half the app uses to read bytes back out.
 void bb_getlimit(Cpu& c) {
-    auto it = g_bufs.find(c.arg32(0));
-    c.set_ret32(it == g_bufs.end() ? 0 : (uint32_t)it->second.limit);
+    auto it = c.byte_buffers.find(c.arg32(0));
+    c.set_ret32(it == c.byte_buffers.end() ? 0 : (uint32_t)it->second.limit);
 }
 void bb_getcapacity(Cpu& c) {
-    auto it = g_bufs.find(c.arg32(0));
-    c.set_ret32(it == g_bufs.end() ? 0 : static_cast<uint32_t>(it->second.cap));
+    auto it = c.byte_buffers.find(c.arg32(0));
+    c.set_ret32(it == c.byte_buffers.end() ? 0 : static_cast<uint32_t>(it->second.cap));
+}
+void bb_getposition(Cpu& c) {
+    auto it = c.byte_buffers.find(c.arg32(0));
+    c.set_ret32(it == c.byte_buffers.end() ? 0 : static_cast<uint32_t>(it->second.pos));
 }
 void bb_setposition(Cpu& c) {
-    auto it = g_bufs.find(c.arg32(0));
-    if (it != g_bufs.end()) {
-        it->second.pos = (int)c.arg32(1);
-    }
+    auto it = c.byte_buffers.find(c.arg32(0));
+    const int position = static_cast<int32_t>(c.arg32(1));
+    if (it == c.byte_buffers.end()) { c.set_ret32(invalid_state); return; }
+    if (position < 0 || position > it->second.limit) { c.set_ret32(out_of_range); return; }
+    it->second.pos = position;
     c.set_ret32(0);
 }
 // Flip(PositionTo): limit = position, position = 0 -- switches a buffer from
 // filling to draining.
 void bb_flip(Cpu& c) {
-    auto it = g_bufs.find(c.arg32(0));
-    if (it != g_bufs.end()) {
+    auto it = c.byte_buffers.find(c.arg32(0));
+    if (it != c.byte_buffers.end()) {
         it->second.limit = it->second.pos;
         it->second.pos = 0;
     }
     c.set_ret32(0);
 }
 void bb_clear(Cpu& c) {
-    auto found = g_bufs.find(c.arg32(0));
-    if (found != g_bufs.end()) {
+    auto found = c.byte_buffers.find(c.arg32(0));
+    if (found != c.byte_buffers.end()) {
         found->second.pos = 0;
         found->second.limit = found->second.cap;
     }
     c.set_ret32(0);
 }
 void bb_rewind(Cpu& c) {
-    auto found = g_bufs.find(c.arg32(0));
-    if (found != g_bufs.end()) found->second.pos = 0;
+    auto found = c.byte_buffers.find(c.arg32(0));
+    if (found != c.byte_buffers.end()) found->second.pos = 0;
     c.set_ret32(0);
 }
 void bb_setarray(Cpu& c) {
-    auto found = g_bufs.find(c.arg32(0));
+    auto found = c.byte_buffers.find(c.arg32(0));
     const uint32_t source = c.arg32(1);
     const int index = static_cast<int>(c.arg32(2)), count = static_cast<int>(c.arg32(3));
-    if (found == g_bufs.end() || index < 0 || count < 0 ||
-        index > found->second.limit || count > found->second.limit - index || (count && !source)) {
-        c.set_ret32(0x80000000);
-        return;
+    if (found == c.byte_buffers.end() || !source) { c.set_ret32(invalid_arg); return; }
+    if (index < 0 || count < 0) { c.set_ret32(out_of_range); return; }
+    if (count > found->second.limit - found->second.pos) { c.set_ret32(overflow); return; }
+    if (uint64_t(source) + index + count > UINT32_MAX || !c.memory_mapped(source + index, count)) {
+        c.set_ret32(invalid_arg); return;
     }
     std::vector<uint8_t> bytes(count);
     if (count) {
-        c.read_mem(source, bytes.data(), count);
-        c.write_mem(found->second.data + index, bytes.data(), count);
+        c.read_mem(source + index, bytes.data(), count);
+        c.write_mem(found->second.data + found->second.pos, bytes.data(), count);
     }
+    found->second.pos += count;
     c.set_ret32(0);
 }
 // GetArray(byte* dst, int index, int count)
 void bb_getarray(Cpu& c) {
-    auto it = g_bufs.find(c.arg32(0));
+    auto it = c.byte_buffers.find(c.arg32(0));
     uint32_t dst = c.arg32(1);
     int index = (int)c.arg32(2), count = (int)c.arg32(3);
-    if (it == g_bufs.end() || index < 0 || count < 0 || index + count > it->second.cap) {
-        c.set_ret32(0x80000000);
-        return;
+    if (it == c.byte_buffers.end() || !dst) { c.set_ret32(invalid_arg); return; }
+    if (index < 0 || count < 0) { c.set_ret32(out_of_range); return; }
+    if (count > it->second.limit - it->second.pos) { c.set_ret32(underflow); return; }
+    if (uint64_t(dst) + index + count > UINT32_MAX || !c.memory_mapped(dst + index, count)) {
+        c.set_ret32(invalid_arg); return;
     }
     std::vector<uint8_t> b((size_t)count);
     if (count) {
-        c.read_mem(it->second.data + index, b.data(), (uint32_t)count);
-        c.write_mem(dst, b.data(), (uint32_t)count);
+        c.read_mem(it->second.data + it->second.pos, b.data(), (uint32_t)count);
+        c.write_mem(dst + index, b.data(), (uint32_t)count);
     }
+    it->second.pos += count;
     c.set_ret32(0);
 }
 
@@ -494,14 +531,16 @@ void ascii_ctor(Cpu& c) {
 }
 void ascii_getbytesn(Cpu& c) {
     std::string s = read_string(c, c.arg32(1));
-    uint32_t obj = c.make_stub_object(32);
+    uint32_t obj = c.alloc(32);
     uint32_t data = c.alloc(s.size() + 1, 4);
     if (!s.empty()) {
         c.write_mem(data, s.data(), (uint32_t)s.size());
     }
     uint8_t z = 0;
     c.write_mem(data + s.size(), &z, 1);
-    g_bufs[obj] = {data, (int)s.size(), 0, (int)s.size()};
+    c.set_reg(UC_ARM_REG_R0, obj);
+    bb_ctor(c);
+    c.byte_buffers[obj] = {data, (int)s.size(), 0, (int)s.size()};
     c.set_ret32(obj);
 }
 
@@ -562,7 +601,7 @@ void file_getname(Cpu& c) {
     c.set_ret32(output);
 }
 size_t file_read_into_guest(Cpu& c, File& f, uint32_t destination, size_t length) {
-    const size_t requested = std::min(length, f.size - f.pos);
+    const size_t requested = std::min(length, f.pos < f.size ? f.size - f.pos : size_t{0});
     // Reuse the stdio fread translation in bounded chunks. A request for an
     // entire pack must not allocate another pack-sized host staging buffer.
     std::vector<uint8_t> bytes(std::min(requested, size_t{64 * 1024}));
@@ -579,16 +618,17 @@ size_t file_read_into_guest(Cpu& c, File& f, uint32_t destination, size_t length
 }
 void file_read(Cpu& c) {
     auto fi = g_files.find(c.arg32(0));
-    auto bi = g_bufs.find(c.arg32(1));
-    if (fi == g_files.end() || bi == g_bufs.end()) {
+    auto bi = c.byte_buffers.find(c.arg32(1));
+    if (fi == g_files.end() || bi == c.byte_buffers.end()) {
         c.set_ret32(0x80000000);
         return;
     }
     File& f = fi->second;
     Buf& b = bi->second;
-    size_t n = file_read_into_guest(c, f, b.data, static_cast<size_t>(b.cap));
-    b.limit = n;
-    c.set_ret32(0); // returns count? engine treats E_SUCCESS=0; report via buffer limit
+    size_t n = file_read_into_guest(c, f, b.data + b.pos, static_cast<size_t>(b.limit - b.pos));
+    b.pos += n;
+    b.limit = b.pos;
+    c.set_ret32(0); // result; the caller rewinds the filled buffer to read it
 }
 // File::Read(void* buffer, int length) -> bytes read into the guest buffer.
 void file_read_raw(Cpu& c) {
@@ -603,18 +643,11 @@ void file_read_raw(Cpu& c) {
     size_t n = file_read_into_guest(c, f, buf, static_cast<size_t>(len));
     c.set_ret32((uint32_t)n); // count of bytes read
 }
-// File::Write(const void*, int) returns a result, unlike Read's byte count.
-// Marmalade converts E_SUCCESS into the requested number of bytes itself.
-void file_write_raw(Cpu& c) {
-    auto fi = g_files.find(c.arg32(0));
-    uint32_t source = c.arg32(1);
-    int length = static_cast<int32_t>(c.arg32(2));
-    if (fi == g_files.end() || length < 0) { c.set_ret32(0x80000000); return; }
-    File& f = fi->second;
-    std::vector<uint8_t> bytes(std::min(static_cast<size_t>(length), size_t{64 * 1024}));
+size_t file_write_from_guest(Cpu& c, File& f, uint32_t source, size_t length) {
+    std::vector<uint8_t> bytes(std::min(length, size_t{64 * 1024}));
     size_t total = 0;
-    while (total < static_cast<size_t>(length)) {
-        size_t chunk = std::min(bytes.size(), static_cast<size_t>(length) - total);
+    while (total < length) {
+        size_t chunk = std::min(bytes.size(), length - total);
         c.read_mem(source + total, bytes.data(), static_cast<uint32_t>(chunk));
         size_t wrote = fwrite(bytes.data(), 1, chunk, f.stream.get());
         total += wrote;
@@ -623,7 +656,38 @@ void file_write_raw(Cpu& c) {
     long position = ftell(f.stream.get());
     f.pos = position >= 0 ? static_cast<size_t>(position) : f.pos + total;
     f.size = std::max(f.size, f.pos);
+    return total;
+}
+// File::Write(const void*, int) returns a result, unlike Read's byte count.
+// Marmalade converts E_SUCCESS into the requested number of bytes itself.
+void file_write_raw(Cpu& c) {
+    auto fi = g_files.find(c.arg32(0));
+    uint32_t source = c.arg32(1);
+    int length = static_cast<int32_t>(c.arg32(2));
+    if (fi == g_files.end() || length < 0) { c.set_ret32(0x80000000); return; }
+    const size_t total = file_write_from_guest(c, fi->second, source, static_cast<size_t>(length));
     c.set_ret32(total == static_cast<size_t>(length) ? 0 : 0x80000000);
+}
+void file_write(Cpu& c) {
+    const auto fi = g_files.find(c.arg32(0));
+    const auto bi = c.byte_buffers.find(c.arg32(1));
+    if (fi == g_files.end()) { c.set_ret32(invalid_state); return; }
+    if (bi == c.byte_buffers.end() || !bi->second.data) { c.set_ret32(invalid_arg); return; }
+    const Buf& buffer = bi->second;
+    const size_t length = buffer.limit - buffer.pos;
+    const size_t total = file_write_from_guest(c, fi->second, buffer.data + buffer.pos, length);
+    // The buffer is const: writing a save must retain its position and limit.
+    c.set_ret32(total == length ? 0 : 0x80000000);
+}
+void file_move(Cpu& c) {
+    const std::string source = read_string(c, c.arg32(0)), destination = read_string(c, c.arg32(1));
+    if (source.empty() || destination.empty()) { c.set_ret32(invalid_arg); return; }
+    const std::string from = resolve(source);
+    if (from.empty() || !ci_resolve(g_home, home_rel(destination)).empty()) { c.set_ret32(0x80000000); return; }
+    const std::string to = write_path(destination);
+    std::error_code error;
+    fs::rename(from, to, error);
+    c.set_ret32(error ? 0x80000000 : 0);
 }
 void file_remove(Cpu& c) {
     // Resolve the same private data file that Construct reads. Returning
@@ -976,9 +1040,9 @@ void set_package_root(const std::string& root) {
     printf("[io] package root: %s (home: %s)\n", root.c_str(), g_home.c_str());
 }
 
-bool byte_buffer_view(uint32_t object, uint32_t& data, uint32_t& length) {
-    const auto found = g_bufs.find(object);
-    if (found == g_bufs.end() || found->second.limit < 0 || found->second.limit > found->second.cap) return false;
+bool byte_buffer_view(Cpu& c, uint32_t object, uint32_t& data, uint32_t& length) {
+    const auto found = c.byte_buffers.find(object);
+    if (found == c.byte_buffers.end() || found->second.limit < 0 || found->second.limit > found->second.cap) return false;
     data = found->second.data;
     length = static_cast<uint32_t>(found->second.limit);
     return true;
@@ -1006,6 +1070,7 @@ void register_io() {
     register_handler("_ZN3Osp4Base10ByteBuffer9ConstructERKS1_", bb_construct_copy);
     register_handler("_ZNK3Osp4Base10BufferBase8GetLimitEv", bb_getlimit);
     register_handler("_ZNK3Osp4Base10BufferBase11GetCapacityEv", bb_getcapacity);
+    register_handler("_ZNK3Osp4Base10BufferBase11GetPositionEv", bb_getposition);
     register_handler("_ZN3Osp4Base10BufferBase11SetPositionEi", bb_setposition);
     register_handler("_ZN3Osp4Base10BufferBase4FlipENS0_10PositionToE", bb_flip);
     register_handler("_ZN3Osp4Base10BufferBase5ClearEv", bb_clear);
@@ -1019,9 +1084,12 @@ void register_io() {
     register_handler("_ZNK3Osp4Text13AsciiEncoding9GetBytesNERKNS_4Base6StringE", ascii_getbytesn);
     register_handler("_ZN3Osp4Base10ByteBufferD1Ev", bb_dtor);
     register_handler("_ZN3Osp4Base10ByteBufferD2Ev", bb_dtor);
+    register_handler("_ZN3Osp4Base10ByteBufferD0Ev", bb_delete);
     register_handler("_ZNK3Osp4Base10ByteBuffer10GetPointerEv", bb_getpointer);
     register_handler("_ZNK3Osp4Base10ByteBuffer7GetByteEiRh", bb_getbyte);
     register_handler("_ZN3Osp4Base10ByteBuffer7SetByteEh", bb_setbyte);
+    register_handler("_ZN3Osp4Base10ByteBuffer7SetByteEih", bb_setbyte_index);
+    register_handler("_ZN3Osp4Base10ByteBuffer6SetIntEi", bb_setint);
 
     register_handler("_ZN3Osp2Io4FileC1Ev", file_ctor);
     register_handler("_ZN3Osp2Io4FileC2Ev", file_ctor);
@@ -1033,6 +1101,8 @@ void register_io() {
     register_handler("_ZN3Osp2Io4File4ReadERNS_4Base10ByteBufferE", file_read);
     register_handler("_ZN3Osp2Io4File4ReadEPvi", file_read_raw);              // Read(void*, int)
     register_handler("_ZN3Osp2Io4File5WriteEPKvi", file_write_raw);
+    register_handler("_ZN3Osp2Io4File5WriteERKNS_4Base10ByteBufferE", file_write);
+    register_handler("_ZN3Osp2Io4File4MoveERKNS_4Base6StringES5_", file_move);
     register_handler("_ZN3Osp2Io4File6RemoveERKNS_4Base6StringE", file_remove);
     register_handler("_ZN3Osp2Io4File11IsFileExistERKNS_4Base6StringE", file_exists);
     register_handler("_ZN3Osp2Io4File4SeekENS0_16FileSeekPositionEl", file_seek);

@@ -93,6 +93,10 @@ Runs the **unmodified ARM binaries** end to end:
   levels with touch input, sound and normal idle animations. The
   [compatibility notes](ANGRY_BIRDS.md) cover exception support, complete font
   resources, runtime selection and the bada random-number range.
+- **Zenonia** (bada API 1.0, hard-float, Canvas graphics) boots to its title and
+  main menu, reads the supplied save slots and starts a new character through
+  its introductory scenes. The [compatibility notes](ZENONIA.md) cover its
+  resource handles, framework strings, rotated bitmaps and save-buffer support.
 
 This exercises the whole stack: ARM emulation, custom ELF load/reloc, the Osp
 framework HLE (App/Ui/Frame/Timer with synthesized guest vtables), GL/EGL

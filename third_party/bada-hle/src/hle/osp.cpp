@@ -11,6 +11,7 @@
 #include <ctime>
 #include <deque>
 #include <map>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -27,6 +28,8 @@ namespace {
 //   +12 __pValue    (mchar* = wchar_t*, 2-byte UTF-16, NUL-terminated)
 // Size 16. mchar is 2 bytes (Tag_ABI_PCS_wchar_t: 2).
 constexpr uint32_t STR_VPTR = 0, STR_CAP = 4, STR_LEN = 8, STR_PVAL = 12;
+void str_dtor(Cpu& c);
+void str_delete(Cpu& c);
 int g_canvas_width = 480, g_canvas_height = 640;
 uint32_t g_orientation = 1;
 bool g_frame_oriented = false;
@@ -35,49 +38,25 @@ std::map<uint32_t, uint32_t> g_control_parents;
 std::map<uint32_t, uint32_t> g_orientation_listeners;
 struct OrientationEvent { uint32_t source, listener, orientation; };
 std::deque<OrientationEvent> g_orientation_events;
-uint32_t g_canvas_buffer = 0;
-
-void canvas_lock(Cpu& c) {
-    if (!g_canvas_buffer) {
-        g_canvas_buffer = c.alloc(g_canvas_width * g_canvas_height * 4, 4);
-        if (g_canvas_buffer) {
-            std::vector<uint8_t> clear((size_t)g_canvas_width * g_canvas_height * 4, 0);
-            c.write_mem(g_canvas_buffer, clear.data(), (uint32_t)clear.size());
-        }
-    }
-    uint32_t info = c.arg32(1);
-    if (info && g_canvas_buffer) {
-        c.write_u32(info + 4, g_canvas_width);
-        c.write_u32(info + 8, g_canvas_height);
-        c.write_u32(info + 12, g_canvas_width * 4);
-        c.write_u32(info + 16, 32);
-        c.write_u32(info + 20, 2); // PIXEL_FORMAT_ARGB8888
-        c.write_u32(info + 24, g_canvas_buffer);
-    }
-    c.set_ret32(g_canvas_buffer ? 0 : 1);
-}
-
-void canvas_unlock(Cpu& c) { c.set_ret32(0); }
-
-void canvas_show(Cpu& c) {
-    if (g_canvas_buffer) {
-        hle::gl_present_canvas(c, g_canvas_buffer, g_canvas_width, g_canvas_height);
-    }
-    c.set_ret32(0);
-}
 
 // Build a String object at `obj` from a UTF-16 array of `len` mchars (without
 // the terminator) already gathered host-side.
-void string_construct(Cpu& c, uint32_t obj, const std::vector<uint16_t>& u16) {
+void string_construct(Cpu& c, uint32_t obj, const std::vector<uint16_t>& u16, uint32_t capacity = 16) {
     uint32_t len = (uint32_t)u16.size();
-    uint32_t cap = len < 16 ? 16 : len + 1;
+    uint32_t cap = std::max(capacity, len + 1);
+    if (cap > guest::HEAP_SIZE / 2) throw std::runtime_error("String capacity exceeds guest heap");
     uint32_t buf = c.alloc(cap * 2, 2);
+    if (!buf) throw std::runtime_error("String allocation failed");
     if (len) {
         c.write_mem(buf, u16.data(), len * 2);
     }
     uint16_t nul = 0;
     c.write_mem(buf + len * 2, &nul, 2);
-    c.write_u32(obj + STR_VPTR, 0); // TODO: synthesize Object vtable when a virtual call faults
+    const auto previous = c.string_buffers.find(obj);
+    if (previous != c.string_buffers.end()) c.free(previous->second);
+    c.string_buffers[obj] = buf;
+    // Zenonia destroys stack arrays of String through virtual slot zero.
+    c.write_u32(obj + STR_VPTR, c.make_vtable(8, {{0, str_dtor}, {1, str_delete}}));
     c.write_u32(obj + STR_CAP, cap);
     c.write_u32(obj + STR_LEN, len);
     c.write_u32(obj + STR_PVAL, buf);
@@ -98,6 +77,7 @@ void str_ctor_wchar(Cpu& c) {
         }
     }
     string_construct(c, obj, u16);
+    c.set_ret32(obj);
 }
 
 // Osp::Base::String::String(char const*)  -- r0=this, r1=char* src (widen to UTF-16)
@@ -149,18 +129,29 @@ void str_ctor_empty(Cpu& c) {
     string_construct(c, c.arg32(0), {});
     c.set_ret32(c.arg32(0));
 }
+void str_ctor_capacity(Cpu& c) {
+    const uint32_t object = c.arg32(0);
+    const int32_t capacity = static_cast<int32_t>(c.arg32(1));
+    string_construct(c, object, {}, capacity > 0 ? static_cast<uint32_t>(capacity) : 16);
+    c.set_ret32(object);
+}
 // Osp::Base::String::String(const String&)
 void str_ctor_copy(Cpu& c) {
     string_construct(c, c.arg32(0), string_read(c, c.arg32(1)));
     c.set_ret32(c.arg32(0));
 }
-// Osp::Base::String::Append(const String&) / operator=(const String&)
+// Osp::Base::String::Append(const String&)
 void str_append(Cpu& c) {
     std::vector<uint16_t> u16 = string_read(c, c.arg32(0));
     std::vector<uint16_t> add = string_read(c, c.arg32(1));
     u16.insert(u16.end(), add.begin(), add.end());
     string_construct(c, c.arg32(0), u16);
     c.set_ret32(0);
+}
+void str_append_assign(Cpu& c) {
+    const uint32_t object = c.arg32(0);
+    str_append(c);
+    c.set_ret32(object); // operator+= returns String&, while Append returns result
 }
 void str_append_char(Cpu& c) {
     std::vector<uint16_t> u16 = string_read(c, c.arg32(0));
@@ -183,8 +174,21 @@ void str_index(Cpu& c) {
     c.set_ret32(index < c.read_u32(object + STR_LEN) ? c.read_u32(object + STR_PVAL) + index * 2 : 0);
 }
 
-// Osp::Base::String::~String()  -- bump allocator: nothing to free
-void str_dtor(Cpu& c) { c.set_ret32(0); }
+void str_dtor(Cpu& c) {
+    const auto found = c.string_buffers.find(c.arg32(0));
+    if (found != c.string_buffers.end()) {
+        c.free(found->second);
+        c.string_buffers.erase(found);
+        c.write_u32(c.arg32(0) + STR_PVAL, 0);
+        c.write_u32(c.arg32(0) + STR_LEN, 0);
+    }
+    c.set_ret32(0);
+}
+void str_delete(Cpu& c) {
+    const uint32_t object = c.arg32(0);
+    str_dtor(c);
+    c.free(object);
+}
 
 // --- Osp::Base::Collection::ArrayList (32 bytes) ---
 // Built virtually-callable: the bootstrap dispatches Add() through [vtable+16].
@@ -235,12 +239,11 @@ void stub_ctor(Cpu& c) {
 void ret_ok(Cpu& c) { c.set_ret32(0); }   // E_SUCCESS
 void ret_true(Cpu& c) { c.set_ret32(1); } // bool true
 
-// SystemTime::GetTicks(long long& out) -- monotonic ms since start (static, so
-// r0 = &out). Apps drive animation/physics off this; a frozen 0 stalls them.
+// SystemTime::GetTicks(long long& out) -- milliseconds since the Unix epoch.
+// This clock also supplies dates; animation code subtracts successive samples.
 void systemtime_getticks(Cpu& c) {
-    static const auto t0 = std::chrono::steady_clock::now();
     int64_t ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                     std::chrono::steady_clock::now() - t0)
+                     std::chrono::system_clock::now().time_since_epoch())
                      .count();
     uint32_t out = c.arg32(0);
     if (out) {
@@ -302,11 +305,21 @@ void timespan_getms(Cpu& c) {
     c.set_ret64((uint64_t)c.read_u32(o + TS_TICKS) |
                 ((uint64_t)c.read_u32(o + TS_TICKS + 4) << 32));
 }
+void systemtime_getcurrent_utc(Cpu& c) {
+    const uint32_t object = c.arg32(0);
+    c.set_reg(UC_ARM_REG_R0, 0);
+    c.set_reg(UC_ARM_REG_R1, object);
+    systemtime_getcurrent(c);
+}
 
 // Application::GetAppFrame() -> IAppFrame whose GetFrame() (vtable slot 9) returns
 // a Frame. Adding a control invokes its initialization callback before attachment.
 uint32_t g_appframe = 0, g_frame = 0;
 void frame_getframe(Cpu& c) { c.set_ret32(g_frame); }
+void appframe_getcanvas(Cpu& c) {
+    c.set_ret32(hle::make_frame_canvas(c, g_frame_oriented ? g_canvas_width : 480,
+                                        g_frame_oriented ? g_canvas_height : 800));
+}
 void control_add(Cpu& c) {
     const uint32_t parent = c.arg32(0), child = c.arg32(1);
     if (!child || !c.memory_mapped(child, 4)) { c.set_ret32(0xa0000000u + 1909); return; }
@@ -389,7 +402,7 @@ void app_getappframe(Cpu& c) {
     if (!g_appframe) {
         g_frame = c.make_stub_object(256, 64);                  // the Frame/Container
         c.write_u32(g_frame, c.make_vtable(64, {{24, control_add}}));
-        uint32_t vt = c.make_vtable(64, {{5, appframe_addtouchlistener}, {9, frame_getframe}});
+        uint32_t vt = c.make_vtable(64, {{2, appframe_getcanvas}, {5, appframe_addtouchlistener}, {9, frame_getframe}});
         g_appframe = c.alloc(64, 8);
         for (int i = 0; i < 64; i += 4) {
             c.write_u32(g_appframe + i, 0);
@@ -529,8 +542,7 @@ void frame_setorientation(Cpu& c) {
         g_orientation = orientation;
         g_canvas_width = orientation == 2 || orientation == 4 ? 800 : 480;
         g_canvas_height = orientation == 2 || orientation == 4 ? 480 : 800;
-        c.free(g_canvas_buffer);
-        g_canvas_buffer = 0;
+        hle::resize_frame_canvas(c, g_canvas_width, g_canvas_height);
         hle::gl_set_surface_size(g_canvas_width, g_canvas_height);
         for (const auto& entry : g_orientation_listeners)
             g_orientation_events.push_back({entry.first, entry.second, orientation});
@@ -559,7 +571,6 @@ void register_osp() {
     g_appframe = g_frame = 0;
     g_canvas_width = 480;
     g_canvas_height = 640;
-    g_canvas_buffer = 0;
     g_orientation_events.clear();
     g_orientation_listeners.clear();
     g_touch_multipoint.clear();
@@ -572,18 +583,23 @@ void register_osp() {
     register_handler("_ZN3Osp4Base6StringC2EPKc", str_ctor_char);
     register_handler("_ZN3Osp4Base6StringC1Ev", str_ctor_empty); // String()
     register_handler("_ZN3Osp4Base6StringC2Ev", str_ctor_empty);
+    register_handler("_ZN3Osp4Base6StringC1Ei", str_ctor_capacity);
+    register_handler("_ZN3Osp4Base6StringC2Ei", str_ctor_capacity);
     register_handler("_ZNK3Osp4Base6StringixEi", str_index);
     register_handler("_ZNK3Osp4Base6String7IsEmptyEv", [](Cpu& c) { c.set_ret32(c.read_u32(c.arg32(0) + STR_LEN) == 0); });
     register_handler("_ZN3Osp4Base6StringC1ERKS1_", str_ctor_copy); // String(const String&)
     register_handler("_ZN3Osp4Base6StringC2ERKS1_", str_ctor_copy);
     register_handler("_ZN3Osp4Base6String6AppendERKS1_", str_append);
+    register_handler("_ZN3Osp4Base6StringpLERKS1_", str_append_assign);
     register_handler("_ZN3Osp4Base6String6AppendEc", str_append_char);
     register_handler("_ZN3Osp4Base6StringaSERKS1_", str_assign);
+    register_handler("_ZN3Osp4Base6StringaSEPKw", str_ctor_wchar);
     register_handler("_ZN3Osp4Base6String5ClearEv", str_clear);
     register_handler("_ZNK3Osp4Base6String9GetLengthEv", str_getlength);
     register_handler("_ZNK3Osp4Base6String10GetPointerEv", str_ispointer);
     register_handler("_ZN3Osp4Base6StringD1Ev", str_dtor); // ~String()
     register_handler("_ZN3Osp4Base6StringD2Ev", str_dtor);
+    register_handler("_ZN3Osp4Base6StringD0Ev", str_delete);
 
     register_handler("_ZN3Osp4Base10Collection9ArrayListC1Ev", arraylist_ctor);
     register_handler("_ZN3Osp4Base10Collection9ArrayListC2Ev", arraylist_ctor);
@@ -606,8 +622,8 @@ void register_osp() {
     register_handler("_ZN3Osp8Graphics9RectangleC2Eiiii", rect_ctor4);
     register_handler("_ZN3Osp8Graphics9RectangleC1Ev", rect_ctor0);
     register_handler("_ZN3Osp8Graphics9RectangleC2Ev", rect_ctor0);
-    register_handler("_ZN3Osp8Graphics9RectangleD1Ev", str_dtor);
-    register_handler("_ZN3Osp8Graphics9RectangleD2Ev", str_dtor);
+    register_handler("_ZN3Osp8Graphics9RectangleD1Ev", ret_ok);
+    register_handler("_ZN3Osp8Graphics9RectangleD2Ev", ret_ok);
     register_handler("_ZN3Osp4Base8DateTimeC1Ev", datetime_ctor);
     register_handler("_ZN3Osp4Base8DateTimeC2Ev", datetime_ctor);
     register_handler("_ZNK3Osp4Base8DateTime7GetTimeEv", datetime_gettime);
@@ -618,7 +634,9 @@ void register_osp() {
     register_handler("_ZNK3Osp4Base8DateTime9GetMinuteEv", [](Cpu& c) { c.set_ret32(c.read_u32(c.arg32(0) + 20)); });
     register_handler("_ZNK3Osp4Base8DateTime9GetSecondEv", [](Cpu& c) { c.set_ret32(c.read_u32(c.arg32(0) + 24) >> 16); });
     register_handler("_ZN3Osp6System10SystemTime14GetCurrentTimeENS0_8TimeModeERNS_4Base8DateTimeE", systemtime_getcurrent);
+    register_handler("_ZN3Osp6System10SystemTime14GetCurrentTimeERNS_4Base8DateTimeE", systemtime_getcurrent_utc);
     register_handler("_ZNK3Osp4Base8TimeSpan15GetMillisecondsEv", timespan_getms);
+    register_handler("_ZNK3Osp4Base8TimeSpan8GetTicksEv", timespan_getms);
     register_handler("_ZN3Osp4Base8TimeSpanD1Ev", str_dtor);
     register_handler("_ZN3Osp4Base8TimeSpanD2Ev", str_dtor);
     const auto form_ctor = +[](Cpu& c) {
@@ -737,9 +755,6 @@ void register_osp() {
     register_handler("_ZNK3Osp7Locales6Locale14GetCountryCodeEv", locale_country);
     register_handler("_ZN3Osp7Locales6LocaleD1Ev", ret_ok);
 
-    register_handler("_ZN3Osp8Graphics6Canvas4LockERNS0_10BufferInfoEl", canvas_lock);
-    register_handler("_ZN3Osp8Graphics6Canvas6UnlockEv", canvas_unlock);
-    register_handler("_ZN3Osp8Graphics6Canvas4ShowEv", canvas_show);
 }
 
 // Override the system locale reported to the guest (from --locale / BADA_LOCALE).

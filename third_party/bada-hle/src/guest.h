@@ -35,7 +35,9 @@ constexpr uint32_t STACK_SIZE = 0x00800000; // 8 MB
 
 // Guest heap for Osp_allocEx / malloc / new. TLSF reuses freed blocks inside
 // this host-owned pool, which is shared with Unicorn through uc_mem_map_ptr.
-constexpr uint32_t HEAP_BASE = 0x80000000;
+// Zenonia's Bada wrapper casts File* to a signed resource ID and checks > 0.
+// Keep allocations below INT32_MAX, clear of HLE helpers and the guest stack.
+constexpr uint32_t HEAP_BASE = 0x48000000;
 constexpr uint32_t HEAP_SIZE = 0x20000000; // 512 MB
 
 inline uint32_t tramp_addr(uint32_t import_index) {

@@ -54,7 +54,7 @@ void player_pump(Cpu& cpu);
 void audio_pump(Cpu& cpu); // completed PCM buffers -> guest AudioOut listener
 void audio_pause(bool pause);
 void audio_shutdown();
-bool byte_buffer_view(uint32_t object, uint32_t& data, uint32_t& length);
+bool byte_buffer_view(Cpu& cpu, uint32_t object, uint32_t& data, uint32_t& length);
 // Per-frame pump (osp.cpp): delivers whatever Control::SendUserEvent queued to
 // the app's OnUserEventReceivedN. bada posts these to the UI event loop, so the
 // callback lands on a later frame, not inside the SendUserEvent call.

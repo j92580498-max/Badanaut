@@ -253,6 +253,53 @@ void file_test(Cpu& cpu, const std::filesystem::path& package) {
     require(call(cpu, construct, {first, name, mode, 0}) != 0,
             "removed checkpoint is still readable");
 }
+void buffer_save_test(Cpu& cpu, const std::filesystem::path& package) {
+    const uint32_t file = cpu.alloc(20), temporary = cpu.alloc(20), saved = cpu.alloc(20), mode = cpu.alloc(20);
+    require(static_cast<int32_t>(file) > 0, "File pointer is invalid as a signed resource ID");
+    const uint32_t buffer = cpu.alloc(36), source = c_string(cpu, "HEADpayloadTAIL");
+    hle::osp_string_set(cpu, temporary, "/Home/zenonia/temp.dat");
+    hle::osp_string_set(cpu, saved, "/Home/zenonia/save.dat");
+    hle::osp_string_set(cpu, mode, "w");
+    call(cpu, "_ZN3Osp4Base10ByteBufferC1Ev", {buffer});
+    require(call(cpu, "_ZN3Osp4Base10ByteBuffer9ConstructEi", {buffer, 12}) == 0,
+            "save buffer construction failed");
+    const uint32_t pixels = call(cpu, "_ZNK3Osp4Base10ByteBuffer10GetPointerEv", {buffer});
+    call(cpu, "_ZN3Osp4Base10ByteBuffer6SetIntEi", {buffer, 0x12345678});
+    require(call(cpu, "_ZN3Osp4Base10ByteBuffer8SetArrayEPKhii", {buffer, source, 4, 7}) == 0,
+            "save payload transfer failed");
+    call(cpu, "_ZN3Osp4Base10BufferBase4FlipENS0_10PositionToE", {buffer, 0});
+    call(cpu, "_ZN3Osp4Base10BufferBase11SetPositionEi", {buffer, 4});
+    call(cpu, "_ZN3Osp2Io4FileC1Ev", {file});
+    require(call(cpu, construct, {file, temporary, mode, 0}) == 0 &&
+            call(cpu, "_ZN3Osp2Io4File5WriteERKNS_4Base10ByteBufferE", {file, buffer}) == 0 &&
+            call(cpu, "_ZNK3Osp4Base10BufferBase11GetPositionEv", {buffer}) == 4 &&
+            call(cpu, "_ZNK3Osp4Base10BufferBase8GetLimitEv", {buffer}) == 11,
+            "File::Write did not write the remaining bytes of a const buffer");
+    call(cpu, "_ZN3Osp2Io4FileD1Ev", {file});
+    require(call(cpu, "_ZN3Osp2Io4File4MoveERKNS_4Base6StringES5_", {temporary, saved}) == 0 &&
+            !std::filesystem::exists(package / "Home/zenonia/temp.dat") &&
+            std::filesystem::file_size(package / "Home/zenonia/save.dat") == 7,
+            "save-file move lost its payload or left the temporary file");
+    std::ofstream(package / "Home/zenonia/temp.dat") << "replacement";
+    require(call(cpu, "_ZN3Osp2Io4File4MoveERKNS_4Base6StringES5_", {temporary, saved}) != 0,
+            "File::Move overwrote an existing save");
+    hle::osp_string_set(cpu, mode, "r");
+    require(call(cpu, construct, {file, saved, mode, 0}) == 0, "saved payload could not be reopened");
+    call(cpu, "_ZN3Osp4Base10BufferBase5ClearEv", {buffer});
+    call(cpu, "_ZN3Osp4Base10BufferBase11SetPositionEi", {buffer, 2});
+    require(call(cpu, "_ZN3Osp2Io4File4ReadERNS_4Base10ByteBufferE", {file, buffer}) == 0 &&
+            call(cpu, "_ZNK3Osp4Base10BufferBase11GetPositionEv", {buffer}) == 9 &&
+            call(cpu, "_ZNK3Osp4Base10BufferBase8GetLimitEv", {buffer}) == 9,
+            "File::Read did not fill from the buffer's current position");
+    char payload[7];
+    cpu.read_mem(pixels + 2, payload, sizeof payload);
+    require(std::memcmp(payload, "payload", sizeof payload) == 0, "save-file round trip changed bytes");
+    call(cpu, "_ZN3Osp2Io4FileD1Ev", {file});
+    call(cpu, "_ZN3Osp4Base10ByteBufferD1Ev", {buffer});
+    for (const auto object : {temporary, saved, mode}) call(cpu, "_ZN3Osp4Base6StringD1Ev", {object});
+    for (const auto object : {file, temporary, saved, mode, buffer, source}) cpu.free(object);
+}
+
 void directory_test(Cpu& cpu, const std::filesystem::path& package) {
     std::filesystem::create_directories(package / "Data");
     std::ofstream(package / "Data/Game.s3e") << "package";
@@ -319,6 +366,7 @@ int main() {
         file_test(cpu, package);
         text_mode_test(cpu, package);
         descriptor_test(cpu, package);
+        buffer_save_test(cpu, package);
         directory_test(cpu, package);
         SDL_Quit();
         std::filesystem::remove_all(package);
